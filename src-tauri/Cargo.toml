@@ -1,0 +1,29 @@
+[package]
+name = "artefact-cataloguer"
+version = "1.0.0"
+description = "AI-assisted museum cataloguing desktop app"
+authors = ["Artefact Cataloguer"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "artefact_cataloguer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+thiserror = "1"
+
+[features]
+# By default Tauri ships a smaller binary without custom protocol overhead we don't need.
+default = []
