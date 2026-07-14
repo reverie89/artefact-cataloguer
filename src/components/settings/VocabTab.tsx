@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
+import { UnsavedBadge } from "./UnsavedBadge";
+import { ExpandCollapseAll } from "./ExpandCollapseAll";
 
 interface Props {
   state: AppState;
@@ -44,6 +46,11 @@ export function VocabTab({ state, actions }: Props) {
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
         Manage the controlled-vocabulary lists fields can draw terms from. Click a row to rename; drag to reorder.
       </div>
+
+      <ExpandCollapseAll
+        onExpandAll={() => actions.setAllExpanded("settingsVocabExpanded", live.vocabularyLists.map((v) => v.id), true)}
+        onCollapseAll={() => actions.setAllExpanded("settingsVocabExpanded", live.vocabularyLists.map((v) => v.id), false)}
+      />
 
       <Card className="gap-0 overflow-hidden p-0">
         <div className="bg-muted/30 grid grid-cols-[24px_1fr_36px] gap-2.5 border-b px-3.5 py-1.75">
@@ -132,6 +139,7 @@ function SortableVocabRow({ vl, expanded, dirty, cardStatus, liveFields, actions
             <div className="truncate text-[15px] font-medium">{displayName(vl)}</div>
             <div className="text-muted-foreground truncate text-[11px]">{vl.filename}</div>
           </div>
+          <UnsavedBadge dirty={dirty} />
         </div>
         <Button
           onClick={(e) => { e.stopPropagation(); void actions.removeVocabList(vl.id); }}

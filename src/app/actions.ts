@@ -85,6 +85,11 @@ export interface AppActions {
   clearField(key: string): void;
   setOpenFieldValue(key: string, val: string): void;
 
+  // settings: shared across the Fields/Vocab/Artefact File card-list tabs
+  /** Bulk-set every given id's expanded state within one of the three
+   *  per-tab expanded maps. Backs the shared Expand all/Collapse all controls. */
+  setAllExpanded(scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded", ids: string[], expanded: boolean): void;
+
   // settings: fields
   toggleSF(id: string): void;
   /** Reorder catalogue fields to the given id sequence (result of a drag). Persists immediately. */
@@ -723,6 +728,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   );
   const clearField = useCallback((key: string) => dispatch({ type: "CLEAR_FIELD", key }), [dispatch]);
   const setOpenFieldValue = useCallback((key: string, val: string) => dispatch({ type: "SET_OPEN_VALUE", key, value: val }), [dispatch]);
+
+  // --- settings: shared across card-list tabs ---
+  const setAllExpanded = useCallback(
+    (scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded", ids: string[], expanded: boolean) =>
+      dispatch({ type: "SET_ALL_EXPANDED", scope, ids, expanded }),
+    [dispatch]
+  );
 
   // --- settings: fields ---
   const toggleSF = useCallback((id: string) => dispatch({ type: "TOGGLE_SF", id }), [dispatch]);
@@ -1408,6 +1420,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [patch]);
 
   return {
+    setAllExpanded,
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
     onUploadClick, addAnotherFile, onDragOver, onDragLeave, onDrop, removeFile, startParse, pauseParse, resumeParse, cancelParse, dismissParseError, resetUpload, retryRow, stopRow, retryAllFailed, onResizeStart,
     toggleRow, setFilter, setSearch, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
