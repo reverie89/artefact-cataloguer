@@ -47,9 +47,12 @@ export function Segmented({ options, value, onChange }: SegmentedProps) {
  *  so the label/spacing/hint placement is identical wherever a field is reused.
  *  `action` renders a top-right affordance beside the label (e.g. the Preview /
  *  Override buttons on the prose cards) — keeping the field's own header markup
- *  here rather than hand-rolling it per card. */
+ *  here rather than hand-rolling it per card. `labelSuffix` renders immediately
+ *  after the label text itself (e.g. an "Optional" chip) — unlike `action`, it
+ *  stays visually attached to the label instead of floating to the far right. */
 interface FieldProps {
   label: string;
+  labelSuffix?: ReactNode;
   hint?: ReactNode;
   desc?: ReactNode;
   action?: ReactNode;
@@ -57,20 +60,26 @@ interface FieldProps {
   children?: ReactNode;
 }
 
-export function Field({ label, hint, desc, action, className, children }: FieldProps) {
+export function Field({ label, labelSuffix, hint, desc, action, className, children }: FieldProps) {
+  const labelRow = (
+    <div className="flex items-center gap-1.5">
+      <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">{label}</Label>
+      {labelSuffix}
+    </div>
+  );
   return (
     <div className={cn("flex flex-col gap-1", className)}>
       {action ? (
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-col gap-1">
-            <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">{label}</Label>
+            {labelRow}
             {desc && <div className="text-muted-foreground text-xs leading-snug">{desc}</div>}
           </div>
           {action}
         </div>
       ) : (
         <>
-          <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">{label}</Label>
+          {labelRow}
           {desc && <div className="text-muted-foreground text-xs leading-snug">{desc}</div>}
         </>
       )}
@@ -90,13 +99,17 @@ interface FieldInputProps {
   disabled?: boolean;
   hint?: ReactNode;
   desc?: ReactNode;
+  /** Chip/tag rendered immediately next to the label (e.g. "Optional"). */
+  labelSuffix?: ReactNode;
+  /** Top-right affordance beside the label row (e.g. a button). */
+  action?: ReactNode;
   ariaLabel?: string;
   className?: string;
 }
 
-export function FieldInput({ label, value, onChange, placeholder, type, disabled, hint, desc, ariaLabel, className }: FieldInputProps) {
+export function FieldInput({ label, value, onChange, placeholder, type, disabled, hint, desc, labelSuffix, action, ariaLabel, className }: FieldInputProps) {
   return (
-    <Field label={label} hint={hint} desc={desc}>
+    <Field label={label} labelSuffix={labelSuffix} hint={hint} desc={desc} action={action}>
       <Input
         value={value}
         onChange={onChange}

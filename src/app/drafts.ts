@@ -99,9 +99,9 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
     case "artefactFile": {
       const d = state.artefactDraft;
       if (!d) return false;
-      const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "" }));
-      const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "" }));
-      return differByOrder(draftFields, savedFields, ["id", "name", "required", "description"]);
+      const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", includeForAI: f.includeForAI ?? true }));
+      const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", includeForAI: f.includeForAI ?? true }));
+      return differByOrder(draftFields, savedFields, ["id", "name", "required", "description", "includeForAI"]);
     }
     case "about":
     default:

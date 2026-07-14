@@ -11,6 +11,9 @@ export interface ArtefactField {
   name: string;
   required: boolean;
   description: string;
+  /** Whether this column's value is sent to the AI in the cataloguing prompt.
+   *  Optional; columns saved before this field existed default to included. */
+  includeForAI?: boolean;
 }
 
 /** A catalogue field the AI extracts per artefact. */

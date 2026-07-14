@@ -65,19 +65,20 @@ export function ArtefactFileTab({ state, actions }: Props) {
 
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Define the columns the artefact spreadsheet must provide. Click a row to edit its name, requirement, or description.
-      </div>
-
-      {/* Required-format explanation — reads like FieldsTab's Part-1 context card. */}
+      {/* File-format + per-column behaviour explanation — reads like FieldsTab's Part-1 context card. */}
       <Card className="gap-0 py-0">
         <div className="flex flex-col gap-2 px-4 py-3.5">
           <div className="flex items-center gap-2 text-sm font-semibold">
-            <FileText className="size-4 text-primary" /><span>Required File Format</span>
+            <FileText className="size-4 text-primary" /><span>File Format &amp; Columns</span>
           </div>
           <div className="text-muted-foreground text-[13px] leading-relaxed">
-            The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row. Required columns must be present even if some cells are empty. Additional columns are allowed and appear in the source record panel.
+            The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
+          <ul className="text-muted-foreground list-disc space-y-1 pl-4 text-[13px] leading-relaxed">
+            <li><strong className="text-foreground">Required</strong> — the column must be present when the file is parsed, even if some cells are empty.</li>
+            <li><strong className="text-foreground">Include for AI</strong> — controls whether the column's values are sent to the AI in the cataloguing prompt.</li>
+            <li>Excluded or additional (unconfigured) columns are still parsed and always appear in the source record panel.</li>
+          </ul>
         </div>
       </Card>
 
@@ -93,9 +94,9 @@ export function ArtefactFileTab({ state, actions }: Props) {
             {live.artefactFields.map((af) => {
               const saved = (settings.artefactFields || _DEF_AF).find((s) => s.id === af.id);
               const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
-                { ...af, description: af.description ?? "" },
-                { ...saved, description: saved.description ?? "" },
-                ["id", "name", "required", "description"],
+                { ...af, description: af.description ?? "", includeForAI: af.includeForAI ?? true },
+                { ...saved, description: saved.description ?? "", includeForAI: saved.includeForAI ?? true },
+                ["id", "name", "required", "description", "includeForAI"],
               ));
               return (
                 <ArtefactColumnRow
@@ -126,7 +127,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
 /** A single artefact-column row. Clicking anywhere on the row toggles the
  *  editor (mirrors FieldsTab's SortableFieldRow). */
 interface ArtefactColumnRowProps {
-  field: { id: string; name: string; required: boolean; description: string };
+  field: { id: string; name: string; required: boolean; description: string; includeForAI?: boolean };
   expanded: boolean;
   /** Whether this column has unsaved content edits. */
   dirty: boolean;
@@ -172,11 +173,19 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             label="Column Name"
             value={af.name}
             onChange={(e) => actions.updateAF(af.id, "name", e.target.value)}
+            desc="Must match a column header in the uploaded spreadsheet (case-insensitive)."
           />
-          <Field label="Required?">
+          <Field label="Required?" desc="Whether this column must be present when the file is parsed, even if some cells are empty.">
             <Segmented
               value={af.required ? "yes" : "no"}
               onChange={(v) => actions.updateAF(af.id, "required", v === "yes")}
+              options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
+            />
+          </Field>
+          <Field label="Include for AI?" desc="Whether this column's values are sent to the AI in the cataloguing prompt.">
+            <Segmented
+              value={af.includeForAI === false ? "no" : "yes"}
+              onChange={(v) => actions.updateAF(af.id, "includeForAI", v === "yes")}
               options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
             />
           </Field>
@@ -185,6 +194,8 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             value={af.description}
             onChange={(e) => actions.updateAF(af.id, "description", e.target.value)}
             placeholder="What does this column contain?"
+            desc="Internal note about this column, shown in the columns list — not sent to the AI."
+            labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
           />
           {/* Per-card actions: Delete/Discard/Save target only this column.
               Delete buffers into the draft (flushed by the Apply banner). */}
