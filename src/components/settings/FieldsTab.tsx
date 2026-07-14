@@ -26,6 +26,8 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
+import { UnsavedBadge } from "./UnsavedBadge";
+import { ExpandCollapseAll } from "./ExpandCollapseAll";
 
 interface Props {
   state: AppState;
@@ -171,6 +173,11 @@ export function FieldsTab({ state, actions }: Props) {
         </div>
       </Card>
 
+      <ExpandCollapseAll
+        onExpandAll={() => actions.setAllExpanded("settingsFieldExpanded", live.fields.map((f) => f.id), true)}
+        onCollapseAll={() => actions.setAllExpanded("settingsFieldExpanded", live.fields.map((f) => f.id), false)}
+      />
+
       <Card className="gap-0 overflow-hidden p-0">
         <div className="bg-muted/30 grid grid-cols-[24px_1fr_130px] gap-2.5 border-b px-3.5 py-1.75">
           <span />
@@ -243,7 +250,10 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
         >
           <GripVertical className="size-3.5" />
         </div>
-        <span className="text-[15px] font-semibold">{f.name || "Untitled field"}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[15px] font-semibold">{f.name || "Untitled field"}</span>
+          <UnsavedBadge dirty={dirty} />
+        </div>
         <Badge variant={f.type === "vocab" ? "default" : "secondary"} className="w-fit tracking-[0.04em]">
           {f.type === "vocab" ? "Controlled Vocab" : "Open-ended"}
         </Badge>

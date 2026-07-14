@@ -273,7 +273,8 @@ export type Action =
   | { type: "TOGGLE_AF"; id: string }
   | { type: "PATCH_ARTEFACT_DRAFT"; patch: (d: ArtefactDraft) => ArtefactDraft }
   | { type: "CLEAR_ARTEFACT_DRAFT" }
-  | { type: "SET_ARTEFACT_CARD_STATUS"; id: string; status: SaveState };
+  | { type: "SET_ARTEFACT_CARD_STATUS"; id: string; status: SaveState }
+  | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded"; ids: string[]; expanded: boolean };
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -533,6 +534,9 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, artefactDraft: null };
     case "SET_ARTEFACT_CARD_STATUS":
       return { ...state, artefactCardSaveStatus: { ...state.artefactCardSaveStatus, [action.id]: action.status } };
+
+    case "SET_ALL_EXPANDED":
+      return { ...state, [action.scope]: Object.fromEntries(action.ids.map((id) => [id, action.expanded])) };
 
     default:
       return state;

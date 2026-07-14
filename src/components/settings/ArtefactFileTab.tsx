@@ -14,6 +14,8 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
+import { UnsavedBadge } from "./UnsavedBadge";
+import { ExpandCollapseAll } from "./ExpandCollapseAll";
 
 interface Props {
   state: AppState;
@@ -81,6 +83,11 @@ export function ArtefactFileTab({ state, actions }: Props) {
           </ul>
         </div>
       </Card>
+
+      <ExpandCollapseAll
+        onExpandAll={() => actions.setAllExpanded("artefactFieldExpanded", live.artefactFields.map((f) => f.id), true)}
+        onCollapseAll={() => actions.setAllExpanded("artefactFieldExpanded", live.artefactFields.map((f) => f.id), false)}
+      />
 
       <Card className="gap-0 overflow-hidden p-0">
         <div className="bg-muted/30 grid grid-cols-[24px_1fr_120px_1fr] gap-2.5 border-b px-3.5 py-1.75">
@@ -161,7 +168,10 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
         >
           <GripVertical className="size-3.5" />
         </div>
-        <span className="text-[15px] font-semibold">{af.name || "Untitled column"}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[15px] font-semibold">{af.name || "Untitled column"}</span>
+          <UnsavedBadge dirty={dirty} />
+        </div>
         <Badge variant={af.required ? "default" : "secondary"} className="w-fit tracking-[0.04em]">
           {af.required ? "Required" : "Optional"}
         </Badge>
