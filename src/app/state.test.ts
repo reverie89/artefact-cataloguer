@@ -3,6 +3,31 @@ import { describe, expect, it } from "vitest";
 import { initialState, providerDraftFromSettings, reducer } from "./state";
 import type { Settings } from "./types";
 
+describe("reducer TOGGLE_FIELD_VALUE", () => {
+  it("builds up a multi-select and joins values with ' | ' for display/export", () => {
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "Materials", confidence: null });
+
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", confidence: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "multi", value: "clay | glaze", values: ["clay", "glaze"], listName: "", confidence: null });
+  });
+
+  it("toggling an already-selected value removes it, falling back to a single selection", () => {
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", confidence: null });
+
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "glaze", values: ["glaze"], listName: "Materials", confidence: null });
+  });
+
+  it("removing the last remaining value clears the field selection entirely", () => {
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+
+    expect(s.fieldSelections.u1_material).toBeUndefined();
+  });
+});
+
 describe("reducer", () => {
   it("updates the active settings tab", () => {
     const next = reducer(initialState, { type: "SET_TAB", tab: "ai" });
@@ -36,7 +61,7 @@ describe("reducer", () => {
       results: [{ uid: "u1", id: "A1", title: "Cup", category: "Ceramics", status: "done" as const, record: {} }],
       aiResults: { u1: { material: [{ value: "clay", confidence: 0.8 }] } },
       expandedRows: { u1: true },
-      fieldSelections: { u1_material: { source: "ai", value: "clay", listName: "AI", confidence: 0.8 } },
+      fieldSelections: { u1_material: { source: "ai", value: "clay", values: ["clay"], listName: "AI", confidence: 0.8 } },
       fieldDropdownOpen: { u1_material: true },
       fieldDropdownSearch: { u1_material: "cl" },
       resultsFilter: "done",

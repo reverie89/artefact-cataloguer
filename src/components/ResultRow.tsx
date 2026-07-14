@@ -1,4 +1,4 @@
-import { Ban, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Plus, RotateCcw, Search, X, XCircle, Zap } from "lucide-react";
+import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Plus, RotateCcw, Search, X, XCircle, Zap } from "lucide-react";
 import { useState } from "react";
 import type { AppActions } from "../app/actions";
 import type { AppState } from "../app/state";
@@ -227,6 +227,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
   const vocabTerms = field.type === "vocab" ? vterms(field, state.settings.vocabularyLists) : [];
   const vocabTermMap = new Map(vocabTerms.map((vt) => [vt.term.toLowerCase(), vt.listName]));
   const aiValues = new Set(aiSugs.map((s) => s.value.toLowerCase()));
+  const selectedValues = new Set((sel?.values || []).map((v) => v.toLowerCase()));
 
   const aiItems = aiSugs
     .filter((s) => !srch || s.value.toLowerCase().includes(srch))
@@ -235,21 +236,29 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
       pct: Math.round(s.confidence * 100) + "%",
       confidence: s.confidence,
       sourceName: field.type === "vocab" ? vocabTermMap.get(s.value.toLowerCase()) || "" : "AI",
-      onPick: () => actions.selectField(fieldKey, s.value, "ai", "AI", s.confidence),
+      selected: selectedValues.has(s.value.toLowerCase()),
+      onPick: () => actions.toggleFieldValue(fieldKey, s.value, "ai", "AI", s.confidence),
     }));
   const vocabItems = vocabTerms
     .filter((vt) => !aiValues.has(vt.term.toLowerCase()) && (!srch || vt.term.toLowerCase().includes(srch)))
     .sort((a, b) => a.term.localeCompare(b.term))
-    .map((vt) => ({ value: vt.term, sourceName: vt.listName, onPick: () => actions.selectField(fieldKey, vt.term, "vocab", vt.listName, null) }));
+    .map((vt) => ({
+      value: vt.term,
+      sourceName: vt.listName,
+      selected: selectedValues.has(vt.term.toLowerCase()),
+      onPick: () => actions.toggleFieldValue(fieldKey, vt.term, "vocab", vt.listName, null),
+    }));
 
   const hasExact = aiItems.some((i) => i.value.toLowerCase() === search.toLowerCase()) || vocabItems.some((i) => i.value.toLowerCase() === search.toLowerCase());
   const showUseTyped = search.trim().length > 0 && !hasExact;
   const selBadge = sel
-    ? sel.source === "ai"
-      ? `AI · ${sel.confidence ? Math.round(sel.confidence * 100) + "%" : ""}`.trim()
-      : sel.source === "manual"
-        ? "Custom"
-        : sel.listName || "Vocab"
+    ? sel.values.length > 1
+      ? `${sel.values.length} selected`
+      : sel.source === "ai"
+        ? `AI · ${sel.confidence ? Math.round(sel.confidence * 100) + "%" : ""}`.trim()
+        : sel.source === "manual"
+          ? "Custom"
+          : sel.listName || "Vocab"
     : "";
 
   return (
@@ -309,8 +318,8 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
 interface DropdownBodyProps {
   fieldKey: string;
   search: string;
-  aiItems: { value: string; pct: string; sourceName: string; onPick: () => void }[];
-  vocabItems: { value: string; sourceName: string; onPick: () => void }[];
+  aiItems: { value: string; pct: string; sourceName: string; selected: boolean; onPick: () => void }[];
+  vocabItems: { value: string; sourceName: string; selected: boolean; onPick: () => void }[];
   showUseTyped: boolean;
   hasSelection: boolean;
   actions: AppActions;
@@ -341,7 +350,10 @@ function DropdownBody({ fieldKey, search, aiItems, vocabItems, showUseTyped, has
               <span className="size-2.5 text-primary" />AI Suggestions
             </div>
             {aiItems.map((ai, i) => (
-              <div key={i} onClick={ai.onPick} className="border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75">
+              <div key={i} onClick={ai.onPick} className={cn("border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75", ai.selected && "bg-primary/5")}>
+                <span className="flex size-3.5 shrink-0 items-center justify-center">
+                  {ai.selected && <Check className="text-primary size-3" />}
+                </span>
                 <span className="flex-1 text-sm">{ai.value}</span>
                 <Badge variant="default" className="text-[10px]">AI</Badge>
                 <div className="bg-border h-0.5 w-9 shrink-0 overflow-hidden rounded-full">
@@ -357,7 +369,10 @@ function DropdownBody({ fieldKey, search, aiItems, vocabItems, showUseTyped, has
           <>
             <div className="bg-muted/30 text-muted-foreground px-2.5 pb-0.75 pt-1 text-[11px] uppercase tracking-[0.08em]">Vocabulary</div>
             {vocabItems.map((vi, i) => (
-              <div key={i} onClick={vi.onPick} className="border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75">
+              <div key={i} onClick={vi.onPick} className={cn("border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75", vi.selected && "bg-primary/5")}>
+                <span className="flex size-3.5 shrink-0 items-center justify-center">
+                  {vi.selected && <Check className="text-primary size-3" />}
+                </span>
                 <span className="flex-1 text-sm">{vi.value}</span>
                 <span className="text-muted-foreground max-w-32.5 shrink-0 truncate text-[11px]">{vi.sourceName}</span>
               </div>
@@ -365,7 +380,7 @@ function DropdownBody({ fieldKey, search, aiItems, vocabItems, showUseTyped, has
           </>
         )}
         {showUseTyped && (
-          <div onClick={() => actions.selectField(fieldKey, search.trim(), "manual", "", null)} className="border-border/60 text-primary flex cursor-pointer items-center gap-1.5 border-b px-2.5 py-1.75 text-sm">
+          <div onClick={() => actions.toggleFieldValue(fieldKey, search.trim(), "manual", "", null)} className="border-border/60 text-primary flex cursor-pointer items-center gap-1.5 border-b px-2.5 py-1.75 text-sm">
             <Plus className="size-3" /><span>Use &quot;{search.trim()}&quot;</span>
           </div>
         )}
