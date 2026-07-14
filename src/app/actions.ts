@@ -80,7 +80,8 @@ export interface AppActions {
   exportResults(): Promise<void>;
   onTriggerClick(key: string): void;
   setFieldSearch(key: string, val: string): void;
-  selectField(key: string, value: string, source: "ai" | "vocab" | "manual" | "open", listName: string, confidence: number | null): void;
+  /** Toggle a vocab term in/out of a field's selection set (multi-select). */
+  toggleFieldValue(key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, confidence: number | null): void;
   clearField(key: string): void;
   setOpenFieldValue(key: string, val: string): void;
 
@@ -713,9 +714,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     [state.fieldDropdownOpen, dispatch]
   );
   const setFieldSearch = useCallback((key: string, val: string) => dispatch({ type: "SET_FIELD_SEARCH", key, value: val }), [dispatch]);
-  const selectField = useCallback(
-    (key: string, value: string, source: "ai" | "vocab" | "manual" | "open", listName: string, confidence: number | null) =>
-      dispatch({ type: "SELECT_FIELD", key, selection: { source, value, listName, confidence } }),
+  const toggleFieldValue = useCallback(
+    (key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, confidence: number | null) =>
+      dispatch({ type: "TOGGLE_FIELD_VALUE", key, value, source, listName, confidence }),
     [dispatch]
   );
   const clearField = useCallback((key: string) => dispatch({ type: "CLEAR_FIELD", key }), [dispatch]);
@@ -1407,7 +1408,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   return {
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
     onUploadClick, addAnotherFile, onDragOver, onDragLeave, onDrop, removeFile, startParse, pauseParse, resumeParse, cancelParse, dismissParseError, resetUpload, retryRow, stopRow, retryAllFailed, onResizeStart,
-    toggleRow, setFilter, setSearch, exportResults, onTriggerClick, setFieldSearch, selectField, clearField, setOpenFieldValue,
+    toggleRow, setFilter, setSearch, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, updateSystemPromptInstruction, updateSystemPromptContract, setContractEditing, overrideContract, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, saveSystemInstruction, discardSystemInstruction, saveContract, discardContract, startAddField, toggleProv,
     onVocabClick, onVocabDragOver, onVocabDragLeave, onVocabDrop, removeVocabList, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard,
     startAddProv, setProvF, setProvModel, setProvApiFormat, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,

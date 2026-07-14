@@ -239,7 +239,14 @@ export type Action =
   | { type: "SET_FIELD_SEARCH"; key: string; value: string }
   | { type: "OPEN_DD"; key: string }
   | { type: "CLOSE_ALL_DD" }
-  | { type: "SELECT_FIELD"; key: string; selection: FieldSelection }
+  | {
+      type: "TOGGLE_FIELD_VALUE";
+      key: string;
+      value: string;
+      source: "ai" | "vocab" | "manual";
+      listName: string;
+      confidence: number | null;
+    }
   | { type: "CLEAR_FIELD"; key: string }
   | { type: "SET_OPEN_VALUE"; key: string; value: string }
   | { type: "SET_SETTINGS"; settings: Settings }
@@ -353,7 +360,7 @@ export function reducer(state: AppState, action: Action): AppState {
           if (fieldSelections[key]) continue;
           const top = action.ai[field.name]?.[0];
           if (!top) continue;
-          additions[key] = { source: "ai", value: top.value, listName: "AI", confidence: top.confidence };
+          additions[key] = { source: "ai", value: top.value, values: [top.value], listName: "AI", confidence: top.confidence };
         }
         if (Object.keys(additions).length > 0) {
           fieldSelections = { ...fieldSelections, ...additions };
@@ -388,13 +395,29 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, fieldDropdownOpen: { [action.key]: true } };
     case "CLOSE_ALL_DD":
       return { ...state, fieldDropdownOpen: {} };
-    case "SELECT_FIELD":
-      return {
-        ...state,
-        fieldSelections: { ...state.fieldSelections, [action.key]: action.selection },
-        fieldDropdownOpen: {},
-        fieldDropdownSearch: { ...state.fieldDropdownSearch, [action.key]: "" },
-      };
+    case "TOGGLE_FIELD_VALUE": {
+      // Vocab-type fields are multi-select: picking an already-selected term
+      // removes it, anything else is appended. The dropdown stays open (no
+      // fieldDropdownOpen reset) so several terms can be picked in one go.
+      const existing = state.fieldSelections[action.key];
+      const values = existing ? existing.values.slice() : [];
+      const idx = values.findIndex((v) => v.toLowerCase() === action.value.toLowerCase());
+      if (idx >= 0) {
+        values.splice(idx, 1);
+      } else {
+        values.push(action.value);
+      }
+      if (values.length === 0) {
+        const fs = { ...state.fieldSelections };
+        delete fs[action.key];
+        return { ...state, fieldSelections: fs };
+      }
+      const selection: FieldSelection =
+        values.length > 1
+          ? { source: "multi", value: values.join(" | "), values, listName: "", confidence: null }
+          : { source: action.source, value: values[0], values, listName: action.listName, confidence: action.confidence };
+      return { ...state, fieldSelections: { ...state.fieldSelections, [action.key]: selection } };
+    }
     case "CLEAR_FIELD": {
       const fs = { ...state.fieldSelections };
       delete fs[action.key];
@@ -405,7 +428,7 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         fieldSelections: {
           ...state.fieldSelections,
-          [action.key]: { source: "open", value: action.value, listName: "", confidence: null },
+          [action.key]: { source: "open", value: action.value, values: [action.value], listName: "", confidence: null },
         },
       };
 

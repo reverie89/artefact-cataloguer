@@ -98,8 +98,16 @@ export interface AiSuggestion {
 export type AiResults = Record<string, Record<string, AiSuggestion[]>>;
 
 export interface FieldSelection {
-  source: "ai" | "vocab" | "manual" | "open";
+  /** "multi" marks a vocab-type field with more than one term picked — its
+   *  per-term source/listName/confidence no longer apply to the selection as
+   *  a whole. */
+  source: "ai" | "vocab" | "manual" | "open" | "multi";
+  /** Display/export value — the selected term, or every selected term joined
+   *  with " | " once more than one is picked. */
   value: string;
+  /** Every selected value in pick order. Vocab-type fields may hold several;
+   *  other field types always hold exactly one, matching `value`. */
+  values: string[];
   listName: string;
   confidence: number | null;
 }
