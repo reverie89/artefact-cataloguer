@@ -44,6 +44,7 @@ const ArtefactFieldSchema = z.object({
   name: z.string(),
   required: z.boolean(),
   description: z.string(),
+  includeForAI: z.boolean().optional(),
 });
 
 /**

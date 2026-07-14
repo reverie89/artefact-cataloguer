@@ -12,7 +12,7 @@ import { artefactDraftFromSettings, providerDraftFromSettings, vocabDraftFromSet
 import { _DEF_AF, _DEF_SYSTEM_PROMPT_CONTRACT, fmt, gid } from "./defaults";
 import type { ApiFormat, ArtefactField, ArtefactRow, CatalogueField, FieldType, Provider, Settings, SettingsTab } from "./types";
 import { isTabDirty } from "./drafts";
-import { parseArtefactFile, makeVocabList, roleFieldNames } from "../lib/spreadsheet";
+import { parseArtefactFile, makeVocabList, roleFieldNames, aiRecord } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
 import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, activeProvider } from "../lib/ai";
 import { pushLog } from "../lib/logs";
@@ -480,19 +480,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       // terminal outcome (populated/failed).
       const jobId = `row-${row.uid}`;
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
+      const filteredRecord = aiRecord(row.record, state.settings.artefactFields || []);
       pushLog({
         status: "busy",
         jobId,
         label: `Now parsing row ID ${i + 1}`,
         detail: row.id ? `Obj. Number ${row.id}` : row.title,
-        verbose: { record: row.record || {} },
+        verbose: { record: filteredRecord },
       });
       await delay(200); // brief tick so the UI shows processing
 
       const rowStart = performance.now();
       let ai: Record<string, { value: string; confidence: number }[]>;
       try {
-        ai = await catalogueArtefact(prov, state.settings.fields, row.record || {}, row.imagePath, state.settings, `row-${row.uid}`);
+        ai = await catalogueArtefact(prov, state.settings.fields, filteredRecord, row.imagePath, state.settings, `row-${row.uid}`);
       } catch (e) {
         const message = String((e as Error)?.message || e);
         // A per-row Stop cancels only this row: mark it cancelled and carry on
@@ -590,17 +591,18 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
     const jobId = `row-${row.uid}`;
     dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
+    const filteredRecord = aiRecord(row.record, state.settings.artefactFields || []);
     pushLog({
       status: "busy",
       jobId,
       label: "Retrying row",
       detail: row.id ? `Obj. Number ${row.id}` : row.title,
-      verbose: { record: row.record || {} },
+      verbose: { record: filteredRecord },
     });
 
     const start = performance.now();
     try {
-      const ai = await catalogueArtefact(prov, state.settings.fields, row.record || {}, row.imagePath, state.settings, `row-${row.uid}`);
+      const ai = await catalogueArtefact(prov, state.settings.fields, filteredRecord, row.imagePath, state.settings, `row-${row.uid}`);
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "done", ai });
       pushLog({
         status: "ok",

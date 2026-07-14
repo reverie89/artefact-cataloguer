@@ -42,6 +42,21 @@ export function roleFieldNames(afFields: ArtefactField[]): { id?: string; title?
   };
 }
 
+/**
+ * Filter a parsed row's record down to only the columns configured for AI
+ * inclusion. `record` (on ArtefactRow) stays full for display purposes (the
+ * source record panel); this is applied only where the record is handed to
+ * the AI, so an excluded column still parses and still displays, it just
+ * never reaches the prompt. Matches column names case-insensitively against
+ * configured fields, mirroring roleFieldNames' matching style.
+ */
+export function aiRecord(record: Record<string, string> | undefined, afFields: ArtefactField[]): Record<string, string> {
+  if (!record) return {};
+  const excluded = new Set(afFields.filter((f) => f.includeForAI === false).map((f) => f.name.toLowerCase()));
+  if (!excluded.size) return record;
+  return Object.fromEntries(Object.entries(record).filter(([k]) => !excluded.has(k.toLowerCase())));
+}
+
 /** Parse a .xlsx artefact workbook into artefact rows. */
 export async function parseArtefactFile(file: File, settings: Settings): Promise<ParsedArtefactFile> {
   const buf = await file.arrayBuffer();
