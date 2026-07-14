@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Eye, GripVertical, Plus, X } from "lucide-react";
+import { AlertTriangle, Eye, GripVertical, Plus, X } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { _DEF_SYSTEM_PROMPT_CONTRACT } from "../../app/defaults";
@@ -300,6 +300,10 @@ interface FieldEditorProps {
 function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRemoveSource }: FieldEditorProps) {
   const sources = field.vocabSources || [];
   const available = lists.filter((v) => !sources.includes(v.id));
+  // Radix keeps the last-selected item's label displayed even after it's
+  // filtered out of `available`, leaving the trigger blank. Remounting via a
+  // changing `key` resets it back to uncontrolled/placeholder state each add.
+  const [addKey, setAddKey] = useState(0);
   return (
     <>
       <FieldInput
@@ -320,7 +324,15 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
       </Field>
       {field.type === "vocab" && (
         <div className="flex flex-col gap-1.25">
-          <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">Vocabulary Sources</Label>
+          <div className="flex items-center gap-1.5">
+            <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">Vocabulary Sources</Label>
+            {sources.length === 0 && (
+              <Badge variant="destructive" className="gap-1 text-[10px] font-normal tracking-[0.04em]">
+                <AlertTriangle className="size-2.5" />
+                No source added
+              </Badge>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-1.25">
             {sources.map((sid) => {
               const vl = lists.find((v) => v.id === sid);
@@ -333,8 +345,8 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
               );
             })}
             {available.length > 0 && (
-              <Select onValueChange={(v) => { if (v) onAddSource(v); }}>
-                <SelectTrigger className="bg-primary/10 text-primary border-primary/30 h-8 w-auto gap-1 text-sm">
+              <Select key={addKey} onValueChange={(v) => { if (v) onAddSource(v); setAddKey((k) => k + 1); }}>
+                <SelectTrigger className="text-muted-foreground h-8 w-auto gap-1 text-[13px]">
                   <SelectValue placeholder="+ Add source" />
                 </SelectTrigger>
                 <SelectContent>
