@@ -2,22 +2,18 @@ import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
 
 import { parseArtefactFile } from "./spreadsheet";
+import { _DEF } from "../app/defaults";
 import type { Settings } from "../app/types";
 
 /** Minimal settings: only artefactFields is consulted by parseArtefactFile. */
 function settings(fieldNames: string[]): Settings {
   return {
-    systemPromptInstruction: "",
-    systemPromptContractOverride: "",
-    fields: [],
-    vocabularyLists: [],
-    providers: [],
-    activeProvider: null,
+    ..._DEF(),
     artefactFields: fieldNames.map((name, i) => ({
       id: `af${i + 1}`,
       name,
-      required: ["Obj. Number", "Title", "Category"].includes(name),
       description: "",
+      prompt: "",
     })),
   };
 }

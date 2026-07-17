@@ -200,6 +200,7 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
             label="Base URL"
+            desc="The API root URL for this provider, without a trailing path."
             hint={entry.baseUrl.trim() ? (
               <>POST <code className="text-foreground">{providerEndpoints(entry).completions}</code></>
             ) : undefined}
@@ -211,14 +212,14 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
             label="API Format"
             value={entry.apiFormat}
             onChange={(v) => actions.setProvApiFormat(id, v as ApiFormat)}
-            hint="Determines the auth scheme and endpoint paths."
+            desc="Determines the auth scheme and endpoint paths."
           >
             <FieldSelectOption value="openai">OpenAI</FieldSelectOption>
             <FieldSelectOption value="anthropic">Anthropic</FieldSelectOption>
             <FieldSelectOption value="gemini">Gemini</FieldSelectOption>
           </FieldSelect>
 
-          <Field label="API Key">
+          <Field label="API Key" desc="Sent with each request to authenticate — stored locally, never shared.">
             <div className="flex gap-1.5">
               <Input type={showProvKey ? "text" : "password"} value={entry.apiKey} onChange={(e) => actions.setProvF(id, "apiKey", e)} placeholder="sk-…" />
               <Button
@@ -247,6 +248,7 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
             onChange={(v) => actions.setProvModel(id, v)}
             disabled={!modelsReady}
             ariaLabel="Model"
+            desc="The model used for cataloguing requests, populated by Test Connection."
             placeholder={modelsReady ? (entry.model ? undefined : "Select a model…") : "Available after Test Connection"}
           >
             {modelOptions.map((m) => (

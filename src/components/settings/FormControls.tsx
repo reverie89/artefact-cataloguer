@@ -22,7 +22,7 @@ interface SegmentedProps {
 
 export function Segmented({ options, value, onChange }: SegmentedProps) {
   return (
-    <div className="bg-muted inline-flex rounded-md border p-0.5">
+    <div className="bg-muted inline-flex w-fit rounded-md border p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
@@ -134,12 +134,13 @@ interface FieldTextareaProps {
   readOnly?: boolean;
   hint?: ReactNode;
   desc?: ReactNode;
+  labelSuffix?: ReactNode;
   className?: string;
 }
 
-export function FieldTextarea({ label, value, onChange, placeholder, rows, disabled, readOnly, hint, desc, className }: FieldTextareaProps) {
+export function FieldTextarea({ label, value, onChange, placeholder, rows, disabled, readOnly, hint, desc, labelSuffix, className }: FieldTextareaProps) {
   return (
-    <Field label={label} hint={hint} desc={desc}>
+    <Field label={label} labelSuffix={labelSuffix} hint={hint} desc={desc}>
       <Textarea
         value={value}
         onChange={onChange}

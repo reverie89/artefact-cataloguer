@@ -1,14 +1,36 @@
 //! Cataloguing via the active AI provider, run from Rust so API keys never
 //! reach the renderer and CORS is a non-issue.
 //!
-//! `catalogue_artefact` sends each artefact's source fields and (when present)
-//! its extracted image as **one single prompt** to the active provider, asking
-//! the model to return — for every configured catalogue field at once — a
-//! ranked list of `{value, confidence}` suggestions. Vocab fields are
-//! constrained to the supplied allowed terms.
+//! `catalogue_artefact` catalogues one artefact in a **three-call XML pipeline**
+//! (Call 3 optional, user-toggleable):
 //!
-//! Providers use the OpenAI/Anthropic/Gemini chat-completions API — one
-//! multimodal POST with the image inlined as a content block.
+//!   - **Call 1 (vision, unified prompt)** — image + the artefact record as
+//!     `<artefact_file>` XML + the persona/output-format preamble. The model
+//!     replies in a fixed XML contract: one `<image_description>`, one
+//!     `<extraction field="…">` per controlled-vocab field (field-specific text
+//!     used to search that field's vocab source), and one `<open_field
+//!     field="…">` per open-ended field (the free-text answer, used directly).
+//!   - **Embedding step** — each vocab field's *own* extraction is embedded in
+//!     one batched call and searched against its LanceDB source(s); the top
+//!     `net_count` candidates (default 20) are kept with their cosine scores.
+//!     This per-field embedding is the primary fix for the global-vector
+//!     mis-matches the previous single-description embedding produced.
+//!   - **Call 3 (validation, threaded from Call 1, optional)** — one batched
+//!     call presenting each vocab field's extracted text plus its ≤`net_count`
+//!     candidate **terms** (no cosine, no thesaurus — pure strings). The vision
+//!     model picks up to `shortlist_count` (default 3) verbatim; if none fit it
+//!     returns an empty block and the field is left blank. Rust attaches each
+//!     pick's cosine as `similarity`. When Call 3 is disabled, the cosine
+//!     top-`shortlist_count` is used directly.
+//!
+//! Open-ended fields are filled directly from Call 1 (`similarity` absent);
+//! controlled-vocab fields carry cosine `similarity`. The XML format is used
+//! for both the request payload (the artefact record) and the response, so the
+//! model sees one consistent format.
+//!
+//! Providers use the OpenAI/Anthropic/Gemini chat-completions API — multi-turn
+//! `messages`/`input` arrays, with the image inlined as a content block on the
+//! turn that carries it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -127,7 +149,6 @@ fn redact_string_field(
         map.insert(key.to_string(), Value::String(r));
     }
 }
-
 
 /// Collapse a `data:<mime>;base64,<bytes>` URL to a size marker.
 fn redact_data_url(url: &str) -> String {
@@ -275,16 +296,53 @@ pub struct Provider {
     pub api_format: ApiFormat,
 }
 
-/// One catalogue field the AI must populate.
+/// One catalogue field the AI must populate. For open-ended fields, the model
+/// answers directly in Call 1's `<open_field>` block. For controlled-vocab
+/// fields, the model emits a field-specific `<extraction>` in Call 1; that text
+/// is embedded and searched against `vocab_source_ids` to build a candidate
+/// net, then (optionally) Call 3 validates the net against the image. The vocab
+/// list itself is never sent to the LLM; `similarity` is grounded in cosine.
 #[derive(Deserialize, Clone)]
 pub struct FieldSpec {
     pub name: String,
     #[serde(rename = "type")]
     pub field_type: String,
     pub prompt: String,
-    /// For vocab fields only: the allowed terms.
+    /// Ids of this field's vocab sources whose embedded index is ready for
+    /// server-side retrieval (see `lib/ai.ts` `vocabSourceIdsForRetrieval`).
+    /// Only meaningful for vocab-type fields; open-ended fields leave this empty.
+    #[serde(rename = "vocabSourceIds", default)]
+    pub vocab_source_ids: Vec<String>,
+}
+
+/// The candidate net for one vocab field — produced by per-field embedding
+/// search against that field's own `<extraction>` text. Each candidate carries
+/// its cosine score so Call 3's picks can be stamped with grounded similarity.
+/// When Call 3 is disabled, the top `shortlist_count` candidates (by cosine)
+/// become the field's suggestions directly.
+pub(crate) struct ResolvedVocab {
+    /// Index into the `fields: Vec<FieldSpec>` passed to the resolver — which
+    /// field these candidates belong to.
+    pub field_index: usize,
+    /// The net (≤ net_count), cosine-ranked desc, each with its score.
+    pub candidates: Vec<NetCandidate>,
+}
+
+/// One shortlisted candidate with its cosine score.
+pub(crate) struct NetCandidate {
+    pub term: String,
+    pub score: f32,
+}
+
+/// One configured artefact-file column, as seen by the vision-analysis prompt.
+/// `prompt` is the optional per-column guidance the user edits on the Artefact
+/// File tab; empty means "no field-specific guidance" and is omitted from the
+/// prompt (the column's value still reaches the model via the record).
+#[derive(Deserialize, Clone)]
+pub struct ArtefactColumnSpec {
+    pub name: String,
     #[serde(default)]
-    pub allowed: Vec<String>,
+    pub prompt: String,
 }
 
 /// A single artefact's source record (column → value) plus optional image path.
@@ -296,21 +354,38 @@ pub struct ArtefactInput {
     /// Absolute path to the extracted image file, if any.
     #[serde(rename = "imagePath")]
     pub image_path: Option<String>,
-    /// Part 1 of the system instructions — user-edited context prose, verbatim.
+    /// The unified Call-1 prompt: persona + output-format preamble. The XML
+    /// field enumeration and the `<artefact_file>` record block are appended by
+    /// Rust at runtime, so this field holds only the user-editable prose.
+    #[serde(rename = "visionSystemPrompt", default)]
+    pub vision_system_prompt: String,
+    /// The configured artefact-file columns with their optional per-column
+    /// prompts. Used to seed the per-column guidance block in Call 1.
+    #[serde(rename = "artefactColumns", default)]
+    pub artefact_columns: Vec<ArtefactColumnSpec>,
+    /// **Deprecated** (kept for `settings.json` serde back-compat; the frontend
+    /// no longer sends it). Was Part 1 of the old Call-2 cataloguing instruction.
     #[serde(rename = "systemPrompt", default)]
+    #[allow(dead_code)]
     pub system_prompt: String,
-    /// Part 2 of the system instructions — the read-only output contract the
-    /// parser relies on. The frontend owns the effective string (default or
-    /// override) and passes it here verbatim.
+    /// **Deprecated** (kept for serde back-compat). Was the old JSON output
+    /// contract; replaced by the fixed XML contract now built in Rust.
     #[serde(rename = "systemPromptContract", default)]
+    #[allow(dead_code)]
     pub system_prompt_contract: String,
 }
 
-/// One ranked suggestion returned per field.
+/// One ranked suggestion returned per field. `similarity` is the cosine score
+/// the embedding search assigned to the picked vocab candidate — present
+/// (grounded in vector distance) for controlled-vocab fields, absent for
+/// open-ended fields (never similarity-scored; the answer is taken verbatim
+/// from the model's `<open_field>` reply). Serialized as `similarity`, omitted
+/// from JSON entirely when `None` so open-field suggestions carry no key.
 #[derive(Serialize)]
 pub struct Suggestion {
     pub value: String,
-    pub confidence: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
 }
 
 /// Per-field suggestions: field name → ranked list.
@@ -328,7 +403,7 @@ pub struct ConnectionTest {
     pub models: Vec<String>,
 }
 
-fn trim_trailing_slash(s: &str) -> String {
+pub(crate) fn trim_trailing_slash(s: &str) -> String {
     let t = s.trim_end_matches('/');
     if t.is_empty() {
         s.to_string()
@@ -349,7 +424,7 @@ const APP_USER_AGENT: &str =
 /// Build the shared `reqwest::Client` with a browser-friendly request envelope:
 /// a real `User-Agent` and a default `Accept: application/json`. Both call sites
 /// (test_connection, do_completion) go through here so the envelope never drifts.
-fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+pub(crate) fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
@@ -363,158 +438,287 @@ fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-fn visible_record(record: &Value) -> Value {
+/// Filter out ID-like columns (accession numbers, identifiers) so internal
+/// bookkeeping values don't reach the model. Returns the kept (column, value)
+/// pairs as strings.
+fn visible_record_pairs(record: &Value) -> Vec<(String, String)> {
     let Some(obj) = record.as_object() else {
-        return record.clone();
+        return Vec::new();
     };
-    let mut filtered = serde_json::Map::new();
-    for (k, v) in obj {
-        let lower = k.to_ascii_lowercase();
-        let id_related = lower.contains("accession")
-            || lower.contains("obj. number")
-            || lower.contains("object number")
-            || lower == "id"
-            || lower.ends_with(" id")
-            || lower.contains("identifier");
-        if !id_related {
-            filtered.insert(k.clone(), v.clone());
-        }
-    }
-    Value::Object(filtered)
+    obj.iter()
+        .filter_map(|(k, v)| {
+            let lower = k.to_ascii_lowercase();
+            let id_related = lower.contains("accession")
+                || lower.contains("obj. number")
+                || lower.contains("object number")
+                || lower == "id"
+                || lower.ends_with(" id")
+                || lower.contains("identifier");
+            if id_related {
+                return None;
+            }
+            let val = v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string());
+            Some((k.clone(), val))
+        })
+        .collect()
 }
 
-/// Compose the single user-facing instruction covering **every** catalogue
-/// field for one artefact. Vocab fields are constrained to their allowed terms.
-///
-/// The message has no hidden behavioural framing: it is just the two-part
-/// system instruction (Part 1 = user-edited context prose, Part 2 = the
-/// read-only output contract the parser relies on), the artefact record, and
-/// one requirement block per field. Field-type rules differ — controlled-vocab
-/// fields ask for up to 3 ranked candidates from the list only, open fields ask
-/// for a single free-text answer.
-fn build_combined_prompt(
+/// Render the artefact record as XML: `<artefact_file><Col>value</Col>…</artefact_file>`.
+/// Column names are sanitized to valid XML tag names (letters/digits/`_`/`-`/`.`,
+/// must start with a letter or `_`), since spreadsheet headers can contain
+/// spaces and punctuation (e.g. "Curator's notes"). Collisions after sanitization
+/// are disambiguated with a numeric suffix so no column's value is silently lost.
+fn visible_record_xml(record: &Value) -> String {
+    let pairs = visible_record_pairs(record);
+    if pairs.is_empty() {
+        return "<artefact_file></artefact_file>".to_string();
+    }
+    let mut used: HashMap<String, ()> = HashMap::new();
+    let mut lines = Vec::new();
+    for (col, val) in pairs {
+        let tag = sanitize_xml_tag(&col, &mut used);
+        lines.push(format!("  <{tag}>{}</{tag}>", xml_escape_text(&val)));
+    }
+    format!("<artefact_file>\n{}\n</artefact_file>", lines.join("\n"))
+}
+
+/// Map an arbitrary column name to a valid XML tag name (start letter/`_`;
+/// subsequent chars letter/digit/`-`/`.`/`_`). Whitespace runs collapse to `_`;
+/// other disallowed chars are dropped. Empty results fall back to `col`. Each
+/// produced tag is checked against `used` and suffixed to avoid collisions.
+fn sanitize_xml_tag(col: &str, used: &mut HashMap<String, ()>) -> String {
+    let mut out = String::new();
+    for (i, ch) in col.trim().chars().enumerate() {
+        let valid = ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.');
+        if i == 0 {
+            if ch.is_alphabetic() || ch == '_' {
+                out.push(ch);
+            } else if valid {
+                out.push('_');
+                out.push(ch);
+            } else if ch.is_whitespace() {
+                out.push('_');
+            }
+            // else: drop leading punctuation
+        } else if valid {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+        // else: drop disallowed chars
+    }
+    if out.is_empty() {
+        out = "col".to_string();
+    }
+    // Disambiguate collisions.
+    let mut candidate = out.clone();
+    let mut n = 2;
+    while used.contains_key(&candidate) {
+        candidate = format!("{out}_{n}");
+        n += 1;
+    }
+    used.insert(candidate.clone(), ());
+    candidate
+}
+
+/// Escape text for inclusion as XML element content (`&`, `<`, `>`).
+fn xml_escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Compose the unified Call-1 prompt. Structure (joined by blank lines):
+///   1. The user-editable persona + output-format preamble (the merged "System
+///      Prompt" from ArtefactFileTab). This text *already* instructs the model
+///      to read `<artefact_file>` and reply in XML.
+///   2. Per-column guidance block (only non-empty prompts).
+///   3. The Rust-appended field enumeration: one `<extraction field="…">` per
+///      vocab field and one `<open_field field="…">` per open field, with each
+///      field's non-empty `prompt` injected inline. This cannot live in the
+///      editable text because it depends on the user's live field config.
+///   4. The `<artefact_file>` record block.
+///   5. A no-image note when applicable.
+fn build_unified_prompt(
+    persona_preamble: &str,
+    columns: &[ArtefactColumnSpec],
     fields: &[FieldSpec],
     record: &Value,
-    system_prompt: &str,
-    prompt_contract: &str,
+    has_image: bool,
 ) -> String {
     let mut sections = Vec::new();
-    let part1 = system_prompt.trim();
-    if !part1.is_empty() {
-        sections.push(part1.to_string());
+    let preamble = persona_preamble.trim();
+    if !preamble.is_empty() {
+        sections.push(preamble.to_string());
     }
-    let part2 = prompt_contract.trim();
-    if !part2.is_empty() {
-        sections.push(part2.to_string());
+    let guided: Vec<&ArtefactColumnSpec> = columns
+        .iter()
+        .filter(|c| !c.prompt.trim().is_empty())
+        .collect();
+    if !guided.is_empty() {
+        let lines: Vec<String> = guided
+            .iter()
+            .map(|c| format!("- {}: {}", c.name, c.prompt.trim()))
+            .collect();
+        sections.push(format!(
+            "Metadata columns and how to use them:\n{}",
+            lines.join("\n")
+        ));
     }
-    sections.push(format!(
-        "Artefact File information: {}",
-        visible_record(record)
-    ));
+    // Rust-appended field enumeration (matches the preamble's XML schema).
+    let mut enum_lines = Vec::new();
     for f in fields {
-        let block = if f.field_type == "vocab" && !f.allowed.is_empty() {
-            format!(
-                "_{}_:\n{}\nProvide up to 3 candidates ranked by confidence, drawn ONLY from this controlled vocabulary (use fewer if appropriate; never more than 3 and never a term outside the list): [{}].",
-                f.name,
-                f.prompt.trim(),
-                f.allowed.join(", ")
-            )
+        let prompt = f.prompt.trim();
+        let guidance = if prompt.is_empty() {
+            String::new()
         } else {
-            format!(
-                "_{}_:\n{}\nProvide a single free-text answer (no ranking, no list).",
-                f.name,
-                f.prompt.trim()
-            )
+            format!(" ({prompt})")
         };
-        sections.push(block);
+        if f.field_type == "vocab" {
+            enum_lines.push(format!(
+                "<extraction field=\"{}\">{}</extraction>",
+                f.name, guidance
+            ));
+        } else {
+            enum_lines.push(format!(
+                "<open_field field=\"{}\">{}</open_field>",
+                f.name, guidance
+            ));
+        }
+    }
+    if !enum_lines.is_empty() {
+        sections.push(format!(
+            "Provide one block per field, in this order, using the field names exactly:\n{}",
+            enum_lines.join("\n")
+        ));
+    }
+    sections.push(visible_record_xml(record));
+    if !has_image {
+        sections.push(
+            "No image is attached for this artefact — base your description on the metadata above and note that it is lower-confidence as a result.".to_string(),
+        );
     }
     sections.join("\n\n")
 }
 
 /// Inlined image attached to a single multimodal prompt: raw bytes + mime type.
 /// When `Some`, `do_completion` embeds the image as a content block alongside
-/// the text instruction (OpenAI `image_url` / Anthropic `image`).
-struct ImageData {
-    bytes: Vec<u8>,
-    mime: String,
+/// the text instruction (OpenAI `image_url` / Anthropic `image`). `Clone`
+/// because a `Turn` may carry an image and the cataloguing pipeline clones
+/// turns into the threaded conversation.
+#[derive(Clone)]
+pub(crate) struct ImageData {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mime: String,
 }
 
-/// Build the chat-completions request body for a Standard provider. Pure: no
-/// transport, no logging. The body differs by API family and by whether an
-/// image is inlined; the user message carries the whole two-part system
-/// instruction plus the per-field requirements.
-fn build_completion_body(provider: &Provider, user_text: &str, image: Option<&ImageData>) -> Value {
+/// One turn of a multi-turn conversation sent to a chat-completions provider.
+/// The cataloguing pipeline threads Call 3 (vocab validation) onto Call 1
+/// (vision + extraction) so the model keeps the image and its own analysis in
+/// context while picking vocab candidates. An image attaches only to the turn
+/// that carries it (Call 1's user turn); Call 3's user turn is text-only but
+/// still sees the earlier image via the replayed Call-1 history.
+#[derive(Clone)]
+pub(crate) struct Turn {
+    pub role: TurnRole,
+    pub text: String,
+    pub image: Option<ImageData>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnRole {
+    User,
+    Assistant,
+}
+
+impl TurnRole {
+    /// Role label for the Anthropic/OpenAI `messages` array.
+    fn as_str(&self) -> &'static str {
+        match self {
+            TurnRole::User => "user",
+            TurnRole::Assistant => "assistant",
+        }
+    }
+}
+
+/// Build the chat-completions request body for one conversation (possibly
+/// multi-turn). Pure: no transport, no logging. The body differs by API family;
+/// each provider encodes the turns as its native multi-turn shape (OpenAI /
+/// Anthropic `messages` array; Gemini Interactions `input` array of steps).
+/// An image attached to a turn is inlined as a content block on that turn only
+/// — later text-only turns still see it via the conversation history.
+fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
     match provider.api_format {
-        ApiFormat::OpenAi => match image {
-            Some(img) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
-                let data_url = format!("data:{};base64,{}", img.mime, b64);
-                json!({
-                    "model": provider.model,
-                    "messages": [
-                        { "role": "user", "content": [
-                            { "type": "text", "text": user_text },
-                            { "type": "image_url", "image_url": { "url": data_url } }
-                        ]}
-                    ],
-                    "temperature": 0.2
+        ApiFormat::OpenAi => {
+            let messages: Vec<Value> = turns
+                .iter()
+                .map(|t| match (&t.image, t.role) {
+                    (Some(img), TurnRole::User) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+                        let data_url = format!("data:{};base64,{}", img.mime, b64);
+                        json!({
+                            "role": t.role.as_str(),
+                            "content": [
+                                { "type": "text", "text": t.text },
+                                { "type": "image_url", "image_url": { "url": data_url } }
+                            ]
+                        })
+                    }
+                    _ => json!({ "role": t.role.as_str(), "content": t.text }),
                 })
-            }
-            None => json!({
+                .collect();
+            json!({
                 "model": provider.model,
-                "messages": [
-                    { "role": "user", "content": user_text }
-                ],
+                "messages": messages,
                 "temperature": 0.2
-            }),
-        },
-        // Anthropic requires `max_tokens`. One call returns every field, so
-        // allow more room.
-        ApiFormat::Anthropic => match image {
-            Some(img) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
-                json!({
-                    "model": provider.model,
-                    "max_tokens": 4096,
-                    "messages": [
-                        { "role": "user", "content": [
-                            { "type": "image", "source": { "type": "base64", "media_type": img.mime, "data": b64 } },
-                            { "type": "text", "text": user_text }
-                        ]}
-                    ]
+            })
+        }
+        // Anthropic requires `max_tokens`.
+        ApiFormat::Anthropic => {
+            let messages: Vec<Value> = turns
+                .iter()
+                .map(|t| match (&t.image, t.role) {
+                    (Some(img), TurnRole::User) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+                        json!({
+                            "role": t.role.as_str(),
+                            "content": [
+                                { "type": "image", "source": { "type": "base64", "media_type": img.mime, "data": b64 } },
+                                { "type": "text", "text": t.text }
+                            ]
+                        })
+                    }
+                    _ => json!({ "role": t.role.as_str(), "content": t.text }),
                 })
-            }
-            None => json!({
+                .collect();
+            json!({
                 "model": provider.model,
                 "max_tokens": 4096,
-                "messages": [
-                    { "role": "user", "content": user_text }
-                ]
-            }),
-        },
-        // Gemini Interactions API. The whole request is one `input` array; the
-        // model id is a body field (not part of the URL), so the endpoint is a
-        // single fixed path. Text precedes the image per Gemini's guidance.
-        ApiFormat::Gemini => match image {
-            Some(img) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
-                json!({
-                    "model": provider.model,
-                    "input": [
-                        { "type": "text", "text": user_text },
-                        { "type": "image", "data": b64, "mime_type": img.mime }
-                    ],
-                    "generation_config": { "temperature": 0.2 }
-                })
+                "messages": messages
+            })
+        }
+        // Gemini Interactions API: the whole request is one `input` array of
+        // steps (multi-turn), text preceding any image per Gemini's guidance.
+        ApiFormat::Gemini => {
+            let mut input: Vec<Value> = Vec::new();
+            for t in turns {
+                if let Some(img) = &t.image {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+                    input.push(json!({ "type": "text", "text": t.text }));
+                    input.push(json!({ "type": "image", "data": b64, "mime_type": img.mime }));
+                } else {
+                    input.push(json!({ "type": "text", "text": t.text }));
+                }
             }
-            None => json!({
+            json!({
                 "model": provider.model,
-                "input": [
-                    { "type": "text", "text": user_text }
-                ],
+                "input": input,
                 "generation_config": { "temperature": 0.2 }
-            }),
-        },
+            })
+        }
     }
 }
 
@@ -527,9 +731,11 @@ fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String>
         // [{type:"text",text:"..."}] rather than a plain string, so try both.
         ApiFormat::OpenAi => {
             let c = &v["choices"][0]["message"]["content"];
-            c.as_str().map(str::to_string)
+            c.as_str()
+                .map(str::to_string)
                 .or_else(|| {
-                    c.as_array()?.iter()
+                    c.as_array()?
+                        .iter()
                         .filter_map(|p| p.get("text").and_then(Value::as_str))
                         .next()
                         .map(str::to_string)
@@ -538,7 +744,8 @@ fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String>
         }
         ApiFormat::Anthropic => v["content"][0]["text"]
             .as_str()
-            .ok_or_else(|| "response missing content[0].text".to_string())?.to_string(),
+            .ok_or_else(|| "response missing content[0].text".to_string())?
+            .to_string(),
         // Gemini Interactions API: prefer the top-level convenience field, then
         // the current `steps` array, then the legacy `outputs` array (pre the
         // 2026-06 schema sunset). The final entry holds the complete answer.
@@ -547,7 +754,8 @@ fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String>
             .and_then(Value::as_str)
             .or_else(|| gemini_entries_text(v.get("steps")))
             .or_else(|| gemini_entries_text(v.get("outputs")))
-            .ok_or_else(|| "response missing output_text / steps / outputs".to_string())?.to_string(),
+            .ok_or_else(|| "response missing output_text / steps / outputs".to_string())?
+            .to_string(),
     };
     Ok(content)
 }
@@ -573,19 +781,20 @@ fn gemini_entries_text(arr: Option<&Value>) -> Option<&str> {
 async fn do_completion(
     app: &AppHandle,
     provider: &Provider,
-    user_text: &str,
-    image: Option<&ImageData>,
+    label: &str,
+    turns: &[Turn],
 ) -> Result<(String, String), String> {
     let base = trim_trailing_slash(&provider.base_url);
     let (url, _models_url) = provider.api_format.endpoints(&base);
 
     // Body construction is isolated in `build_completion_body`; this function
     // owns only transport + boundary logging.
-    let body: Value = build_completion_body(provider, user_text, image);
+    let body: Value = build_completion_body(provider, turns);
     let auth = provider.api_format.auth(&provider.api_key);
 
     // One group id per call so the renderer resolves the in-flight "busy" dot
-    // (request sent) when the terminal stage lands.
+    // (request sent) when the terminal stage lands. The label identifies which
+    // pipeline step this call belongs to ("Vision Analysis" / "Cataloguing").
     let job_group = next_call_group();
     log_stage(
         app,
@@ -593,7 +802,11 @@ async fn do_completion(
             stage: "postSent",
             job_group: job_group.clone(),
             status: "busy",
-            label: None,
+            label: if label.is_empty() {
+                None
+            } else {
+                Some(label.to_string())
+            },
             detail: Some(url.clone()),
             elapsed_ms: None,
             verbose: Some(VerbosePayload {
@@ -763,185 +976,284 @@ async fn do_completion(
     Ok((content, job_group))
 }
 
-/// Parse the model's raw text answer into per-field suggestions. Tolerates a
-/// leading code fence or surrounding prose by extracting the outermost JSON
-/// object. Field handling diverges by type:
-/// - **vocab** fields read a `[{value, confidence}]` array (confidence clamped
-///   0..1). An item that's a bare string (a weaker model skipping the
-///   `{value, confidence}` wrapper) is accepted too, at confidence 0.0.
-/// - **open** fields read a single answer, tolerating the several shapes a model
-///   may wrap it in (see `parse_open_value`). The single value becomes one
-///   suggestion at confidence 0.0 (open fields carry no ranking).
-///
-/// Returns the parsed result alongside a list of human-readable warnings for
-/// any field that ended up with zero suggestions despite being requested —
-/// distinguishing "the model dropped this field's key entirely" from "the key
-/// was present but its value couldn't be turned into a suggestion" — so a
-/// caller can surface *why* a field came back empty instead of it silently
-/// rendering blank in the UI.
-fn parse_field_results(
-    content: &str,
-    fields: &[FieldSpec],
-) -> Result<(CatalogueResult, Vec<String>), String> {
-    let json_str = extract_json_object(content).ok_or_else(|| {
-        format!(
-            "model returned bad JSON: no object found (raw: {})",
-            content
-        )
-    })?;
-    let parsed: Value = serde_json::from_str(json_str).map_err(|e| {
-        format!(
-            "model returned bad JSON: {e} (raw: {})",
-            content
-        )
-    })?;
-    let obj = parsed.as_object().ok_or_else(|| {
-        format!(
-            "model returned non-object JSON (raw: {})",
-            content
-        )
-    })?;
-    // The contract asks the model to key every field as `_<Field Name>_`, but
-    // models drop one or both underscores often enough — even mid-response,
-    // even on controlled-vocabulary fields whose value shape is otherwise
-    // well-formed — that treating the decoration as load-bearing produces
-    // frequent false "key missing" warnings. Normalize away leading/trailing
-    // underscores on both sides of the comparison so `_Name_`, `_Name`,
-    // `Name_`, and bare `Name` are all treated as the same key, for every
-    // field type alike.
-    let normalized: std::collections::HashMap<&str, &Value> = obj
-        .iter()
-        .map(|(k, v)| (k.trim_matches('_'), v))
-        .collect();
+/// Strip a leading/trailing Markdown code fence (``` or ~~~, with optional
+/// language tag) if present. The XML parsers tolerate fences so a model that
+/// wraps its answer despite being told not to still parses cleanly.
+fn strip_code_fence(s: &str) -> &str {
+    let trimmed = s.trim();
+    let close_fence = |open: &str| {
+        if let Some(rest) = trimmed.strip_prefix(open) {
+            // Skip an optional language tag on the opening line (e.g. ```xml).
+            let after_tag = rest.find('\n').map(|n| &rest[n + 1..]).unwrap_or(rest);
+            after_tag
+                .trim_end()
+                .strip_suffix(open)
+                .map(str::trim)
+                .unwrap_or(after_tag)
+        } else {
+            trimmed
+        }
+    };
+    close_fence("```").trim_end()
+}
 
-    let mut field_results = std::collections::BTreeMap::new();
+/// The parsed result of Call 1's unified XML response: the artefact description
+/// plus per-field extraction/open-field text. Vocab fields' `extractions` are
+/// embedded to build the candidate net; open fields' `open_values` become the
+/// The parsed result of Call 1's unified XML response. Vocab fields'
+/// `extractions` are embedded to build the candidate net; open fields'
+/// `open_values` become the field's suggestion directly (no similarity).
+/// Missing sections surface as warnings rather than errors. The
+/// `<image_description>` is parsed by `trim_for_validation` directly from the
+/// raw response when building Call 3's context, so it isn't carried here.
+struct UnifiedParse {
+    extractions: HashMap<String, String>,
+    open_values: HashMap<String, String>,
+    warnings: Vec<String>,
+}
+
+/// Find the substring of `haystack` between the first `<tag ...>` and its
+/// matching `</tag>`, honoring the case-insensitive tag name. Attributes on the
+/// open tag are allowed (e.g. `<extraction field="Material">`). Returns the
+/// inner text (between the tags), trimmed. `None` if the tag pair isn't found.
+fn extract_tag_block<'a>(haystack: &'a str, tag: &str) -> Option<&'a str> {
+    let lower = haystack.to_ascii_lowercase();
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let start = lower.find(&open)?;
+    // The open tag ends at the next '>'.
+    let inner_start = lower[start..].find('>')? + start + 1;
+    let close_start = lower[inner_start..]
+        .find(&close.to_ascii_lowercase())
+        .map(|p| inner_start + p)?;
+    Some(haystack[inner_start..close_start].trim())
+}
+
+/// Read the value of an attribute on a tag's opening text. `tag_text` is the
+/// full opening tag slice (e.g. `<extraction field="Material">`). Case-
+/// insensitive attribute name match; returns the de-quoted value.
+fn tag_attr(tag_text: &str, attr: &str) -> Option<String> {
+    let lower = tag_text.to_ascii_lowercase();
+    let needle = format!("{attr}=");
+    let idx = lower.find(&needle)?;
+    let after = &tag_text[idx + needle.len()..];
+    let after_trim = after.trim_start();
+    let quote = after_trim.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let rest = &after_trim[1..];
+        let end = rest.find(quote)?;
+        Some(rest[..end].to_string())
+    } else {
+        // Unquoted attribute — read until whitespace or '>'.
+        let end = after_trim
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(after_trim.len());
+        Some(after_trim[..end].to_string())
+    }
+}
+
+/// Parse Call 1's XML response. Tolerant of a code fence or surrounding prose
+/// (the contract forbids them, but models add them anyway). For each vocab
+/// field, records its `<extraction>` text (empty string if absent — the resolver
+/// treats that as "no candidates"); for each open field, records its
+/// `<open_field>` text. Missing sections become warnings so a blank field in the
+/// UI is traceable. A missing `<image_description>` is warned on (a useful Call-1
+/// health signal) but its text isn't carried — Call 3's context is built by
+/// `trim_for_validation` straight from the raw response.
+fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> UnifiedParse {
+    let body = strip_code_fence(content);
+    let mut extractions: HashMap<String, String> = HashMap::new();
+    let mut open_values: HashMap<String, String> = HashMap::new();
     let mut warnings = Vec::new();
+
+    if extract_tag_block(body, "image_description").is_none() {
+        warnings.push("<image_description> missing from response".to_string());
+    }
+
+    // Collect every <extraction field="…"> and <open_field field="…"> block,
+    // then match by name to the requested fields. Models sometimes emit a field
+    // twice or vary casing, so we build a name→text map first.
+    let extraction_map = collect_named_blocks(body, "extraction");
+    let open_map = collect_named_blocks(body, "open_field");
+
     for f in fields {
-        let is_vocab = f.field_type == "vocab";
-        let value = normalized.get(f.name.as_str()).copied();
-        let key_present = value.is_some();
-        let sugs: Vec<Suggestion> = match value {
-            Some(v) if is_vocab => match v {
-                Value::Array(a) => a
-                    .iter()
-                    .filter_map(|item| {
-                        if let Some(s) = item.as_str() {
-                            return Some(Suggestion {
-                                value: s.to_string(),
-                                confidence: 0.0,
-                            });
-                        }
-                        let value = item.get("value")?.as_str()?.to_string();
-                        let confidence = item
-                            .get("confidence")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0)
-                            .clamp(0.0, 1.0);
-                        Some(Suggestion { value, confidence })
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            },
-            Some(v) => parse_open_value(v)
-                .map(|value| {
-                    vec![Suggestion {
-                        value,
-                        confidence: 0.0,
-                    }]
-                })
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-        if sugs.is_empty() {
-            warnings.push(if key_present {
-                format!("{}: key present but no usable candidates", f.name)
-            } else {
-                format!("{}: key missing from response", f.name)
-            });
-        }
-        field_results.insert(f.name.clone(), sugs);
-    }
-    Ok((CatalogueResult { field_results }, warnings))
-}
-
-/// Read an open-ended field's single answer out of whatever shape the model
-/// returned: a bare JSON string, `{"value": "..."}`, or a one-element
-/// `[{value, confidence}]` array. Returns the string value, or `None` if no
-/// value could be extracted.
-///
-/// As a last resort, an object that doesn't match `{"value": ...}` (e.g. a
-/// model answering a multi-part question like Inscription's "raw text" +
-/// "translated" with its own nested keys) is flattened into a single
-/// `"Key: value / Key: value"` string rather than discarded — the contract
-/// only promises the model a single free-text answer, not a specific object
-/// shape, so any object it invents is still a real answer worth keeping.
-fn parse_open_value(v: &Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(s) = v.get("value").and_then(Value::as_str) {
-        return Some(s.to_string());
-    }
-    if let Some(first) = v.as_array().and_then(|a| a.first()) {
-        if let Some(s) = first.get("value").and_then(Value::as_str) {
-            return Some(s.to_string());
-        }
-        if let Some(s) = first.as_str() {
-            return Some(s.to_string());
-        }
-    }
-    if let Some(obj) = v.as_object() {
-        if obj.is_empty() {
-            return None;
-        }
-        let parts: Vec<String> = obj
-            .iter()
-            .map(|(k, val)| {
-                let rendered = val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string());
-                format!("{k}: {rendered}")
-            })
-            .collect();
-        return Some(parts.join(" / "));
-    }
-    None
-}
-
-/// Pull the outermost JSON object out of a model answer that may be wrapped in a
-/// code fence or padded with prose. Returns the matching substring, or `None`.
-fn extract_json_object(s: &str) -> Option<&str> {
-    let start = s.find('{')?;
-    // Walk braces, respecting strings, to find the matching close of the first
-    // top-level object. This is deliberately simple — it only needs to skip
-    // braces inside string literals, which is enough for well-formed model JSON.
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        let c = b as char;
-        if in_string {
-            if escape {
-                escape = false;
-            } else if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_string = false;
+        if f.field_type == "vocab" {
+            let text = extraction_map
+                .get(&f.name.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            if text.is_empty() {
+                warnings.push(format!(
+                    "{}: <extraction> missing or empty — no candidates will be searched",
+                    f.name
+                ));
             }
-            continue;
+            extractions.insert(f.name.clone(), text);
+        } else {
+            let text = open_map
+                .get(&f.name.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            if text.is_empty() {
+                warnings.push(format!("{}: <open_field> missing or empty", f.name));
+            }
+            open_values.insert(f.name.clone(), text);
         }
-        match c {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[start..=i]);
+    }
+    UnifiedParse {
+        extractions,
+        open_values,
+        warnings,
+    }
+}
+
+/// Collect all `<tag field="Name">text</tag>` blocks into a lowercased-name →
+/// text map. Tolerates repeated tags (last wins) and attribute casing.
+fn collect_named_blocks(body: &str, tag: &str) -> HashMap<String, String> {
+    let lower = body.to_ascii_lowercase();
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(&open) {
+        let abs = search_from + rel;
+        let open_end = match lower[abs..].find('>') {
+            Some(p) => abs + p,
+            None => break,
+        };
+        let open_text = &body[abs..=open_end];
+        let inner_start = open_end + 1;
+        let close_rel = match lower[inner_start..].find(&close) {
+            Some(p) => inner_start + p,
+            None => break,
+        };
+        let inner = body[inner_start..close_rel].trim().to_string();
+        if let Some(name) = tag_attr(open_text, "field") {
+            out.insert(name.to_ascii_lowercase(), inner);
+        }
+        search_from = close_rel + close.len();
+    }
+    out
+}
+
+/// Parse Call 3's validation XML into field-name → list of picked term strings.
+/// Each pick's `term` is returned verbatim; the **caller** stamps it with its
+/// cosine from the net (the model does not report similarity). Terms not present
+/// in that field's candidate set (case-insensitive, trimmed) are dropped as
+/// hallucinations and warned — a controlled-vocab field may only ever receive
+/// values that exist in its source.
+fn parse_validation_response(
+    content: &str,
+    field_candidates: &HashMap<String, Vec<String>>,
+) -> (HashMap<String, Vec<String>>, Vec<String>) {
+    let body = strip_code_fence(content);
+    let lower = body.to_ascii_lowercase();
+    let open = "<validated";
+    let close = "</validated>";
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut warnings = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(open) {
+        let abs = search_from + rel;
+        let open_end = match lower[abs..].find('>') {
+            Some(p) => abs + p,
+            None => break,
+        };
+        let open_text = &body[abs..=open_end];
+        let inner_start = open_end + 1;
+        let close_rel = match lower[inner_start..].find(close) {
+            Some(p) => inner_start + p,
+            None => break,
+        };
+        let block = &body[inner_start..close_rel];
+        let field_name = tag_attr(open_text, "field").unwrap_or_default();
+        let picks = extract_picks(block);
+        let allowed: Vec<String> = field_candidates
+            .get(&field_name.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        let allowed_lower: Vec<String> = allowed
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect();
+        let mut kept: Vec<String> = Vec::new();
+        for pick in picks {
+            if allowed_lower.contains(&pick.trim().to_ascii_lowercase()) {
+                // Preserve the candidate's original casing from the net.
+                let original = allowed
+                    .iter()
+                    .find(|a| a.trim().eq_ignore_ascii_case(&pick))
+                    .cloned()
+                    .unwrap_or(pick);
+                kept.push(original);
+            } else {
+                warnings.push(format!(
+                    "{field_name}: dropped hallucinated pick \"{pick}\" (not in candidate list)"
+                ));
+            }
+        }
+        out.insert(field_name.to_ascii_lowercase(), kept);
+        search_from = close_rel + close.len();
+    }
+    (out, warnings)
+}
+
+/// Read every `<pick term="…" />` from a `<validated>` block's inner text.
+/// Self-closing only (the contract). Term returned de-quoted, trimmed.
+fn extract_picks(block: &str) -> Vec<String> {
+    let lower = block.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find("<pick") {
+        let abs = search_from + rel;
+        let end = match lower[abs..].find("/>") {
+            Some(p) => abs + p + 2,
+            None => {
+                // Tolerate a non-self-closing <pick term="…"></pick> as a fallback.
+                match lower[abs..].find('>') {
+                    Some(p) => abs + p + 1,
+                    None => break,
                 }
             }
-            _ => {}
+        };
+        let open_text = &block[abs..end];
+        if let Some(term) = tag_attr(open_text, "term") {
+            out.push(term.trim().to_string());
         }
+        search_from = end;
     }
-    None
+    out
+}
+
+/// Compose the Call-3 validation prompt. For each vocab field: the field name,
+/// its extracted text (from Call 1), an optional per-field `prompt` (e.g. user
+/// preferences), and a list of its candidate **terms only** — no cosine, no
+/// thesaurus badge, to avoid biasing the model toward internal scores. Ends with
+/// the fixed XML reply contract. Pure; built once per catalogue call.
+fn build_validation_prompt(
+    shortlists: &[(usize, &FieldSpec, &str, &[NetCandidate])],
+    shortlist_count: usize,
+) -> String {
+    let mut sections = Vec::new();
+    for (_, field, extracted, candidates) in shortlists {
+        let mut block = format!("[{}] extracted: \"{}\"", field.name, extracted);
+        let prompt = field.prompt.trim();
+        if !prompt.is_empty() {
+            block.push_str(&format!("\nguidance: {prompt}"));
+        }
+        if candidates.is_empty() {
+            block.push_str("\ncandidates: (none)");
+        } else {
+            let terms: Vec<String> = candidates.iter().map(|c| format!("- {}", c.term)).collect();
+            block.push_str(&format!("\ncandidates:\n{}", terms.join("\n")));
+        }
+        sections.push(block);
+    }
+    let contract = format!(
+        "Pick up to {shortlist_count} terms per field that best match the artefact and its extracted text. Pick terms VERBATIM from each field's candidate list — do not invent, reword, or merge terms. If none of a field's candidates fit the artefact, emit an empty <validated> block for it.\n\nReply ONLY with, one block per field in the order above:\n<validated field=\"{{Field Name}}\"><pick term=\"{{verbatim candidate term}}\" /></validated>"
+    );
+    sections.push(contract);
+    sections.join("\n\n")
 }
 
 /// Cancel an in-flight `catalogue_artefact` call by job id. Idempotent: a job
@@ -966,15 +1278,154 @@ pub async fn cancel_catalogue(
     Ok(())
 }
 
-/// Catalogue one artefact in a single LLM round-trip via the active provider.
-/// Sends one multimodal chat-completions POST with the image inlined; the model
-/// returns JSON covering every field.
+/// Default candidate count the embedding search returns per vocab field before
+/// Call 3 validation (the "net"). User-configurable via `Settings.vocabNetCount`.
+/// Kept generous so Call 3 has a wide net to reject from; the previous single-
+/// description embedding's small fixed count (10) was a root cause of poor
+/// matches — the right term was often outside the window.
+const DEFAULT_VOCAB_NET_COUNT: usize = 20;
+/// Default final picks per vocab field after Call 3 validation. User-configurable
+/// via `Settings.vocabShortlistCount`.
+const DEFAULT_VOCAB_SHORTLIST_COUNT: usize = 3;
+/// Whether Call 3 (vision validation) runs by default. User-configurable via
+/// `Settings.call3Enabled`.
+const DEFAULT_CALL3_ENABLED: bool = true;
+
+/// Resolve every controlled-vocabulary field via per-field embedding search.
 ///
-/// The HTTP call is raced against a per-job cancellation signal: `cancel_catalogue`
-/// fires the matching oneshot, this `select!` drops the in-flight reqwest future
-/// (closing the socket → true transport abort), and the call resolves with
-/// [`CANCEL_ERROR`]. The job id comes from the renderer (`"row-<uid>"`) and is
-/// unique per outstanding call, enforced by the renderer's `processing` guard.
+/// Unlike the previous pipeline (which embedded the *single* global description
+/// once and reused it for every field — the root cause of poor matches like
+/// "u-shape" for a circular object), this embeds each vocab field's **own**
+/// `<extraction>` text in one batched call and searches that field's LanceDB
+/// tables with it. Results across sources/modalities are fused by **max cosine
+/// similarity**, and the top `net_count` candidates are kept (with their cosine)
+/// as the net for Call 3 (or directly truncated to `shortlist_count` when Call 3
+/// is off). No thesaurus tiebreak — candidate ranking is the embedding's alone,
+/// and final selection is Call 3's.
+///
+/// Best-effort: an embed/search failure leaves the affected field with an empty
+/// net — surfaced in the UI as "no match" — never a hard failure of the whole
+/// call. A field whose `<extraction>` was empty yields no candidates and warns.
+async fn resolve_vocab_fields(
+    embedding_provider: &crate::embeddings::EmbeddingProvider,
+    fields: &[FieldSpec],
+    extractions: &HashMap<String, String>,
+    image: Option<&ImageData>,
+    net_count: usize,
+) -> Vec<ResolvedVocab> {
+    let mut out: Vec<ResolvedVocab> = Vec::new();
+    // Collect the per-field extraction texts to embed in ONE batched call.
+    // (i, field) for vocab fields whose extraction is non-empty.
+    let to_embed: Vec<(usize, &FieldSpec, String)> = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.field_type == "vocab" && !f.vocab_source_ids.is_empty())
+        .filter_map(|(i, f)| {
+            let text = extractions.get(&f.name).cloned().unwrap_or_default();
+            if text.trim().is_empty() {
+                // Empty extraction: record an empty net so the field surfaces as
+                // "no match" with a clear reason, rather than silently dropping it.
+                out.push(ResolvedVocab {
+                    field_index: i,
+                    candidates: Vec::new(),
+                });
+                None
+            } else {
+                Some((i, f, text))
+            }
+        })
+        .collect();
+    if to_embed.is_empty() {
+        return out;
+    }
+
+    // One batched embedding of all field extractions.
+    let texts: Vec<String> = to_embed.iter().map(|(_, _, t)| t.clone()).collect();
+    let text_vectors = match crate::embeddings::embed_texts(embedding_provider, &texts).await {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            eprintln!(
+                "[artefact] per-field extraction embedding returned no vectors, skipping vocab"
+            );
+            return out;
+        }
+        Err(e) => {
+            eprintln!("[artefact] per-field extraction embedding failed, skipping vocab: {e}");
+            return out;
+        }
+    };
+
+    // Image embedding is optional/best-effort (only when the provider is
+    // declared multimodal); any failure just drops this signal — fields resolve
+    // text-only.
+    let image_vector = if embedding_provider.supports_image_input {
+        match image {
+            Some(img) => crate::embeddings::embed_image(embedding_provider, img)
+                .await
+                .ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    for ((i, field, _text), text_vector) in to_embed.iter().zip(text_vectors.iter()) {
+        // Fused best cosine per candidate, keyed by lowercased term so the same
+        // term surfacing from multiple sources/modalities merges at its highest
+        // score.
+        let mut fused: HashMap<String, NetCandidate> = HashMap::new();
+        for source_id in &field.vocab_source_ids {
+            if let Ok(hits) =
+                crate::embeddings::search_similar(source_id, text_vector, net_count).await
+            {
+                fuse_by_max_cosine(&mut fused, &hits);
+            }
+            if let Some(iv) = &image_vector {
+                if let Ok(hits) = crate::embeddings::search_similar(source_id, iv, net_count).await
+                {
+                    fuse_by_max_cosine(&mut fused, &hits);
+                }
+            }
+        }
+        let mut ranked: Vec<NetCandidate> = fused.into_values().collect();
+        // Sort by cosine desc (stable on equal). No thesaurus tiebreak — Call 3
+        // owns final selection, and the user's per-field prompt guides it.
+        ranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ranked.truncate(net_count);
+        out.push(ResolvedVocab {
+            field_index: *i,
+            candidates: ranked,
+        });
+    }
+    out
+}
+
+/// Fold one ranked candidate list into the running max-cosine map, keeping each
+/// term's highest score.
+fn fuse_by_max_cosine(
+    fused: &mut HashMap<String, NetCandidate>,
+    hits: &[crate::embeddings::CandidateTerm],
+) {
+    for hit in hits {
+        let key = hit.term.to_lowercase();
+        fused
+            .entry(key)
+            .and_modify(|existing| {
+                if hit.score > existing.score {
+                    existing.score = hit.score;
+                }
+            })
+            .or_insert_with(|| NetCandidate {
+                term: hit.term.clone(),
+                score: hit.score,
+            });
+    }
+}
+
 #[tauri::command]
 pub async fn catalogue_artefact(
     app: AppHandle,
@@ -983,7 +1434,25 @@ pub async fn catalogue_artefact(
     provider: Provider,
     fields: Vec<FieldSpec>,
     artefact: ArtefactInput,
+    embedding_provider: Option<crate::embeddings::EmbeddingProvider>,
+    // Candidates the embedding search returns per vocab field before Call 3
+    // validation. Frontend sends `netCount`; Tauri maps camelCase → snake_case.
+    // An `Option<T>` command param is optional by default (absent → `None`),
+    // so no `#[serde(default)]` is needed (that attribute is only valid on
+    // struct fields, not function parameters).
+    net_count: Option<usize>,
+    // Final picks per vocab field after Call 3 validation (or cosine top-N
+    // when Call 3 is off). Frontend sends `shortlistCount`.
+    shortlist_count: Option<usize>,
+    // Whether Call 3 (vision validation) runs. Frontend sends `call3Enabled`.
+    call3_enabled: Option<bool>,
 ) -> Result<CatalogueResult, String> {
+    let net_count = net_count.unwrap_or(DEFAULT_VOCAB_NET_COUNT).max(1);
+    let shortlist_count = shortlist_count
+        .unwrap_or(DEFAULT_VOCAB_SHORTLIST_COUNT)
+        .clamp(1, net_count);
+    let call3_enabled = call3_enabled.unwrap_or(DEFAULT_CALL3_ENABLED);
+
     // Read the image once (if present); both transports consume the same bytes.
     // The renderer is untrusted, so the absolute image path is validated to lie
     // inside the image scratch dir before it is read.
@@ -999,16 +1468,8 @@ pub async fn catalogue_artefact(
         _ => None,
     };
 
-    // A single combined prompt covering every requested field.
-    let prompt = build_combined_prompt(
-        &fields,
-        &artefact.record,
-        &artefact.system_prompt,
-        &artefact.system_prompt_contract,
-    );
-
-    // Register this call's cancel signal before starting the request so a
-    // cancel that arrives the instant the POST begins can't race past the
+    // Register this call's cancel signal before starting any work so a
+    // cancel that arrives the instant the pipeline begins can't race past the
     // registration. A stale sender under this key (only possible if a previous
     // call for the same job was dropped without being removed) is replaced and
     // dropped — its receiver is already gone.
@@ -1037,30 +1498,232 @@ pub async fn catalogue_artefact(
         job_id: job_id.clone(),
     };
 
-    // Race the completion against the cancel signal. Dropping `do_completion`'s
-    // future aborts the in-flight reqwest request (its async client closes the
-    // connection on drop), so a cancel terminates the network call, not just
-    // the await.
-    let completion = do_completion(&app, &provider, &prompt, image.as_ref());
-    let (content, job_group) = tokio::select! {
+    // The whole per-row pipeline races the cancel signal as one unit, so
+    // Stop/Cancel works the same whether a row is mid-Call-1, mid-embed, or
+    // mid-Call-3. Dropping the future on cancel aborts its in-flight reqwest
+    // request (the client closes the connection on drop).
+    //
+    // Three steps feed one result:
+    //   - Call 1 (vision): XML description + per-vocab-field <extraction> +
+    //     per-open-field <open_field>.
+    //   - Embedding: each vocab field's extraction → candidate net (cosine).
+    //   - Call 3 (validation, optional, threaded): vision picks top-N from each
+    //     field's net; when off, cosine top-N is used directly.
+    let app_for_pipeline = app.clone();
+    let pipeline = async move {
+        // --- Call 1: unified vision prompt (image attached here, once) ---
+        // Reused verbatim as the first turn of the Call-3 thread so the model
+        // keeps the image, the persona, and the <artefact_file> record in
+        // context while validating candidates.
+        let unified_prompt = build_unified_prompt(
+            &artefact.vision_system_prompt,
+            &artefact.artefact_columns,
+            &fields,
+            &artefact.record,
+            image.is_some(),
+        );
+        let turns1 = vec![Turn {
+            role: TurnRole::User,
+            text: unified_prompt.clone(),
+            image: image.clone(),
+        }];
+        let (content1, _vision_group) =
+            do_completion(&app_for_pipeline, &provider, "Vision Analysis", &turns1).await?;
+
+        let parsed = parse_unified_response(&content1, &fields);
+
+        // --- Embedding: per-field extraction → candidate net ---
+        // Only when there's at least one vocab field with a usable source AND an
+        // embedding provider. Otherwise Call 3 is pointless and is skipped.
+        let has_vocab = fields
+            .iter()
+            .any(|f| f.field_type == "vocab" && !f.vocab_source_ids.is_empty());
+        let resolved_vocab: Vec<ResolvedVocab> = if has_vocab {
+            match embedding_provider.as_ref() {
+                Some(ep) => {
+                    resolve_vocab_fields(
+                        ep,
+                        &fields,
+                        &parsed.extractions,
+                        image.as_ref(),
+                        net_count,
+                    )
+                    .await
+                }
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // --- Call 3: validation (optional), threaded & trimmed from Call 1 ---
+        // The assistant turn replays a TRIMMED Call-1 answer: image_description
+        // + extractions only. The <open_field> answers are irrelevant to vocab
+        // validation and would only add tokens. The image is re-sent via the
+        // replayed Call-1 user turn because vision-grounded disambiguation is
+        // Call 3's purpose; this is the bulk of the token cost and is a
+        // deliberate, one-line-reversible decision.
+        let mut vocab_suggestions: HashMap<String, Vec<Suggestion>> = HashMap::new();
+        let mut vocab_warnings: Vec<String> = Vec::new();
+        if call3_enabled && has_vocab && !resolved_vocab.is_empty() {
+            // Build the per-field shortlist references for the prompt.
+            let shortlist_refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> = resolved_vocab
+                .iter()
+                .filter_map(|rv| {
+                    let field = fields.get(rv.field_index)?;
+                    let extracted = parsed
+                        .extractions
+                        .get(&field.name)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    Some((rv.field_index, field, extracted, rv.candidates.as_slice()))
+                })
+                .collect();
+            if !shortlist_refs.is_empty() {
+                let validation_prompt = build_validation_prompt(&shortlist_refs, shortlist_count);
+                let trimmed_assistant = trim_for_validation(&content1);
+                let turns3 = vec![
+                    Turn {
+                        role: TurnRole::User,
+                        text: unified_prompt,
+                        image: image.clone(),
+                    },
+                    Turn {
+                        role: TurnRole::Assistant,
+                        text: trimmed_assistant,
+                        image: None,
+                    },
+                    Turn {
+                        role: TurnRole::User,
+                        text: validation_prompt,
+                        image: None,
+                    },
+                ];
+                let (content3, _call3_group) =
+                    do_completion(&app_for_pipeline, &provider, "Vocab Validation", &turns3)
+                        .await?;
+
+                // Map field name (lowercased) → candidate terms, for the
+                // hallucination guard in the parser.
+                let mut field_candidates: HashMap<String, Vec<String>> = HashMap::new();
+                for (_, field, _, candidates) in &shortlist_refs {
+                    field_candidates.insert(
+                        field.name.to_ascii_lowercase(),
+                        candidates.iter().map(|c| c.term.clone()).collect(),
+                    );
+                }
+                let (picks_by_field, mut pick_warnings) =
+                    parse_validation_response(&content3, &field_candidates);
+                vocab_warnings.append(&mut pick_warnings);
+
+                // Stamp each pick with its cosine from the net, truncate to the
+                // shortlist count, in net order (so they stay cosine-ranked).
+                let cosine_of = |field_lower: &str, term: &str| -> Option<f32> {
+                    shortlist_refs.iter().find_map(|(_, f, _, cands)| {
+                        if f.name.eq_ignore_ascii_case(field_lower) {
+                            cands.iter().find_map(|c| {
+                                c.term
+                                    .trim()
+                                    .eq_ignore_ascii_case(term.trim())
+                                    .then(|| c.score)
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                };
+                for rv in &resolved_vocab {
+                    let Some(field) = fields.get(rv.field_index) else {
+                        continue;
+                    };
+                    let picks = picks_by_field
+                        .get(&field.name.to_ascii_lowercase())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut sugs: Vec<Suggestion> = picks
+                        .into_iter()
+                        .map(|term| {
+                            let score = cosine_of(&field.name, &term).unwrap_or(0.0);
+                            Suggestion {
+                                value: term,
+                                similarity: Some(score.clamp(0.0, 1.0) as f64),
+                            }
+                        })
+                        .take(shortlist_count)
+                        .collect();
+                    if sugs.is_empty() {
+                        vocab_warnings.push(format!(
+                            "{}: no candidates matched after validation",
+                            field.name
+                        ));
+                    }
+                    // Keep net (cosine) order among the kept picks.
+                    sugs.sort_by(|a, b| {
+                        b.similarity
+                            .unwrap_or(0.0)
+                            .partial_cmp(&a.similarity.unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    vocab_suggestions.insert(field.name.clone(), sugs);
+                }
+            }
+        } else if has_vocab {
+            // Call 3 disabled: use cosine top-N from each net directly.
+            for rv in &resolved_vocab {
+                if let Some(field) = fields.get(rv.field_index) {
+                    let sugs: Vec<Suggestion> = rv
+                        .candidates
+                        .iter()
+                        .take(shortlist_count)
+                        .map(|c| Suggestion {
+                            value: c.term.clone(),
+                            similarity: Some(c.score.clamp(0.0, 1.0) as f64),
+                        })
+                        .collect();
+                    vocab_suggestions.insert(field.name.clone(), sugs);
+                }
+            }
+        }
+
+        let mut all_warnings = parsed.warnings.clone();
+        all_warnings.extend(vocab_warnings);
+        // Merge: open fields (similarity absent) + vocab fields (cosine).
+        let mut field_results = std::collections::BTreeMap::new();
+        for f in &fields {
+            if f.field_type == "vocab" {
+                field_results.insert(
+                    f.name.clone(),
+                    vocab_suggestions.remove(&f.name).unwrap_or_default(),
+                );
+            } else {
+                let val = parsed.open_values.get(&f.name).cloned().unwrap_or_default();
+                let sugs = if val.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Suggestion {
+                        value: val,
+                        similarity: None,
+                    }]
+                };
+                field_results.insert(f.name.clone(), sugs);
+            }
+        }
+        Ok::<_, String>((CatalogueResult { field_results }, all_warnings))
+    };
+    let (result, warnings) = tokio::select! {
         biased;
         _ = cancel_rx => return Err(CANCEL_ERROR.to_string()),
-        result = completion => result?,
+        result = pipeline => result?,
     };
 
-    let (result, warnings) = parse_field_results(&content, &fields)?;
-
-    // The model's own contract promises every requested field appears as a
-    // key (`_DEF_SYSTEM_PROMPT_CONTRACT`), but nothing enforces that — a
-    // field can silently render blank in the UI with no trace of why. Surface
-    // it as a soft warning on the same call's Logs Viewer entry rather than
-    // failing the whole request, since the other fields still parsed fine.
+    // Surface parse/validation warnings as a soft "done/ok" log entry rather
+    // than failing the whole request, since other fields likely parsed fine.
     if !warnings.is_empty() {
         log_stage(
             &app,
             VisionStageEvent {
                 stage: "done",
-                job_group,
+                job_group: String::new(),
                 status: "ok",
                 label: Some("field parse warnings".to_string()),
                 detail: Some(warnings.join("; ")),
@@ -1072,7 +1735,7 @@ pub async fn catalogue_artefact(
                     body: None,
                     status: None,
                     job_id: None,
-                    description: Some(content.clone()),
+                    description: None,
                     error: None,
                 }),
             },
@@ -1082,19 +1745,58 @@ pub async fn catalogue_artefact(
     Ok(result)
 }
 
-/// Assemble the single combined prompt exactly as `catalogue_artefact` would
-/// send it, without making any network call. Used by the Settings "Prompt
-/// Preview" tab to show the final message (including all hardcoded framing) for
-/// a parsing job. The `artefact.record` is runtime-only data the Settings view
-/// doesn't have, so callers pass an empty object and the preview shows it as a
-/// placeholder; everything else reflects the live field/contract/prompt config.
+/// Trim Call 1's XML answer down to just the parts Call 3 needs: the
+/// `<image_description>` and every `<extraction>` block. `<open_field>` answers
+/// are dropped (irrelevant to vocab validation). Falls back to the full answer
+/// if parsing yields nothing, so Call 3 always has *some* assistant context.
+fn trim_for_validation(content1: &str) -> String {
+    let body = strip_code_fence(content1);
+    let mut out = Vec::new();
+    if let Some(desc) = extract_tag_block(body, "image_description") {
+        out.push(format!("<image_description>{desc}</image_description>"));
+    }
+    let lower = body.to_ascii_lowercase();
+    let open = "<extraction";
+    let close = "</extraction>";
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(open) {
+        let abs = search_from + rel;
+        let open_end = match lower[abs..].find('>') {
+            Some(p) => abs + p,
+            None => break,
+        };
+        let inner_start = open_end + 1;
+        let close_rel = match lower[inner_start..].find(close) {
+            Some(p) => inner_start + p,
+            None => break,
+        };
+        out.push(body[abs..close_rel + close.len()].trim().to_string());
+        search_from = close_rel + close.len();
+    }
+    if out.is_empty() {
+        content1.to_string()
+    } else {
+        out.join("\n\n")
+    }
+}
+
+/// Assemble the unified Call-1 prompt exactly as `catalogue_artefact` would send
+/// it as its first user turn, without making any network call. Used by the
+/// Artefact File tab's prompt preview. The row's source values are produced at
+/// parse time, so the record is shown as a placeholder; the image attaches as a
+/// separate content block in real runs.
 #[tauri::command]
-pub fn build_prompts_preview(fields: Vec<FieldSpec>, artefact: ArtefactInput) -> String {
-    build_combined_prompt(
+pub fn build_vision_prompt_preview(
+    columns: Vec<ArtefactColumnSpec>,
+    fields: Vec<FieldSpec>,
+    artefact: ArtefactInput,
+) -> String {
+    build_unified_prompt(
+        &artefact.vision_system_prompt,
+        &columns,
         &fields,
         &artefact.record,
-        &artefact.system_prompt,
-        &artefact.system_prompt_contract,
+        true,
     )
 }
 
@@ -1139,7 +1841,11 @@ pub async fn test_connection(provider: Provider) -> Result<ConnectionTest, Strin
                 if let Some(arr) = v.get("models").and_then(Value::as_array) {
                     models = arr
                         .iter()
-                        .filter_map(|m| m.get("name").and_then(Value::as_str).map(strip_models_prefix))
+                        .filter_map(|m| {
+                            m.get("name")
+                                .and_then(Value::as_str)
+                                .map(strip_models_prefix)
+                        })
                         .collect();
                     models.sort();
                 }
@@ -1165,7 +1871,7 @@ pub async fn test_connection(provider: Provider) -> Result<ConnectionTest, Strin
 /// Drop a leading `models/` from a Gemini model name so the value matches the
 /// bare id the Interactions request body expects (e.g. `models/gemini-3.5-flash`
 /// → `gemini-3.5-flash`).
-fn strip_models_prefix(name: &str) -> String {
+pub(crate) fn strip_models_prefix(name: &str) -> String {
     name.strip_prefix("models/").unwrap_or(name).to_string()
 }
 
@@ -1183,7 +1889,6 @@ fn guess_mime(path: &str) -> String {
         "image/png".to_string()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1230,103 +1935,403 @@ mod tests {
             name: name.to_string(),
             field_type: "open".to_string(),
             prompt: String::new(),
-            allowed: Vec::new(),
+            vocab_source_ids: Vec::new(),
         }
     }
 
-    fn vocab_field(name: &str, allowed: &[&str]) -> FieldSpec {
+    fn vocab_field(name: &str) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             field_type: "vocab".to_string(),
             prompt: String::new(),
-            allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            vocab_source_ids: Vec::new(),
         }
     }
 
     #[test]
-    fn open_field_nested_object_is_flattened_instead_of_dropped() {
-        let content = r#"{"_Inscription_": {"Raw text": "abc", "Translated": "xyz"}}"#;
-        let fields = vec![open_field("Inscription")];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        let sugs = &result.field_results["Inscription"];
-        assert_eq!(sugs.len(), 1);
-        assert!(sugs[0].value.contains("Raw text: abc"));
-        assert!(sugs[0].value.contains("Translated: xyz"));
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn vocab_field_accepts_bare_strings_alongside_value_objects() {
-        let content = r#"{"_Style_": ["Colonial", {"value": "Realist", "confidence": 0.8}]}"#;
-        let fields = vec![vocab_field("Style", &["Colonial", "Realist"])];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        let sugs = &result.field_results["Style"];
-        assert_eq!(sugs.len(), 2);
-        assert_eq!(sugs[0].value, "Colonial");
-        assert_eq!(sugs[0].confidence, 0.0);
-        assert_eq!(sugs[1].value, "Realist");
-        assert_eq!(sugs[1].confidence, 0.8);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn open_field_falls_back_to_bare_key_when_undecorated() {
-        let content = r#"{"Materials": "paper and gilt"}"#;
-        let fields = vec![open_field("Materials")];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        let sugs = &result.field_results["Materials"];
-        assert_eq!(sugs.len(), 1);
-        assert_eq!(sugs[0].value, "paper and gilt");
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn vocab_field_matches_bare_or_partially_decorated_key() {
-        let content = r#"{"Style": ["Colonial"]}"#;
-        let fields = vec![vocab_field("Style", &["Colonial"])];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        assert_eq!(result.field_results["Style"][0].value, "Colonial");
-        assert!(warnings.is_empty());
-    }
-
-    /// Real trace: a model answered every field (two open, two vocab) with
-    /// the leading underscore only, dropping the trailing one — including on
-    /// vocab fields, whose otherwise well-formed array values proved the
-    /// model wasn't confused about content, just sloppy about the key form.
-    #[test]
-    fn mixed_fields_keyed_with_leading_underscore_only_produce_no_warnings() {
-        let content = r#"{
-            "_Description": "A rectangular document on aged paper.",
-            "_Style": [{"value": "Colonial", "confidence": 0.8}],
-            "_Material": [{"value": "Paper", "confidence": 1.0}],
-            "_Inscription": "Raw text: ..."
-        }"#;
+    fn parse_unified_extracts_extractions_and_open_values() {
+        let content = r#"<image_description>A bronze bowl.</image_description>
+<extraction field="Material">bronze, patinated</extraction>
+<extraction field="Shape">circular</extraction>
+<open_field field="Date/Period">8th century CE</open_field>"#;
         let fields = vec![
+            vocab_field("Material"),
+            vocab_field("Shape"),
+            open_field("Date/Period"),
+        ];
+        let parsed = parse_unified_response(content, &fields);
+        // The description text isn't carried on the struct (see its doc
+        // comment), but a present <image_description> must NOT warn.
+        assert!(!parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("image_description")));
+        assert_eq!(
+            parsed.extractions.get("Material").unwrap(),
+            "bronze, patinated"
+        );
+        assert_eq!(parsed.extractions.get("Shape").unwrap(), "circular");
+        assert_eq!(
+            parsed.open_values.get("Date/Period").unwrap(),
+            "8th century CE"
+        );
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_unified_tolerates_code_fence_and_prose() {
+        let content = "Here is my answer:\n```xml\n<image_description>x</image_description>\n<extraction field=\"Material\">iron</extraction>\n```\nDone.";
+        let fields = vec![vocab_field("Material")];
+        let parsed = parse_unified_response(content, &fields);
+        assert_eq!(parsed.extractions.get("Material").unwrap(), "iron");
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_unified_warns_on_missing_sections() {
+        // Only image_description present; Material (vocab) and Date (open) missing.
+        let content = "<image_description>just a description</image_description>";
+        let fields = vec![vocab_field("Material"), open_field("Date/Period")];
+        let parsed = parse_unified_response(content, &fields);
+        assert_eq!(parsed.extractions.get("Material").unwrap(), "");
+        assert_eq!(parsed.open_values.get("Date/Period").unwrap(), "");
+        // Two field warnings; the present image_description does NOT warn.
+        assert_eq!(parsed.warnings.len(), 2);
+        assert!(parsed.warnings.iter().any(|w| w.contains("Material")));
+        assert!(parsed.warnings.iter().any(|w| w.contains("Date/Period")));
+    }
+
+    #[test]
+    fn parse_unified_warns_on_missing_image_description() {
+        // No <image_description> at all — the parser surfaces it as a health
+        // warning even though the field isn't carried on the struct.
+        let content = r#"<extraction field="Material">bronze</extraction>"#;
+        let fields = vec![vocab_field("Material")];
+        let parsed = parse_unified_response(content, &fields);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("image_description")));
+    }
+
+    #[test]
+    fn parse_unified_handles_multiline_values_with_special_chars() {
+        // Newlines, quotes, ampersands in an extraction value — the tag-walker
+        // reads raw inner text between the tags, so these pass through as-is.
+        let content = r#"<image_description>x</image_description>
+<extraction field="Material">Line one
+Line two with "quotes" & ampersand</extraction>"#;
+        let fields = vec![vocab_field("Material")];
+        let parsed = parse_unified_response(content, &fields);
+        let material = parsed.extractions.get("Material").unwrap();
+        assert!(material.contains("Line one"));
+        assert!(material.contains("Line two"));
+        assert!(material.contains("ampersand"));
+    }
+
+    #[test]
+    fn parse_unified_is_case_insensitive_on_field_attr() {
+        let content = r#"<extraction FIELD="Material">bronze</extraction>"#;
+        let fields = vec![vocab_field("Material")];
+        let parsed = parse_unified_response(content, &fields);
+        assert_eq!(parsed.extractions.get("Material").unwrap(), "bronze");
+    }
+
+    #[test]
+    fn parse_validation_drops_hallucinated_terms() {
+        let content = r#"<validated field="Material">
+<pick term="bronze" />
+<pick term="unobtainium" />
+</validated>"#;
+        let mut candidates = HashMap::new();
+        candidates.insert(
+            "material".to_string(),
+            vec!["bronze".to_string(), "iron".to_string()],
+        );
+        let (picks, warnings) = parse_validation_response(content, &candidates);
+        let kept = picks.get("material").unwrap();
+        assert_eq!(kept, &vec!["bronze".to_string()]);
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("unobtainium") && w.contains("hallucinated")));
+    }
+
+    #[test]
+    fn parse_validation_case_insensitive_term_match() {
+        let content = r#"<validated field="Shape"><pick term="CIRCULAR" /></validated>"#;
+        let mut candidates = HashMap::new();
+        candidates.insert("shape".to_string(), vec!["circular".to_string()]);
+        let (picks, warnings) = parse_validation_response(content, &candidates);
+        // Original casing from the candidate list is preserved.
+        assert_eq!(picks.get("shape").unwrap(), &vec!["circular".to_string()]);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_validation_empty_block_means_no_match() {
+        let content = r#"<validated field="Material"></validated>"#;
+        let mut candidates = HashMap::new();
+        candidates.insert("material".to_string(), vec!["bronze".to_string()]);
+        let (picks, warnings) = parse_validation_response(content, &candidates);
+        assert!(picks.get("material").unwrap().is_empty());
+        assert!(warnings.is_empty()); // empty block is an explicit "none fit", not an error
+    }
+
+    #[test]
+    fn parse_validation_tolerates_non_self_closing_pick() {
+        let content = r#"<validated field="Material"><pick term="bronze"></pick></validated>"#;
+        let mut candidates = HashMap::new();
+        candidates.insert("material".to_string(), vec!["bronze".to_string()]);
+        let (picks, _warnings) = parse_validation_response(content, &candidates);
+        assert_eq!(picks.get("material").unwrap(), &vec!["bronze".to_string()]);
+    }
+
+    fn column(name: &str, prompt: &str) -> ArtefactColumnSpec {
+        ArtefactColumnSpec {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+        }
+    }
+
+    #[test]
+    fn unified_prompt_omits_empty_prompt_columns_and_includes_record_xml() {
+        let record = json!({ "Object Name": "Kris", "Material": "Iron" });
+        let columns = vec![
+            column("Object Name", ""),
+            column("Material", "Use to confirm the primary material."),
+        ];
+        let fields = vec![vocab_field("Material")];
+        let prompt = build_unified_prompt(
+            "You are a museum cataloguer.",
+            &columns,
+            &fields,
+            &record,
+            true,
+        );
+        // The guided column's prompt line is present.
+        assert!(prompt.contains("- Material: Use to confirm the primary material."));
+        // The empty-prompt column is NOT listed as a guidance line.
+        assert!(!prompt.contains("- Object Name:"));
+        // The record is now XML, not the old JSON blob.
+        assert!(prompt.contains("<artefact_file>"));
+        assert!(prompt.contains("<Material>Iron</Material>"));
+        assert!(prompt.contains("You are a museum cataloguer."));
+        // Has an image, so the no-image framing note must NOT appear.
+        assert!(!prompt.contains("No image is attached"));
+    }
+
+    #[test]
+    fn unified_prompt_adds_no_image_note_when_image_absent() {
+        let prompt = build_unified_prompt("instr", &[], &[], &json!({}), false);
+        assert!(prompt.contains("No image is attached"));
+        assert!(prompt.contains("lower-confidence"));
+    }
+
+    #[test]
+    fn unified_prompt_appends_field_enumeration_with_inline_prompt() {
+        let fields = vec![
+            FieldSpec {
+                name: "Date/Period".to_string(),
+                field_type: "open".to_string(),
+                prompt: "Translate into CE date format.".to_string(),
+                vocab_source_ids: Vec::new(),
+            },
+            vocab_field("Material"),
+        ];
+        let prompt = build_unified_prompt("", &[], &fields, &json!({}), true);
+        // Vocab fields emit <extraction>, open fields emit <open_field>.
+        assert!(prompt.contains("<extraction field=\"Material\">"));
+        assert!(prompt.contains("<open_field field=\"Date/Period\">"));
+        // A non-empty field prompt is injected inline.
+        assert!(prompt.contains("Translate into CE date format."));
+    }
+
+    #[test]
+    fn unified_prompt_field_enumeration_preserves_config_order() {
+        let fields = vec![
+            vocab_field("Material"),
             open_field("Description"),
-            vocab_field("Style", &["Colonial"]),
-            vocab_field("Material", &["Paper"]),
-            open_field("Inscription"),
+            vocab_field("Shape"),
         ];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        assert!(warnings.is_empty());
-        assert!(!result.field_results["Description"].is_empty());
-        assert_eq!(result.field_results["Style"][0].value, "Colonial");
-        assert_eq!(result.field_results["Material"][0].value, "Paper");
-        assert!(!result.field_results["Inscription"].is_empty());
+        let prompt = build_unified_prompt("", &[], &fields, &json!({}), true);
+        let mat = prompt.find("<extraction field=\"Material\">").unwrap();
+        let desc = prompt.find("<open_field field=\"Description\">").unwrap();
+        let shape = prompt.find("<extraction field=\"Shape\">").unwrap();
+        assert!(mat < desc && desc < shape);
     }
 
     #[test]
-    fn missing_key_produces_a_distinct_warning_from_unparseable_value() {
-        let content = r#"{"_Materials_": "paper", "_Style_": [123]}"#;
-        let fields = vec![
-            open_field("Inscription"),
-            vocab_field("Style", &["Colonial"]),
+    fn visible_record_xml_sanitizes_column_names() {
+        // Column names with spaces/punctuation/apostrophes → valid XML tags.
+        let record = json!({
+            "Object Name": "Bowl",
+            "Curator's notes": "rare",
+            "Date/Period": "Tang",
+            "ID": "should-be-stripped"
+        });
+        let xml = visible_record_xml(&record);
+        assert!(xml.contains("<artefact_file>"));
+        // ID-like column filtered out.
+        assert!(!xml.contains("should-be-stripped"));
+        // Sanitized tags contain the values.
+        assert!(xml.contains(">Bowl<"));
+        assert!(xml.contains(">rare<"));
+        assert!(xml.contains(">Tang<"));
+        // No raw space/apostrophe/slash inside a tag name (tags only contain
+        // valid XML name chars).
+        for tag in ["Object Name", "Curator's notes", "Date/Period"] {
+            assert!(
+                !xml.contains(&format!("<{tag}>")),
+                "unsanitized tag leaked: {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_record_xml_dedupes_collision() {
+        // "A-B" and "A B" both sanitize toward "A_B" — the second gets a suffix
+        // so neither value is lost.
+        let record = json!({ "A-B": "first", "A B": "second" });
+        let xml = visible_record_xml(&record);
+        assert!(xml.contains(">first<"));
+        assert!(xml.contains(">second<"));
+    }
+
+    #[test]
+    fn build_validation_prompt_lists_pure_terms_no_scores() {
+        let fields = vec![vocab_field("Material")];
+        let candidates = vec![
+            NetCandidate {
+                term: "bronze".to_string(),
+                score: 0.9,
+            },
+            NetCandidate {
+                term: "iron".to_string(),
+                score: 0.7,
+            },
         ];
-        let (result, warnings) = parse_field_results(content, &fields).unwrap();
-        assert!(result.field_results["Inscription"].is_empty());
-        assert!(result.field_results["Style"].is_empty());
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings.iter().any(|w| w.contains("Inscription") && w.contains("key missing")));
-        assert!(warnings.iter().any(|w| w.contains("Style") && w.contains("no usable candidates")));
+        let extracted = "bronze, patinated";
+        let refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> =
+            vec![(0, &fields[0], extracted, &candidates)];
+        let prompt = build_validation_prompt(&refs, 3);
+        // Terms present.
+        assert!(prompt.contains("- bronze"));
+        assert!(prompt.contains("- iron"));
+        // Scores and thesaurus badges are NOT present (pure terms only).
+        assert!(!prompt.contains("0.9"));
+        assert!(!prompt.contains("[NHB]"));
+        // The fixed XML reply contract is present.
+        assert!(prompt.contains("<validated field="));
+        assert!(prompt.contains("VERBATIM"));
+    }
+
+    #[test]
+    fn build_validation_prompt_injects_field_guidance() {
+        let fields = vec![FieldSpec {
+            name: "Obj./Work type".to_string(),
+            field_type: "vocab".to_string(),
+            prompt: "Prefer the broadest applicable type.".to_string(),
+            vocab_source_ids: Vec::new(),
+        }];
+        let candidates = vec![NetCandidate {
+            term: "bowl".to_string(),
+            score: 0.8,
+        }];
+        let refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> =
+            vec![(0, &fields[0], "a vessel", &candidates)];
+        let prompt = build_validation_prompt(&refs, 3);
+        assert!(prompt.contains("Prefer the broadest applicable type."));
+    }
+
+    #[test]
+    fn trim_for_validation_drops_open_field_keeps_description_and_extractions() {
+        let content1 = r#"<image_description>A bowl.</image_description>
+<extraction field="Material">bronze</extraction>
+<open_field field="Date/Period">8th c.</open_field>"#;
+        let trimmed = trim_for_validation(content1);
+        assert!(trimmed.contains("<image_description>A bowl.</image_description>"));
+        assert!(trimmed.contains("<extraction field=\"Material\">bronze</extraction>"));
+        // Open-field answers are irrelevant to validation and must be dropped.
+        assert!(!trimmed.contains("8th c."));
+    }
+
+    /// Build a throwaway provider for body-shape tests (no transport happens).
+    fn provider_with(format: ApiFormat) -> Provider {
+        Provider {
+            name: "test".to_string(),
+            base_url: "https://example.test".to_string(),
+            api_key: "k".to_string(),
+            model: "m".to_string(),
+            api_format: format,
+        }
+    }
+
+    #[test]
+    fn openai_body_threads_turns_and_attaches_image_once() {
+        let img = ImageData {
+            bytes: vec![1, 2, 3],
+            mime: "image/png".to_string(),
+        };
+        let turns = vec![
+            Turn {
+                role: TurnRole::User,
+                text: "describe this".to_string(),
+                image: Some(img),
+            },
+            Turn {
+                role: TurnRole::Assistant,
+                text: "a description".to_string(),
+                image: None,
+            },
+            Turn {
+                role: TurnRole::User,
+                text: "catalogue it".to_string(),
+                image: None,
+            },
+        ];
+        let body = build_completion_body(&provider_with(ApiFormat::OpenAi), &turns);
+        let messages = body.get("messages").and_then(Value::as_array).unwrap();
+        assert_eq!(messages.len(), 3);
+        // Turn 1: user with a parts array (text + image_url).
+        assert_eq!(messages[0]["role"], "user");
+        assert!(messages[0]["content"].is_array());
+        assert!(messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.get("type") == Some(&serde_json::Value::String("image_url".into()))));
+        // Turn 2: assistant, plain string content.
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "a description");
+        // Turn 3: user, plain string content (no image).
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "catalogue it");
+    }
+
+    #[test]
+    fn gemini_body_threads_input_array_with_image_step() {
+        let img = ImageData {
+            bytes: vec![9],
+            mime: "image/jpeg".to_string(),
+        };
+        let turns = vec![
+            Turn {
+                role: TurnRole::User,
+                text: "describe".to_string(),
+                image: Some(img),
+            },
+            Turn {
+                role: TurnRole::Assistant,
+                text: "desc".to_string(),
+                image: None,
+            },
+        ];
+        let body = build_completion_body(&provider_with(ApiFormat::Gemini), &turns);
+        let input = body.get("input").and_then(Value::as_array).unwrap();
+        // text, image, text — image is its own step.
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "text");
+        assert_eq!(input[1]["type"], "image");
+        assert_eq!(input[2]["type"], "text");
     }
 }

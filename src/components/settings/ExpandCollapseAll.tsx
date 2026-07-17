@@ -10,7 +10,7 @@ interface ExpandCollapseAllProps {
  *  actions.setAllExpanded via the two callbacks. */
 export function ExpandCollapseAll({ onExpandAll, onCollapseAll }: ExpandCollapseAllProps) {
   return (
-    <div className="flex items-center justify-end gap-2">
+    <div className="flex items-center justify-start gap-2">
       <Button onClick={onExpandAll} variant="ghost" size="sm" className="text-muted-foreground">
         Expand all
       </Button>

@@ -8,6 +8,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FieldsTab } from "./FieldsTab";
 import { VocabTab } from "./VocabTab";
 import { ProvidersTab } from "./ProvidersTab";
+import { EmbeddingProvidersSection } from "./EmbeddingProvidersSection";
 import { ArtefactFileTab } from "./ArtefactFileTab";
 import { AboutTab } from "./AboutTab";
 
@@ -62,7 +63,12 @@ export function SettingsScreen({ state, actions }: Props) {
       <div className="flex-1 overflow-y-auto p-5">
         {tab === "fields" && <FieldsTab state={state} actions={actions} />}
         {tab === "vocab" && <VocabTab state={state} actions={actions} />}
-        {tab === "ai" && <ProvidersTab state={state} actions={actions} />}
+        {tab === "ai" && (
+          <div className="flex flex-col gap-6">
+            <ProvidersTab state={state} actions={actions} />
+            <EmbeddingProvidersSection state={state} actions={actions} />
+          </div>
+        )}
         {tab === "artefactFile" && <ArtefactFileTab state={state} actions={actions} />}
         {tab === "about" && <AboutTab />}
       </div>

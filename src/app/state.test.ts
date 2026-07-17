@@ -5,24 +5,24 @@ import type { Settings } from "./types";
 
 describe("reducer TOGGLE_FIELD_VALUE", () => {
   it("builds up a multi-select and joins values with ' | ' for display/export", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
-    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "Materials", confidence: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "Materials", similarity: null });
 
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", confidence: null });
-    expect(s.fieldSelections.u1_material).toEqual({ source: "multi", value: "clay | glaze", values: ["clay", "glaze"], listName: "", confidence: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "multi", value: "clay | glaze", values: ["clay", "glaze"], listName: "", similarity: null });
   });
 
   it("toggling an already-selected value removes it, falling back to a single selection", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", confidence: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null });
 
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
-    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "glaze", values: ["glaze"], listName: "Materials", confidence: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "glaze", values: ["glaze"], listName: "Materials", similarity: null });
   });
 
   it("removing the last remaining value clears the field selection entirely", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", confidence: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
 
     expect(s.fieldSelections.u1_material).toBeUndefined();
   });
@@ -41,7 +41,7 @@ describe("reducer", () => {
       ...initialState,
       parseStatus: "completed" as const,
       results: [{ uid: "u1", id: "A1", title: "Cup", category: "Ceramics", status: "done" as const, record: {} }],
-      aiResults: { u1: { material: [{ value: "clay", confidence: 0.8 }] } },
+      aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
       expandedRows: { u1: true },
     };
 
@@ -59,9 +59,9 @@ describe("reducer", () => {
       files: [{ id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "valid", errors: [] }],
       parseStatus: "completed",
       results: [{ uid: "u1", id: "A1", title: "Cup", category: "Ceramics", status: "done" as const, record: {} }],
-      aiResults: { u1: { material: [{ value: "clay", confidence: 0.8 }] } },
+      aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
       expandedRows: { u1: true },
-      fieldSelections: { u1_material: { source: "ai", value: "clay", values: ["clay"], listName: "AI", confidence: 0.8 } },
+      fieldSelections: { u1_material: { source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 } },
       fieldDropdownOpen: { u1_material: true },
       fieldDropdownSearch: { u1_material: "cl" },
       resultsFilter: "done",
@@ -115,16 +115,33 @@ describe("reducer", () => {
     expect(next.fieldDraft!.fields[before].name).toBe("Material");
   });
 
-  it("appends a required column to the draft via PATCH_ARTEFACT_DRAFT", () => {
+  it("appends a column to the draft via PATCH_ARTEFACT_DRAFT", () => {
     const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", required: false, description: "" }] }),
+      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "" }] }),
     });
     expect(next.artefactDraft).not.toBeNull();
     expect(next.artefactDraft!.artefactFields.length).toBe(before + 1);
-    expect(next.artefactDraft!.artefactFields[before].required).toBe(false);
+    expect(next.artefactDraft!.artefactFields[before].name).toBe("Obj. Number");
+  });
+
+  it("seeds the vision instruction into the artefact draft and lets it be patched", () => {
+    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
+    // The draft is null until the first PATCH self-heals it from settings.
+    expect(base.artefactDraft).toBeNull();
+    const seeded = reducer(base, {
+      type: "PATCH_ARTEFACT_DRAFT",
+      patch: (d) => d, // no-op patch forces the self-heal
+    });
+    // Self-heal carries the vision instruction from settings into the draft.
+    expect(seeded.artefactDraft!.visionSystemPromptInstruction).toBe(initialState.settings.visionSystemPromptInstruction);
+    const next = reducer(seeded, {
+      type: "PATCH_ARTEFACT_DRAFT",
+      patch: (d) => ({ ...d, visionSystemPromptInstruction: "edited vision guidance" }),
+    });
+    expect(next.artefactDraft!.visionSystemPromptInstruction).toBe("edited vision guidance");
   });
 
   it("seeds a provider's persisted connStatus into the draft (and defaults to untested)", () => {

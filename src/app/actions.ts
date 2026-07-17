@@ -2,22 +2,23 @@
 // Heavy async work (parsing, image extraction, AI) lives here; pure settings
 // mutations dispatch PATCH_SETTINGS and the debounced saver persists them.
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, writeFile } from "@tauri-apps/plugin-fs";
 
 import { useDropZone } from "../hooks/useDropZone";
-import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
-import { artefactDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
-import { _DEF_AF, _DEF_SYSTEM_PROMPT_CONTRACT, fmt, gid } from "./defaults";
-import type { ApiFormat, ArtefactField, ArtefactRow, CatalogueField, FieldType, Provider, Settings, SettingsTab } from "./types";
+import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
+import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
+import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
+import type { ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldType, Provider, Settings, SettingsTab } from "./types";
 import { isTabDirty } from "./drafts";
-import { parseArtefactFile, makeVocabList, roleFieldNames, aiRecord } from "../lib/spreadsheet";
+import { parseArtefactFile, roleFieldNames } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
-import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, activeProvider } from "../lib/ai";
+import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
+import * as vocabLib from "../lib/vocab";
 import { pushLog } from "../lib/logs";
-import { saveState, withDefaultSettings } from "../lib/store";
-import { SettingsSchema } from "./schema";
+import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, stripBuiltinLegacyVocabFields } from "../lib/store";
+import { PersistedSettingsSchema } from "./schema";
 import type { ConfirmDeleteOptions } from "../components/ConfirmDialog";
 
 export interface AppActions {
@@ -81,7 +82,7 @@ export interface AppActions {
   onTriggerClick(key: string): void;
   setFieldSearch(key: string, val: string): void;
   /** Toggle a vocab term in/out of a field's selection set (multi-select). */
-  toggleFieldValue(key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, confidence: number | null): void;
+  toggleFieldValue(key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null): void;
   clearField(key: string): void;
   setOpenFieldValue(key: string, val: string): void;
 
@@ -97,43 +98,81 @@ export interface AppActions {
   toggleProv(id: string): void;
   removeField(id: string): Promise<void>;
   updateField(id: string, key: EditableCatalogueFieldKey, value: string | FieldType): void;
-  updateSystemPromptInstruction(value: string): void;
-  updateSystemPromptContract(value: string): void;
-  setContractEditing(editing: boolean): void;
-  overrideContract(): Promise<void>;
   addVocabSrc(fId: string, vId: string): void;
   removeVocabSrc(fId: string, sId: string): void;
   /** Persist only this catalogue-field row's content edits to disk. */
   saveFieldCard(id: string): Promise<void>;
   /** Revert only this catalogue-field row's content edits. */
   discardFieldCard(id: string): void;
-  /** Persist only the System Instructions prose card. */
-  saveSystemInstruction(): Promise<void>;
-  /** Revert only the System Instructions prose card. */
-  discardSystemInstruction(): void;
-  /** Persist only the Output Contract prose card. */
-  saveContract(): Promise<void>;
-  /** Revert only the Output Contract prose card. */
-  discardContract(): void;
   /** Append an empty catalogue-field row to the draft (expanded), mirroring the
    *  ProvidersTab add flow. Persisted on the tab-level Save / per-card Save. */
   startAddField(): void;
 
-  // settings: vocab
-  onVocabClick(): void;
-  onVocabDragOver(e: React.DragEvent): void;
-  onVocabDragLeave(): void;
-  onVocabDrop(e: React.DragEvent): void;
-  removeVocabList(id: string): Promise<void>;
+  // settings: vocab — a source's files/fields/sync state have real Rust-side
+  // disk effects and persist immediately (mirrors removeVocabList/reorderVocab
+  // below); only the Display Name is draft-buffered per card.
+  /** Append an empty vocabulary source (no files yet), expanded, mirroring
+   *  startAddField/startAddProv. */
+  startAddVocabSource(): void;
+  /** Stage one or more files into a source: persists their bytes via Rust,
+   *  detects header columns, and merges them into the source's file/field
+   *  lists. Marks the source stale if it was previously synced. */
+  addFilesToSource(sourceId: string, files: FileList | File[]): Promise<void>;
+  /** Remove one staged file from a source. */
+  removeFileFromSource(sourceId: string, filename: string): Promise<void>;
+  /** Read a staged file's bytes back and save them via a Tauri save dialog. */
+  downloadVocabFile(sourceId: string, filename: string): Promise<void>;
+  /** Toggle whether a detected column feeds the embedding text / AI-facing
+   *  shortlist hint. Marks the source stale if previously synced. */
+  toggleSourceFieldAI(sourceId: string, fieldName: string): void;
+  /** Set (or clear, with `null`) which detected column supplies the term /
+   *  dedup key on next sync. Marks the source stale if previously synced —
+   *  changing this changes what every row's identity is. */
+  setVocabIngestionField(sourceId: string, fieldName: string | null): void;
+  /** Set (or clear, with `null`) which detected column is shown as the
+   *  primary label in the main screen's cataloguing dropdown. Purely
+   *  cosmetic — never marks the source stale. */
+  setVocabLabelField(sourceId: string, fieldName: string | null): void;
+  /** Set (or clear, with `null`) which detected column is shown as a badge
+   *  chip beside the label in the cataloguing dropdown. Purely cosmetic —
+   *  never marks the source stale. */
+  setVocabBadgeField(sourceId: string, fieldName: string | null): void;
+  /** Run (or resume) an incremental sync for this source against the active
+   *  embedding provider. No-op if there's no active embedding provider or no
+   *  files. */
+  syncVocabSource(sourceId: string): Promise<void>;
+  /** Sync every source that has files, sequentially. No-op if there's no
+   *  active embedding provider. */
+  syncAllVocab(): Promise<void>;
+  /** Cancel an in-flight sync for this source. */
+  cancelVocabSync(sourceId: string): Promise<void>;
+  /** Drop just this source's embedded index (keeps its files). */
+  flushVocabSource(sourceId: string): Promise<void>;
+  /** Drop every source's embedded index. */
+  flushAllVocab(): Promise<void>;
+  /** Delete a vocabulary source entirely: its files, embedded index, and
+   *  dangling vocabSource references on catalogue fields. */
+  removeVocabSource(id: string): Promise<void>;
+  /** Fetch and cache a source's full term list (for the manual vocab-picker
+   *  dropdown) if not already cached or in flight. No-op otherwise. */
+  ensureVocabTermsLoaded(sourceId: string): Promise<void>;
   toggleVocab(id: string): void;
-  /** Update a vocab list's display name directly in the draft (like updateField). */
+  /** Update a vocab source's display name directly in the draft (like updateField). */
   updateVocabName(id: string, name: string): void;
-  /** Reorder vocab lists to the given id sequence (result of a drag). Persists immediately. */
+  /** Reorder vocab sources to the given id sequence (result of a drag). Persists immediately. */
   reorderVocab(ids: string[]): Promise<void>;
-  /** Persist only this vocab list's rename to disk. */
+  /** Persist only this vocab source's rename to disk. */
   saveVocabCard(id: string): Promise<void>;
-  /** Revert only this vocab list's rename. */
+  /** Revert only this vocab source's rename. */
   discardVocabCard(id: string): void;
+
+  // settings: vocab retrieval — top-level (not draft-buffered). Persist on change.
+  /** Candidates the embedding search returns per vocab field before Call 3 (1–100). */
+  setVocabNetCount(n: number): void;
+  /** Final picks per vocab field after Call 3 (≤ net count). */
+  setVocabShortlistCount(n: number): void;
+  /** Whether Call 3 (vision validation) runs. */
+  setCall3Enabled(on: boolean): void;
 
   // settings: providers — edits accumulate in a unified draft and persist only
   // on the tab-level Save (see saveProviders). Test Connection is the one
@@ -154,12 +193,28 @@ export interface AppActions {
   /** Revert only this provider card's content edits back to its persisted value. */
   discardProvCard(id: string): void;
 
+  // settings: embedding providers — same per-card draft/save/discard shape as
+  // the chat providers above, kept as a separate list/section within the same
+  // "ai" tab (see EmbeddingProvidersSection.tsx).
+  toggleEmbProv(id: string): void;
+  startAddEmbProv(): void;
+  setEmbProvF(id: string, k: keyof EmbeddingProvider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>): void;
+  setEmbProvModel(id: string, model: string): void;
+  setEmbProvApiFormat(id: string, format: EmbeddingApiFormat): void;
+  toggleEmbProvSupportsImage(id: string): void;
+  toggleEmbProvKey(): void;
+  testEmbConn(id: string): Promise<void>;
+  deleteEmbProv(id: string): Promise<void>;
+  setActiveEmbProv(id: string): void;
+  saveEmbProvCard(id: string): Promise<void>;
+  discardEmbProvCard(id: string): void;
+
   // settings: artefact fields — content edits accumulate per-card; reorders and
   // deletes persist immediately. Rows expand on click via toggleAF.
   toggleAF(id: string): void;
   /** Reorder artefact columns to the given id sequence (result of a drag). Persists immediately. */
   reorderAF(ids: string[]): Promise<void>;
-  updateAF(id: string, key: EditableArtefactFieldKey, value: string | boolean): void;
+  updateAF(id: string, key: EditableArtefactFieldKey, value: string): void;
   removeAF(id: string): Promise<void>;
   /** Append an empty artefact-column row to the draft (expanded). Persisted on per-card Save. */
   startAddAF(): void;
@@ -167,6 +222,20 @@ export interface AppActions {
   saveArtefactCard(id: string): Promise<void>;
   /** Revert only this artefact-column row's content edits. */
   discardArtefactCard(id: string): void;
+  /** Update the unified system prompt (Call 1 persona + output-format preamble)
+   *  in the draft. */
+  updateVisionSystemPromptInstruction(value: string): void;
+  /** Persist the unified system prompt to disk. */
+  saveVisionSystemPromptInstruction(): Promise<void>;
+  /** Revert the unified system prompt to its persisted value. */
+  discardVisionSystemPromptInstruction(): void;
+  /** Toggle whether the unified system prompt textarea is editable. Backed by a
+   *  warning-confirmed Override (it tells the model how to format responses). */
+  setPromptEditing(editing: boolean): void;
+  /** Gate unlocking the unified system prompt behind a warning confirmation. On
+   *  confirm, seeds the draft with the default so editing starts from known-good
+   *  text, then unlocks. */
+  overridePrompt(): Promise<void>;
 
   // settings: import/export
   exportSettings(): Promise<void>;
@@ -240,6 +309,22 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     []
   );
 
+  // Helper: mutate the embedding-providers draft WITHOUT persisting. Mirrors
+  // patchProvDraft for the separate embedding-model list.
+  const patchEmbProvDraft = useCallback(
+    (fn: (d: EmbeddingProviderDraft) => EmbeddingProviderDraft) => {
+      dispatch({ type: "PATCH_EMB_PROVIDER_DRAFT", patch: fn });
+    },
+    [dispatch]
+  );
+
+  /** Map a single embedding-provider draft entry by id. Mirrors mapDraftEntry. */
+  const mapEmbDraftEntry = useCallback(
+    (id: string, fn: (e: EmbeddingProviderDraft["providers"][number]) => EmbeddingProviderDraft["providers"][number]) =>
+      (d: EmbeddingProviderDraft): EmbeddingProviderDraft => ({ ...d, providers: d.providers.map((e) => (e.id === id ? fn(e) : e)) }),
+    []
+  );
+
   // --- theme / nav / zoom ---
   const toggleDark = useCallback(() => {
     dispatch({ type: "SET_DARK", darkMode: !state.darkMode });
@@ -253,7 +338,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     switch (tab) {
       case "fields": dispatch({ type: "CLEAR_FIELD_DRAFT" }); break;
       case "vocab": dispatch({ type: "CLEAR_VOCAB_DRAFT" }); break;
-      case "ai": dispatch({ type: "CLEAR_PROVIDER_DRAFT" }); dispatch({ type: "SET_PROV_SAVE_STATUS", status: null }); break;
+      case "ai":
+        dispatch({ type: "CLEAR_PROVIDER_DRAFT" }); dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
+        dispatch({ type: "CLEAR_EMB_PROVIDER_DRAFT" }); dispatch({ type: "SET_EMB_PROV_SAVE_STATUS", status: null });
+        break;
       case "artefactFile": dispatch({ type: "CLEAR_ARTEFACT_DRAFT" }); break;
       case "about": break;
     }
@@ -420,6 +508,23 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → AI." });
       return;
     }
+    // A vocab field whose source hasn't been synced yet resolves to neither
+    // the full list nor a shortlist — it would silently prompt as
+    // unconstrained free text (see findUnsyncedVocabField). Fail the whole
+    // run up front rather than producing quietly-wrong results.
+    const unsynced = findUnsyncedVocabField(state.settings);
+    if (unsynced) {
+      dispatch({ type: "SET_PARSE_ERROR", error: `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.` });
+      return;
+    }
+    // Vocab fields are resolved purely by embedding search (no LLM), so they
+    // need an active embedding provider — without one they'd silently come
+    // back empty. Fail loudly with a pointer to Settings → AI.
+    const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
+    if (noEmbed) {
+      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → AI before parsing.` });
+      return;
+    }
 
     // Fresh control flags for this run: a previous run's cancel/pause can't
     // bleed in. Polled at the top of each loop iteration (see below).
@@ -485,20 +590,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       // terminal outcome (populated/failed).
       const jobId = `row-${row.uid}`;
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
-      const filteredRecord = aiRecord(row.record, state.settings.artefactFields || []);
+      const record = row.record ?? {};
       pushLog({
         status: "busy",
         jobId,
         label: `Now parsing row ID ${i + 1}`,
         detail: row.id ? `Obj. Number ${row.id}` : row.title,
-        verbose: { record: filteredRecord },
+        verbose: { record },
       });
       await delay(200); // brief tick so the UI shows processing
 
       const rowStart = performance.now();
-      let ai: Record<string, { value: string; confidence: number }[]>;
+      let ai: Record<string, { value: string; similarity?: number }[]>;
       try {
-        ai = await catalogueArtefact(prov, state.settings.fields, filteredRecord, row.imagePath, state.settings, `row-${row.uid}`);
+        ai = await catalogueArtefact(prov, state.settings.fields, record, row.imagePath, state.settings, `row-${row.uid}`);
       } catch (e) {
         const message = String((e as Error)?.message || e);
         // A per-row Stop cancels only this row: mark it cancelled and carry on
@@ -530,7 +635,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         elapsedMs: rowElapsed,
         verbose: {
           record: Object.fromEntries(
-            Object.entries(ai).map(([k, v]) => [k, (v || []).map((s) => `${s.value} (${Math.round(s.confidence * 100)}%)`).join(" · ")])
+            Object.entries(ai).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
           ),
         },
       });
@@ -589,6 +694,16 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → AI." });
       return;
     }
+    const unsynced = findUnsyncedVocabField(state.settings);
+    if (unsynced) {
+      dispatch({ type: "SET_PARSE_ERROR", error: `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.` });
+      return;
+    }
+    const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
+    if (noEmbed) {
+      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → AI before parsing.` });
+      return;
+    }
 
     // Clear the stale batch banner from the original Parse; a retry outcome is
     // reflected on the row itself, not the global error.
@@ -596,18 +711,18 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
     const jobId = `row-${row.uid}`;
     dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
-    const filteredRecord = aiRecord(row.record, state.settings.artefactFields || []);
+    const record = row.record ?? {};
     pushLog({
       status: "busy",
       jobId,
       label: "Retrying row",
       detail: row.id ? `Obj. Number ${row.id}` : row.title,
-      verbose: { record: filteredRecord },
+      verbose: { record },
     });
 
     const start = performance.now();
     try {
-      const ai = await catalogueArtefact(prov, state.settings.fields, filteredRecord, row.imagePath, state.settings, `row-${row.uid}`);
+      const ai = await catalogueArtefact(prov, state.settings.fields, record, row.imagePath, state.settings, `row-${row.uid}`);
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "done", ai });
       pushLog({
         status: "ok",
@@ -617,7 +732,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         elapsedMs: Math.round(performance.now() - start),
         verbose: {
           record: Object.fromEntries(
-            (Object.entries(ai) as [string, { value: string; confidence: number }[]][]).map(([k, v]) => [k, (v || []).map((s) => `${s.value} (${Math.round(s.confidence * 100)}%)`).join(" · ")])
+            (Object.entries(ai) as [string, { value: string; similarity?: number }[]][]).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
           ),
         },
       });
@@ -722,8 +837,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   );
   const setFieldSearch = useCallback((key: string, val: string) => dispatch({ type: "SET_FIELD_SEARCH", key, value: val }), [dispatch]);
   const toggleFieldValue = useCallback(
-    (key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, confidence: number | null) =>
-      dispatch({ type: "TOGGLE_FIELD_VALUE", key, value, source, listName, confidence }),
+    (key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null) =>
+      dispatch({ type: "TOGGLE_FIELD_VALUE", key, value, source, listName, similarity }),
     [dispatch]
   );
   const clearField = useCallback((key: string) => dispatch({ type: "CLEAR_FIELD", key }), [dispatch]);
@@ -779,28 +894,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const updateField = useCallback((id: string, key: EditableCatalogueFieldKey, value: string | FieldType) => {
     patchDraft((d) => ({ ...d, fields: d.fields.map((f) => (f.id === id ? { ...f, [key]: value } : f)) }));
   }, [patchDraft]);
-  const updateSystemPromptInstruction = useCallback((value: string) => {
-    patchDraft((d) => ({ ...d, systemPromptInstruction: value }));
-  }, [patchDraft]);
-  const updateSystemPromptContract = useCallback((value: string) => {
-    patchDraft((d) => ({ ...d, systemPromptContractOverride: value }));
-  }, [patchDraft]);
-  const setContractEditing = useCallback((editing: boolean) => dispatch({ type: "SET_CONTRACT_EDITING", editing }), [dispatch]);
-  const overrideContract = useCallback(async () => {
-    // Gate editing the locked output contract behind a warning confirmation,
-    // since a malformed contract stops the app from parsing AI responses. On
-    // confirm, seed the override with the default (so editing starts from a
-    // known-good text) and unlock the box.
-    const ok = await confirmDelete({
-      title: "Override output contract?",
-      message: "This contract tells the AI how to format its answer so the app can read it. Editing it can stop responses from being parsed. Only continue if you know what you're doing.",
-      confirmLabel: "Override",
-    });
-    if (!ok) return;
-    const current = state.fieldDraft?.systemPromptContractOverride ?? state.settings.systemPromptContractOverride ?? "";
-    if (!current) updateSystemPromptContract(_DEF_SYSTEM_PROMPT_CONTRACT);
-    setContractEditing(true);
-  }, [confirmDelete, state.fieldDraft, state.settings.systemPromptContractOverride, updateSystemPromptContract, setContractEditing]);
   const addVocabSrc = useCallback((fId: string, vId: string) => {
     patchDraft((d) => ({ ...d, fields: d.fields.map((f) => (f.id === fId ? { ...f, vocabSources: [...f.vocabSources, vId] } : f)) }));
   }, [patchDraft]);
@@ -808,7 +901,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchDraft((d) => ({ ...d, fields: d.fields.map((f) => (f.id === fId ? { ...f, vocabSources: f.vocabSources.filter((id) => id !== sId) } : f)) }));
   }, [patchDraft]);
 
-  // --- per-card save/discard (catalogue fields + the two prose cards) ---
+  // --- per-card save/discard (catalogue fields) ---
   // Each card persists/reverts only its own slice, while structural changes
   // (add/delete/reorder) stay buffered for the tab-level Apply. A card Save
   // writes `settings` with only that card's draft slice applied, then syncs
@@ -852,51 +945,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "PATCH_FIELD_DRAFT", patch: (d) => ({ ...d, fields: d.fields.map((f) => (f.id === id ? { ...saved, vocabSources: [...saved.vocabSources] } : f)) }) });
   }, [state.fieldDraft, state.settings.fields, dispatch]);
 
-  const saveSystemInstruction = useCallback(async () => {
-    const draft = state.fieldDraft;
-    if (!draft) return;
-    dispatch({ type: "SET_FIELD_CARD_STATUS", id: "system-instruction", status: "saving" });
-    const newSettings: Settings = { ...state.settings, systemPromptInstruction: draft.systemPromptInstruction };
-    try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      dispatch({ type: "SET_FIELD_CARD_STATUS", id: "system-instruction", status: "ok" });
-    } catch {
-      dispatch({ type: "SET_FIELD_CARD_STATUS", id: "system-instruction", status: "err" });
-    }
-  }, [state.fieldDraft, state.settings, state.darkMode, state.zoom, dispatch]);
-
-  const discardSystemInstruction = useCallback(() => {
-    const draft = state.fieldDraft;
-    if (!draft) return;
-    dispatch({ type: "SET_FIELD_CARD_STATUS", id: "system-instruction", status: null });
-    dispatch({ type: "PATCH_FIELD_DRAFT", patch: (d) => ({ ...d, systemPromptInstruction: state.settings.systemPromptInstruction }) });
-  }, [state.fieldDraft, state.settings.systemPromptInstruction, dispatch]);
-
-  const saveContract = useCallback(async () => {
-    const draft = state.fieldDraft;
-    if (!draft) return;
-    dispatch({ type: "SET_FIELD_CARD_STATUS", id: "output-contract", status: "saving" });
-    const newSettings: Settings = { ...state.settings, systemPromptContractOverride: draft.systemPromptContractOverride };
-    try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      // Persisting a custom override locks the box again — mirroring the
-      // tab-level save, overriding always starts with Override.
-      dispatch({ type: "SET_CONTRACT_EDITING", editing: false });
-      dispatch({ type: "SET_FIELD_CARD_STATUS", id: "output-contract", status: "ok" });
-    } catch {
-      dispatch({ type: "SET_FIELD_CARD_STATUS", id: "output-contract", status: "err" });
-    }
-  }, [state.fieldDraft, state.settings, state.darkMode, state.zoom, dispatch]);
-
-  const discardContract = useCallback(() => {
-    const draft = state.fieldDraft;
-    if (!draft) return;
-    dispatch({ type: "SET_FIELD_CARD_STATUS", id: "output-contract", status: null });
-    dispatch({ type: "PATCH_FIELD_DRAFT", patch: (d) => ({ ...d, systemPromptContractOverride: state.settings.systemPromptContractOverride ?? "" }) });
-    dispatch({ type: "SET_CONTRACT_EDITING", editing: false });
-  }, [state.fieldDraft, state.settings.systemPromptContractOverride, dispatch]);
   // Append an empty catalogue-field row directly into the draft and expand it,
   // mirroring startAddProv — the user fills it in inline rather than via a
   // separate "New Field" form. FieldsTab scrolls the new row into view.
@@ -907,88 +955,344 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [patchDraft, dispatch]);
 
   // --- settings: vocab ---
-  // Vocab uploads buffer in a draft for per-card save; renames commit per-card.
-  // Reorders and deletes persist immediately (no banner).
-  const addVocabFiles = useCallback(async (list: FileList | File[]) => {
+  // A source's files/fields/embedding status have real Rust-side disk effects
+  // (staged bytes, a LanceDB table) and persist immediately, mirroring
+  // removeVocabList's old "no banner" structural-change pattern — buffering
+  // them in a draft would let Discard desync the UI from what's already on
+  // disk. Only the Display Name is draft-buffered per card (unchanged from
+  // before). Reorders and deletes also persist immediately.
+  const startAddVocabSource = useCallback(() => {
+    const id = gid();
+    patchVocabDraft((d) => ({
+      ...d,
+      vocabSources: [...d.vocabSources, {
+        id, name: "", files: [], fields: [],
+        ingestionField: null, labelField: null, badgeField: null,
+        embedding: { status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null },
+      }],
+    }));
+    // Also seed persisted settings immediately (structural add, like startAddField
+    // does for its own draft) so the source exists on disk for the very first
+    // addFilesToSource call, which needs a real sourceId to stage files under.
+    patch((s) => ({
+      ...s,
+      vocabSources: [...s.vocabSources, {
+        id, name: "", files: [], fields: [],
+        ingestionField: null, labelField: null, badgeField: null,
+        embedding: { status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null },
+      }],
+    }));
+    dispatch({ type: "TOGGLE_VOCAB", id });
+  }, [patchVocabDraft, patch, dispatch]);
+
+  const addFilesToSource = useCallback(async (sourceId: string, list: FileList | File[]) => {
     const ok = Array.from(list).filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
     if (!ok.length) return;
-    const items = await Promise.all(ok.map((f) => makeVocabList(f)));
-    patchVocabDraft((d) => ({ ...d, vocabularyLists: [...d.vocabularyLists, ...items] }));
-    // Expand newly-uploaded rows so the editor is immediately visible,
-    // mirroring startAddField's "patch draft, then toggle-expand" convention.
-    for (const item of items) dispatch({ type: "TOGGLE_VOCAB", id: item.id });
-  }, [patchVocabDraft, dispatch]);
+    dispatch({ type: "SET_VOCAB_CARD_ERROR", id: sourceId, error: null });
+    dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "saving" });
+    try {
+      const staged = [];
+      for (const f of ok) {
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        staged.push(await vocabLib.stageVocabFile(sourceId, f.name, bytes));
+      }
+      const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+      if (!source) return;
+      const files = [...source.files, ...staged.map((s) => ({ id: s.id, filename: s.filename, addedDate: s.addedDate, sizeBytes: s.sizeBytes, rowCountLast: s.rowCount }))];
+      const existingNames = new Set(source.fields.map((f) => f.name));
+      const newFieldNames = new Set(staged.flatMap((s) => s.detectedFields));
+      const fields = [
+        ...source.fields,
+        ...[...newFieldNames].filter((n) => !existingNames.has(n)).map((name) => ({ name, includeForAI: true })),
+      ];
+      // Re-embedding is only meaningful once real content has changed; a
+      // source that was synced now has fresher content than its index reflects.
+      const embedding = source.embedding.status === "synced"
+        ? { ...source.embedding, status: "stale" as const }
+        : source.embedding;
+      const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, files, fields, embedding } : v));
+      const newSettings: Settings = { ...state.settings, vocabSources };
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "ok" });
+    } catch (e) {
+      console.error("[artefact] addFilesToSource failed:", e);
+      dispatch({ type: "SET_VOCAB_CARD_ERROR", id: sourceId, error: (e as Error)?.message || String(e) });
+      dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "err" });
+    }
+  }, [state.settings, state.darkMode, state.zoom, dispatch]);
 
-  const onVocabClick = useCallback(() => ensureInput(".xlsx,.xls,.csv", (fl) => void addVocabFiles(fl)), [ensureInput, addVocabFiles]);
-  const setVocabDrag = useCallback((drag: boolean) => dispatch({ type: "SET_VOCAB_DRAG", drag }), [dispatch]);
-  const { onDragOver: onVocabDragOver, onDragLeave: onVocabDragLeave, onDrop: onVocabDrop } = useDropZone(setVocabDrag, (fl) => void addVocabFiles(fl));
+  const removeFileFromSource = useCallback(async (sourceId: string, filename: string) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
+    await vocabLib.removeVocabFile(sourceId, filename);
+    const files = source.files.filter((f) => f.filename !== filename);
+    const embedding = source.embedding.status === "synced"
+      ? { ...source.embedding, status: "stale" as const }
+      : source.embedding;
+    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, files, embedding } : v));
+    const newSettings: Settings = { ...state.settings, vocabSources };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+    } catch { console.error("[artefact] removeFileFromSource: save failed"); }
+  }, [state.settings, state.darkMode, state.zoom, dispatch]);
 
-  const removeVocabList = useCallback(async (id: string) => {
-    const live = state.vocabDraft ?? vocabDraftFromSettings(state.settings);
-    const label = live.vocabularyLists.find((v) => v.id === id)?.name || "this vocabulary list";
+  const downloadVocabFile = useCallback(async (sourceId: string, filename: string) => {
+    const bytes = await vocabLib.downloadVocabFile(sourceId, filename);
+    try {
+      const target = await save({ defaultPath: filename });
+      if (target) await writeFile(target, bytes);
+    } catch {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([bytes as BlobPart]));
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+  }, []);
+
+  const toggleSourceFieldAI = useCallback((sourceId: string, fieldName: string) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
+    const fields = source.fields.map((f) => (f.name === fieldName ? { ...f, includeForAI: !f.includeForAI } : f));
+    // Toggling includeForAI changes embed_text, so a synced index is now stale
+    // regardless of whether the underlying file content changed (see M2 diff-
+    // key nuance: the fields-config version is part of the effective row hash).
+    const embedding = source.embedding.status === "synced" ? { ...source.embedding, status: "stale" as const } : source.embedding;
+    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, fields, embedding } : v));
+    void patch(() => ({ ...state.settings, vocabSources }));
+  }, [state.settings, patch]);
+
+  const setVocabIngestionField = useCallback((sourceId: string, fieldName: string | null) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
+    // Changing which column supplies the term changes every row's identity,
+    // so a synced index is stale regardless of whether file bytes changed —
+    // mirrors toggleSourceFieldAI's stale-marking above.
+    const embedding = source.embedding.status === "synced" ? { ...source.embedding, status: "stale" as const } : source.embedding;
+    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, ingestionField: fieldName, embedding } : v));
+    void patch(() => ({ ...state.settings, vocabSources }));
+  }, [state.settings, patch]);
+
+  const setVocabLabelField = useCallback((sourceId: string, fieldName: string | null) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
+    // Purely cosmetic — never marks the source stale. A column can only be
+    // Label or Badge, not both, so picking it as Label clears it from Badge.
+    const badgeField = fieldName && source.badgeField === fieldName ? null : source.badgeField;
+    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, labelField: fieldName, badgeField } : v));
+    void patch(() => ({ ...state.settings, vocabSources }));
+  }, [state.settings, patch]);
+
+  const setVocabBadgeField = useCallback((sourceId: string, fieldName: string | null) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
+    const labelField = fieldName && source.labelField === fieldName ? null : source.labelField;
+    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, badgeField: fieldName, labelField } : v));
+    void patch(() => ({ ...state.settings, vocabSources }));
+  }, [state.settings, patch]);
+
+  const ensureVocabTermsLoaded = useCallback(async (sourceId: string) => {
+    if (state.vocabTermCache[sourceId] || state.vocabTermCacheLoading[sourceId]) return;
+    dispatch({ type: "SET_VOCAB_TERMS_LOADING", id: sourceId });
+    try {
+      const terms = await vocabLib.listVocabTerms(sourceId);
+      dispatch({ type: "SET_VOCAB_TERMS", id: sourceId, terms });
+    } catch (e) {
+      console.error("[artefact] ensureVocabTermsLoaded failed:", e);
+      dispatch({ type: "SET_VOCAB_TERMS", id: sourceId, terms: [] });
+    }
+  }, [state.vocabTermCache, state.vocabTermCacheLoading, dispatch]);
+
+  // Warm the term cache for every already-synced source once persisted
+  // settings have loaded, so the manual vocab-picker dropdown has its full
+  // list ready without waiting for a first dropdown-open fetch.
+  useEffect(() => {
+    if (!state.loaded) return;
+    for (const v of state.settings.vocabSources) {
+      if (v.embedding.status === "synced") void ensureVocabTermsLoaded(v.id);
+    }
+  }, [state.loaded, state.settings.vocabSources, ensureVocabTermsLoaded]);
+
+  // Threads `base` through as a parameter/return value (rather than reading
+  // state.settings from closure) so syncAllVocab can chain several of these
+  // in one sequential loop: each iteration's dispatch/save must build on the
+  // *previous* iteration's result, not the stale settings snapshot this
+  // useCallback closed over at render time.
+  const syncOneVocabSource = useCallback(async (base: Settings, sourceId: string, provider: EmbeddingProvider): Promise<Settings> => {
+    const source = base.vocabSources.find((v) => v.id === sourceId);
+    if (!source || !source.files.length) return base;
+    const markStatus = async (embedding: typeof source.embedding) => {
+      base = { ...base, vocabSources: base.vocabSources.map((v) => (v.id === sourceId ? { ...v, embedding } : v)) };
+      await saveState(base, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: base });
+    };
+    await markStatus({ ...source.embedding, status: "syncing", providerId: provider.id, model: provider.model });
+    dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: 0, rowsTotal: 0 });
+    try {
+      const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, (ev) => {
+        dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: ev.rowsDone, rowsTotal: ev.rowsTotal });
+      });
+      const files = source.files.map((f) => {
+        const rowCountLast = result.fileRowCounts[f.filename];
+        const rowCountSyncedLast = result.fileSyncedCounts[f.filename];
+        return { ...f, ...(rowCountLast !== undefined && { rowCountLast }), ...(rowCountSyncedLast !== undefined && { rowCountSyncedLast }) };
+      });
+      const embedding = {
+        status: "synced" as const, providerId: provider.id, model: provider.model, dimensions: result.dimensions,
+        lastSyncedAt: new Date().toISOString(), rowsEmbedded: result.totalRows, lastError: null,
+      };
+      base = { ...base, vocabSources: base.vocabSources.map((v) => (v.id === sourceId ? { ...v, files, embedding } : v)) };
+      await saveState(base, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: base });
+      pushLog({ status: "ok", label: "Vocabulary source synced", detail: `${source.name || "Untitled source"} · ${result.rowsEmbedded} embedded, ${result.rowsReused} reused, ${result.rowsDeleted} removed` });
+      // Refresh the cached full term list immediately so the dropdown
+      // reflects the newly-synced content rather than waiting for next open.
+      try {
+        const terms = await vocabLib.listVocabTerms(sourceId);
+        dispatch({ type: "SET_VOCAB_TERMS", id: sourceId, terms });
+      } catch (e) {
+        console.error("[artefact] post-sync listVocabTerms failed:", e);
+      }
+    } catch (e) {
+      const message = String((e as Error)?.message || e);
+      await markStatus({ ...source.embedding, status: "error", lastError: message });
+      pushLog({ status: "fail", label: "Vocabulary sync failed", detail: source.name || "Untitled source", verbose: { error: message } });
+    } finally {
+      dispatch({ type: "CLEAR_VOCAB_SYNC_PROGRESS", id: sourceId });
+    }
+    return base;
+  }, [state.darkMode, state.zoom, dispatch]);
+
+  const syncVocabSource = useCallback(async (sourceId: string) => {
+    const provider = activeEmbeddingProvider(state.settings);
+    if (!provider) return;
+    await syncOneVocabSource(state.settings, sourceId, provider);
+  }, [state.settings, syncOneVocabSource]);
+
+  const syncAllVocab = useCallback(async () => {
+    const provider = activeEmbeddingProvider(state.settings);
+    if (!provider) return;
+    const ids = state.settings.vocabSources.filter((v) => v.files.length > 0).map((v) => v.id);
+    let current = state.settings;
+    for (const id of ids) {
+      current = await syncOneVocabSource(current, id, provider);
+    }
+  }, [state.settings, syncOneVocabSource]);
+
+  const cancelVocabSync = useCallback(async (sourceId: string) => {
+    await vocabLib.cancelVocabSync(sourceId);
+  }, []);
+
+  const flushVocabSource = useCallback(async (sourceId: string) => {
+    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
+    if (!source) return;
     const ok = await confirmDelete({
-      title: "Delete vocabulary list?",
-      message: `Delete "${label}"? This immediately removes the list.`,
+      title: "Flush embeddings?",
+      message: `This permanently deletes the embedded vector index for "${source.name || "this source"}". Uploaded files are kept; cataloguing falls back to an unconstrained answer for fields using it until it's re-synced.`,
+      confirmLabel: "Flush",
     });
     if (!ok) return;
+    await vocabLib.flushVocabSource(sourceId);
+    const embedding = { status: "never" as const, providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
+    const newSettings: Settings = { ...state.settings, vocabSources: state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, embedding } : v)) };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      dispatch({ type: "CLEAR_VOCAB_TERMS", id: sourceId });
+    } catch { console.error("[artefact] flushVocabSource: save failed"); }
+  }, [state.settings, state.darkMode, state.zoom, dispatch, confirmDelete]);
+
+  const flushAllVocab = useCallback(async () => {
+    const ok = await confirmDelete({
+      title: "Flush all vocabulary embeddings?",
+      message: "This permanently deletes every embedded vector for every vocabulary source. Cataloguing will fall back to full-list vocab prompts (or unconstrained answers) until each source is re-synced — which can take a long time and re-incurs embedding-API cost for large sources. Uploaded files are NOT deleted; only the embedded index.",
+      confirmLabel: "Flush All",
+    });
+    if (!ok) return;
+    await vocabLib.flushAllVocab();
+    const embedding = { status: "never" as const, providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
+    const newSettings: Settings = { ...state.settings, vocabSources: state.settings.vocabSources.map((v) => ({ ...v, embedding })) };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      dispatch({ type: "CLEAR_ALL_VOCAB_TERMS" });
+    } catch { console.error("[artefact] flushAllVocab: save failed"); }
+  }, [state.settings, state.darkMode, state.zoom, dispatch, confirmDelete]);
+
+  const removeVocabSource = useCallback(async (id: string) => {
+    const live = state.vocabDraft ?? vocabDraftFromSettings(state.settings);
+    const label = live.vocabSources.find((v) => v.id === id)?.name || "this vocabulary source";
+    const ok = await confirmDelete({
+      title: "Delete vocabulary source?",
+      message: `Delete "${label}"? This immediately removes its files and embedded index.`,
+    });
+    if (!ok) return;
+    try {
+      await vocabLib.deleteVocabSourceFiles(id);
+    } catch { /* best-effort — settings removal below still proceeds */ }
     // Remove from persisted settings, pruning dangling vocabSource references.
-    const remaining = state.settings.vocabularyLists.filter((v) => v.id !== id);
+    const remaining = state.settings.vocabSources.filter((v) => v.id !== id);
     const fields = state.settings.fields.map((f) => ({ ...f, vocabSources: f.vocabSources.filter((sid) => sid !== id) }));
-    const newSettings: Settings = { ...state.settings, vocabularyLists: remaining, fields };
+    const newSettings: Settings = { ...state.settings, vocabSources: remaining, fields };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
       dispatch({ type: "SET_SETTINGS", settings: newSettings });
       // Mirror into drafts so any pending edits stay consistent.
       if (state.vocabDraft) {
-        patchVocabDraft((d) => ({ ...d, vocabularyLists: d.vocabularyLists.filter((v) => v.id !== id) }));
+        patchVocabDraft((d) => ({ ...d, vocabSources: d.vocabSources.filter((v) => v.id !== id) }));
       }
       dispatch({ type: "PATCH_FIELD_DRAFT", patch: (d) => ({ ...d, fields: d.fields.map((f) => ({ ...f, vocabSources: f.vocabSources.filter((sid) => sid !== id) })) }) });
-    } catch { console.error("[artefact] removeVocabList: save failed"); }
+      dispatch({ type: "CLEAR_VOCAB_TERMS", id });
+    } catch { console.error("[artefact] removeVocabSource: save failed"); }
   }, [state.vocabDraft, state.settings, state.darkMode, state.zoom, patchVocabDraft, dispatch, confirmDelete]);
   const toggleVocab = useCallback((id: string) => dispatch({ type: "TOGGLE_VOCAB", id }), [dispatch]);
   const updateVocabName = useCallback((id: string, name: string) => {
-    patchVocabDraft((d) => ({ ...d, vocabularyLists: d.vocabularyLists.map((v) => (v.id === id ? { ...v, name } : v)) }));
+    patchVocabDraft((d) => ({ ...d, vocabSources: d.vocabSources.map((v) => (v.id === id ? { ...v, name } : v)) }));
   }, [patchVocabDraft]);
   const reorderVocab = useCallback(async (ids: string[]) => {
-    // Only reorder persisted rows; skip any draft-only ids (new unsaved uploads).
-    const savedLists = state.settings.vocabularyLists;
-    const savedById = new Map(savedLists.map((v) => [v.id, v] as const));
+    // Only reorder persisted rows; skip any draft-only ids (new unsaved sources).
+    const savedSources = state.settings.vocabSources;
+    const savedById = new Map(savedSources.map((v) => [v.id, v] as const));
     const reorderedSavedIds = ids.filter((id) => savedById.has(id));
-    if (reorderedSavedIds.length !== savedLists.length) return;
+    if (reorderedSavedIds.length !== savedSources.length) return;
     const reorderedSaved = reorderedSavedIds.map((id) => savedById.get(id)!);
-    const newSettings: Settings = { ...state.settings, vocabularyLists: reorderedSaved };
+    const newSettings: Settings = { ...state.settings, vocabSources: reorderedSaved };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
       dispatch({ type: "SET_SETTINGS", settings: newSettings });
       // Mirror reorder into draft using draft values, preserving pending renames.
       patchVocabDraft((d) => {
-        const draftById = new Map(d.vocabularyLists.map((v) => [v.id, v] as const));
-        const reorderedDraft = ids.map((id) => draftById.get(id)).filter((v): v is (typeof d.vocabularyLists)[number] => !!v);
-        return reorderedDraft.length === d.vocabularyLists.length ? { ...d, vocabularyLists: reorderedDraft } : d;
+        const draftById = new Map(d.vocabSources.map((v) => [v.id, v] as const));
+        const reorderedDraft = ids.map((id) => draftById.get(id)).filter((v): v is (typeof d.vocabSources)[number] => !!v);
+        return reorderedDraft.length === d.vocabSources.length ? { ...d, vocabSources: reorderedDraft } : d;
       });
     } catch { console.error("[artefact] reorderVocab: save failed"); }
   }, [state.settings, state.darkMode, state.zoom, patchVocabDraft, dispatch]);
 
   // --- per-card save/discard (vocab inline editor) ---
-  // A single list's rename is committed/reverted in isolation; list deletes
-  // and uploads stay buffered for the tab-level Apply.
+  // A single source's rename is committed/reverted in isolation; every other
+  // vocab action above already persists immediately (no banner).
   const saveVocabCard = useCallback(async (id: string) => {
     const draft = state.vocabDraft;
     if (!draft) return;
-    const card = draft.vocabularyLists.find((v) => v.id === id);
+    const card = draft.vocabSources.find((v) => v.id === id);
     if (!card) return;
+    dispatch({ type: "SET_VOCAB_CARD_ERROR", id, error: null });
     dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "saving" });
-    // Upsert: replace if the list already persists, else append (a freshly
-    // uploaded list isn't in settings yet).
-    const persisted = state.settings.vocabularyLists.some((v) => v.id === id);
-    const vocabularyLists = persisted
-      ? state.settings.vocabularyLists.map((v) => (v.id === id ? { ...card } : v))
-      : [...state.settings.vocabularyLists, { ...card }];
-    const newSettings: Settings = { ...state.settings, vocabularyLists };
+    // Upsert: replace if the source already persists, else append (a freshly
+    // added source isn't in settings yet — startAddVocabSource seeds it
+    // immediately, but this stays defensive for that invariant).
+    const persisted = state.settings.vocabSources.some((v) => v.id === id);
+    const vocabSources = persisted
+      ? state.settings.vocabSources.map((v) => (v.id === id ? { ...v, name: card.name } : v))
+      : [...state.settings.vocabSources, card];
+    const newSettings: Settings = { ...state.settings, vocabSources };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
       dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabularyLists: d.vocabularyLists.map((v) => (v.id === id ? { ...card } : v)) }) });
+      dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabSources: d.vocabSources.map((v) => (v.id === id ? { ...v, name: card.name } : v)) }) });
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "ok" });
     } catch {
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "err" });
@@ -998,15 +1302,28 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const discardVocabCard = useCallback((id: string) => {
     const draft = state.vocabDraft;
     if (!draft) return;
-    const saved = state.settings.vocabularyLists.find((v) => v.id === id);
+    const saved = state.settings.vocabSources.find((v) => v.id === id);
+    dispatch({ type: "SET_VOCAB_CARD_ERROR", id, error: null });
     dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: null });
     if (!saved) {
-      // A freshly uploaded list has no persisted value — drop it.
-      dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabularyLists: d.vocabularyLists.filter((v) => v.id !== id) }) });
+      // A freshly added source has no persisted value — drop it.
+      dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabSources: d.vocabSources.filter((v) => v.id !== id) }) });
       return;
     }
-    dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabularyLists: d.vocabularyLists.map((v) => (v.id === id ? { ...saved } : v)) }) });
-  }, [state.vocabDraft, state.settings.vocabularyLists, dispatch]);
+    dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabSources: d.vocabSources.map((v) => (v.id === id ? { ...v, name: saved.name } : v)) }) });
+  }, [state.vocabDraft, state.settings.vocabSources, dispatch]);
+
+  // --- vocab retrieval settings (top-level, persist on change) ---
+  const setVocabNetCount = useCallback((n: number) => {
+    const clamped = Math.max(1, Math.min(100, Math.round(n) || 1));
+    patch((s) => ({ ...s, vocabNetCount: clamped, vocabShortlistCount: Math.min(s.vocabShortlistCount, clamped) }));
+  }, [patch]);
+  const setVocabShortlistCount = useCallback((n: number) => {
+    patch((s) => ({ ...s, vocabShortlistCount: Math.max(1, Math.min(s.vocabNetCount, Math.round(n) || 1)) }));
+  }, [patch]);
+  const setCall3Enabled = useCallback((on: boolean) => {
+    patch((s) => ({ ...s, call3Enabled: on }));
+  }, [patch]);
 
   // --- settings: providers ---
   // The whole providers config is one deferred draft: field edits, add, delete,
@@ -1276,6 +1593,178 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchProvDraft((d) => ({ ...d, activeProvider: id }));
   }, [patchProvDraft, dispatch]);
 
+  // --- settings: embedding providers ---
+  // Same per-card draft/save/discard shape as chat providers above, just a
+  // separate list — see EmbeddingProvidersSection.tsx.
+  const toggleEmbProv = useCallback((id: string) => dispatch({ type: "TOGGLE_EMB_PROV", id }), [dispatch]);
+
+  const startAddEmbProv = useCallback(() => {
+    const id = gid();
+    patchEmbProvDraft((d) => ({
+      ...d,
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", supportsImageInput: false, modelOptions: [], dimensions: null, connStatus: "untested" }],
+    }));
+    dispatch({ type: "TOGGLE_EMB_PROV", id });
+  }, [patchEmbProvDraft, dispatch]);
+
+  const setEmbProvF = useCallback((id: string, k: keyof EmbeddingProvider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
+    const value = e.target.value;
+    patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, [k]: value })));
+    if (k === "baseUrl" || k === "apiKey") {
+      // Editing credentials invalidates any prior test, same as chat providers.
+      const saved = state.settings.embeddingProviders.find((p) => p.id === id);
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, modelOptions: saved?.modelOptions ? [...saved.modelOptions] : [], dimensions: null, connStatus: "untested" })));
+      dispatch({ type: "CLEAR_EMB_PROV_STATUS", id });
+    }
+  }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch, state.settings.embeddingProviders]);
+
+  const setEmbProvApiFormat = useCallback((id: string, format: EmbeddingApiFormat) => {
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
+    patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, apiFormat: format, connStatus: "untested" })));
+    dispatch({ type: "CLEAR_EMB_PROV_STATUS", id });
+  }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
+
+  const setEmbProvModel = useCallback((id: string, model: string) => {
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
+    patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, model })));
+  }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
+
+  const toggleEmbProvSupportsImage = useCallback((id: string) => {
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, supportsImageInput: !entry.supportsImageInput })));
+  }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
+
+  const toggleEmbProvKey = useCallback(() => dispatch({ type: "SET_SHOW_EMB_PROV_KEY", show: !state.showEmbProvKey }), [state.showEmbProvKey, dispatch]);
+
+  const testEmbConn = useCallback(async (id: string) => {
+    const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(state.settings);
+    const entry = live.providers.find((e) => e.id === id);
+    if (!entry) return;
+    const { name, baseUrl, apiKey, model, apiFormat } = entry;
+    if (!baseUrl || !apiKey) {
+      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err" });
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
+      return;
+    }
+    dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "testing" });
+    try {
+      const res = await testEmbeddingConnection({ id: "", name, baseUrl, apiKey, model, apiFormat });
+      const nextModel = res.models.includes(model) ? model : "";
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, model: nextModel, modelOptions: res.models, dimensions: res.dimensions, connStatus: "ok" })));
+      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "ok" });
+    } catch (e) {
+      console.error("[artefact] test embedding connection failed", e);
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
+      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err" });
+    }
+  }, [state.embProviderDraft, state.settings, patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
+
+  const saveEmbProvCard = useCallback(async (id: string) => {
+    const draft = state.embProviderDraft;
+    if (!draft) return;
+    const entry = draft.providers.find((e) => e.id === id);
+    if (!entry) return;
+    let validationError: string | null = null;
+    if (!entry.name.trim()) validationError = "Needs a name";
+    else if (!entry.baseUrl.trim()) validationError = "Needs a base URL";
+    else if (!entry.apiKey.trim()) validationError = "Needs an API key";
+    if (validationError) {
+      dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: validationError });
+      dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
+      return;
+    }
+    dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "saving" });
+    const persisted = state.settings.embeddingProviders.some((p) => p.id === id);
+    const toPersisted = (): EmbeddingProvider => ({
+      id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
+      model: entry.model, apiFormat: entry.apiFormat, supportsImageInput: entry.supportsImageInput,
+      modelOptions: entry.modelOptions, dimensions: entry.dimensions ?? undefined, connStatus: entry.connStatus,
+    });
+    const embeddingProviders = persisted
+      ? state.settings.embeddingProviders.map((p) => (p.id === id ? toPersisted() : p))
+      : [...state.settings.embeddingProviders, toPersisted()];
+    // "Set Active" is card-owned, mirroring saveProvCard.
+    const activeEmbeddingProvider = draft.activeProvider === id ? id : state.settings.activeEmbeddingProvider;
+    const newSettings: Settings = { ...state.settings, embeddingProviders, activeEmbeddingProvider };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      dispatch({ type: "PATCH_EMB_PROVIDER_DRAFT", patch: mapEmbDraftEntry(id, (e) => ({ ...e })) });
+      dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "ok" });
+    } catch (e) {
+      dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: `Could not save: ${(e as Error)?.message || "unknown error"}` });
+      dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
+    }
+  }, [state.embProviderDraft, state.settings, state.darkMode, state.zoom, mapEmbDraftEntry, dispatch]);
+
+  const discardEmbProvCard = useCallback((id: string) => {
+    const draft = state.embProviderDraft;
+    if (!draft) return;
+    const saved = state.settings.embeddingProviders.find((p) => p.id === id);
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
+    if (!saved) {
+      dispatch({
+        type: "PATCH_EMB_PROVIDER_DRAFT",
+        patch: mapEmbDraftEntry(id, () => ({
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", supportsImageInput: false, modelOptions: [], dimensions: null, connStatus: "untested",
+        })),
+      });
+      return;
+    }
+    const wasSetActive = draft.activeProvider === id && state.settings.activeEmbeddingProvider !== id;
+    dispatch({
+      type: "PATCH_EMB_PROVIDER_DRAFT",
+      patch: (d) => ({
+        ...d,
+        providers: d.providers.map((e) => (e.id === id ? {
+          id: saved.id, name: saved.name, baseUrl: saved.baseUrl, apiKey: saved.apiKey,
+          model: saved.model, apiFormat: saved.apiFormat ?? "openai", supportsImageInput: saved.supportsImageInput ?? false,
+          modelOptions: [...(saved.modelOptions ?? [])], dimensions: saved.dimensions ?? null,
+          connStatus: saved.connStatus ?? "untested",
+        } : e)),
+        activeProvider: wasSetActive ? state.settings.activeEmbeddingProvider : d.activeProvider,
+      }),
+    });
+  }, [state.embProviderDraft, state.settings.embeddingProviders, state.settings.activeEmbeddingProvider, mapEmbDraftEntry, dispatch]);
+
+  const deleteEmbProv = useCallback(async (id: string) => {
+    const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(state.settings);
+    const label = live.providers.find((e) => e.id === id)?.name || "this embedding provider";
+    const ok = await confirmDelete({
+      title: "Delete embedding provider?",
+      message: `Delete "${label}"? This permanently removes the provider and cannot be undone. Vocabulary sources synced with it will need a different embedding provider before their next sync.`,
+    });
+    if (!ok) return;
+    const remaining = state.settings.embeddingProviders.filter((p) => p.id !== id);
+    const activeEmbeddingProvider = state.settings.activeEmbeddingProvider === id ? (remaining[0]?.id ?? null) : state.settings.activeEmbeddingProvider;
+    const newSettings: Settings = { ...state.settings, embeddingProviders: remaining, activeEmbeddingProvider };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      if (state.embProviderDraft) {
+        patchEmbProvDraft((d) => ({
+          ...d,
+          providers: d.providers.filter((e) => e.id !== id),
+          activeProvider: d.activeProvider === id ? (d.providers.find((e) => e.id !== id)?.id ?? null) : d.activeProvider,
+        }));
+      }
+      dispatch({ type: "CLEAR_EMB_PROV_STATUS", id });
+    } catch {
+      dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
+    }
+  }, [state.embProviderDraft, state.settings, state.darkMode, state.zoom, patchEmbProvDraft, dispatch, confirmDelete]);
+
+  const setActiveEmbProv = useCallback((id: string) => {
+    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
+    patchEmbProvDraft((d) => ({ ...d, activeProvider: id }));
+  }, [patchEmbProvDraft, dispatch]);
+
   // --- settings: artefact fields ---
   // The required-column config is one deferred draft (mirrors the catalogue-
   // fields draft): edits, adds, and deletes accumulate here and persist only on
@@ -1300,7 +1789,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       });
     } catch { console.error("[artefact] reorderAF: save failed"); }
   }, [state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch]);
-  const updateAF = useCallback((id: string, key: EditableArtefactFieldKey, value: string | boolean) => {
+  const updateAF = useCallback((id: string, key: EditableArtefactFieldKey, value: string) => {
     patchArtefactDraft((d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...f, [key]: value } : f)) }));
   }, [patchArtefactDraft]);
   const removeAF = useCallback(async (id: string) => {
@@ -1323,12 +1812,12 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [state.artefactDraft, state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch, confirmDelete]);
   const startAddAF = useCallback(() => {
     const id = gid();
-    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", required: false, description: "" }] }));
+    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "" }] }));
     dispatch({ type: "TOGGLE_AF", id });
   }, [patchArtefactDraft, dispatch]);
 
   // --- per-card save/discard (artefact columns) ---
-  // One column's content (name/required/description) persists or reverts on its
+  // One column's content (name/description/prompt) persists or reverts on its
   // own; adds/deletes/reorders stay buffered for the tab-level Apply.
   const saveArtefactCard = useCallback(async (id: string) => {
     const draft = state.artefactDraft;
@@ -1337,12 +1826,14 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (!card) return;
     dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id, status: "saving" });
     // Upsert: replace if the column already persists, else append (a newly
-    // added column isn't in settings yet).
+    // added column isn't in settings yet). Coalesce optional keys to "" so a
+    // missing key never survives into persisted settings.
     const base = state.settings.artefactFields || _DEF_AF;
     const persisted = base.some((f) => f.id === id);
+    const normalize = (f: ArtefactField) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" });
     const artefactFields = persisted
-      ? base.map((f) => (f.id === id ? { ...card, description: card.description ?? "" } : f))
-      : [...base, { ...card, description: card.description ?? "" }];
+      ? base.map((f) => (f.id === id ? normalize({ ...card }) : f))
+      : [...base, normalize({ ...card })];
     const newSettings: Settings = { ...state.settings, artefactFields };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
@@ -1364,8 +1855,51 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactFields: d.artefactFields.filter((f) => f.id !== id) }) });
       return;
     }
-    dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...saved, description: saved.description ?? "" } : f)) }) });
+    dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" } : f)) }) });
   }, [state.artefactDraft, state.settings.artefactFields, dispatch]);
+
+  // --- vision-analysis system instruction (artefact tab, Call 1 of the
+  // threaded pipeline). Deferred draft + per-card save, mirroring the
+  // catalogue tab's System Instructions trio.
+  const updateVisionSystemPromptInstruction = useCallback((value: string) => {
+    patchArtefactDraft((d) => ({ ...d, visionSystemPromptInstruction: value }));
+  }, [patchArtefactDraft]);
+  const saveVisionSystemPromptInstruction = useCallback(async () => {
+    const draft = state.artefactDraft;
+    if (!draft) return;
+    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "saving" });
+    const newSettings: Settings = { ...state.settings, visionSystemPromptInstruction: draft.visionSystemPromptInstruction };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "ok" });
+    } catch {
+      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "err" });
+    }
+  }, [state.artefactDraft, state.settings, state.darkMode, state.zoom, dispatch]);
+  const discardVisionSystemPromptInstruction = useCallback(() => {
+    const draft = state.artefactDraft;
+    if (!draft) return;
+    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: null });
+    dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, visionSystemPromptInstruction: state.settings.visionSystemPromptInstruction ?? "" }) });
+  }, [state.artefactDraft, state.settings.visionSystemPromptInstruction, dispatch]);
+
+  // Override gating for the unified System Prompt. Disabled by default (the
+  // prompt's preamble tells the model how to format responses); editing is
+  // unlocked by a warning-confirmed Override, and Reset restores the default.
+  const setPromptEditing = useCallback((editing: boolean) => dispatch({ type: "SET_CONTRACT_EDITING", editing }), [dispatch]);
+  const overridePrompt = useCallback(async () => {
+    const ok = await confirmDelete({
+      title: "Override system prompt?",
+      message: "This prompt tells the AI how to format its answer so the app can read it. Editing it can stop responses from being parsed. Only continue if you know what you're doing.",
+      confirmLabel: "Override",
+    });
+    if (!ok) return;
+    // Seed the draft with the default so editing starts from known-good text.
+    const current = state.artefactDraft?.visionSystemPromptInstruction ?? state.settings.visionSystemPromptInstruction ?? "";
+    if (!current) updateVisionSystemPromptInstruction(_DEF_VISION_SYSTEM_PROMPT_INSTRUCTION);
+    setPromptEditing(true);
+  }, [confirmDelete, state.artefactDraft, state.settings.visionSystemPromptInstruction, updateVisionSystemPromptInstruction, setPromptEditing]);
 
   // --- settings import/export ---
   const exportSettings = useCallback(async () => {
@@ -1401,21 +1935,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       alert(`Invalid settings file: not valid JSON.\n${(err as Error).message}`);
       return;
     }
-    const parsed = SettingsSchema.safeParse(raw);
+    // Migrate a pre-VocabSource export (old `vocabularyLists` key), then
+    // validate with the same tolerant schema loadState uses — an imported
+    // file can be just as old/partial as a persisted one, and
+    // withDefaultSettings fills any gaps (e.g. a pre-embeddings export
+    // missing `embeddingProviders`/`activeEmbeddingProvider` entirely).
+    const migrated = stripBuiltinLegacyVocabFields(migrateLegacyVocabularyLists(raw));
+    const parsed = PersistedSettingsSchema.safeParse(migrated);
     if (!parsed.success) {
       const first = parsed.error.issues[0];
       const path = first.path.length ? ` at ${first.path.join(".")}` : "";
       alert(`Invalid settings file${path}: ${first.message}`);
       return;
     }
-    const imp = parsed.data;
-    if (imp.vocabularyLists) {
-      imp.vocabularyLists = imp.vocabularyLists.map((vl) => ({
-        ...vl,
-        filename: vl.filename.replace(/\.[^.]+$/, ".csv"),
-        terms: vl.termData ? vl.termData.length : (vl.terms || 0),
-      }));
-    }
+    const imp = parsed.data as Settings;
     patch(() => withDefaultSettings(imp));
   }, [patch]);
 
@@ -1424,10 +1957,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
     onUploadClick, addAnotherFile, onDragOver, onDragLeave, onDrop, removeFile, startParse, pauseParse, resumeParse, cancelParse, dismissParseError, resetUpload, retryRow, stopRow, retryAllFailed, onResizeStart,
     toggleRow, setFilter, setSearch, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
-    toggleSF, reorderFields, removeField, updateField, updateSystemPromptInstruction, updateSystemPromptContract, setContractEditing, overrideContract, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, saveSystemInstruction, discardSystemInstruction, saveContract, discardContract, startAddField, toggleProv,
-    onVocabClick, onVocabDragOver, onVocabDragLeave, onVocabDrop, removeVocabList, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard,
+    toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
+    startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setCall3Enabled,
     startAddProv, setProvF, setProvModel, setProvApiFormat, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
-    toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard,
+    toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvSupportsImage, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
+    toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateVisionSystemPromptInstruction, saveVisionSystemPromptInstruction, discardVisionSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
   };
 }

@@ -3,40 +3,49 @@
 // global .ui-* classes in styles/ui.css — components now apply those classes
 // directly instead of computing inline style objects.
 
-import { _VT } from "./defaults";
-import type { CatalogueField, VocabList } from "./types";
+import type { VocabTermEntry } from "../lib/vocab";
+import type { CatalogueField, VocabSource } from "./types";
 
-/** Resolve a vocab list's display name (falls back to filename stem). */
-export function displayName(vl: VocabList): string {
-  return vl.name || vl.filename.replace(/\.[^.]+$/, "");
+/** Resolve a vocab source's display name (falls back to "Untitled source"). */
+export function displayName(vs: VocabSource): string {
+  return vs.name || "Untitled source";
 }
 
-/** One resolved vocab source: the list it came from plus its flattened terms
- *  (built-in defaults fill in when a list has no uploaded termData). */
-interface ResolvedVocabSource {
-  list: VocabList;
-  terms: string[];
+/** Look up a term's configured column (label/badge), falling back to the
+ *  term itself when the column isn't in `entry.columns` — which is exactly
+ *  what happens when the configured column *is* the ingestion column (it's
+ *  excluded from `columns` since its value is already `entry.term`; see
+ *  `ParsedRow.columns` in src-tauri/src/vocab_files.rs). `null` (no column
+ *  configured) resolves to `null`, not the term — callers decide their own
+ *  "no column configured" fallback. */
+function resolveColumn(entry: VocabTermEntry, fieldName: string | null): string | null {
+  if (!fieldName) return null;
+  return entry.columns[fieldName] ?? entry.term;
 }
 
-/** Walk a field's vocabSources, joining each id to its list and flattening the
- *  terms. Single owner of the vocabSources→termData traversal shared by the AI
- *  prompt builder (`allowedTerms`) and the display helper (`vterms`). */
-export function resolveVocabSources(field: CatalogueField, lists: VocabList[]): ResolvedVocabSource[] {
-  const out: ResolvedVocabSource[] = [];
+/** Flatten a vocab field's sources into [{term, label, badge, listName}] for
+ *  the manual term-pick dropdown, reading each source's full term list from
+ *  `termCache` (populated on demand by `ensureVocabTermsLoaded` — see
+ *  app/actions.ts — via the Rust `list_vocab_terms` command). `label`/`badge`
+ *  resolve the source's configured `labelField`/`badgeField` per term —
+ *  `label` falls back to the bare term when unset, `badge` is `null` when
+ *  unset (no badge shown). A source not yet cached (never synced, or fetch
+ *  still in flight) simply contributes nothing yet. */
+export function vterms(
+  field: CatalogueField,
+  sources: VocabSource[],
+  termCache: Record<string, VocabTermEntry[]>
+): { term: string; label: string; badge: string | null; listName: string }[] {
+  const out: { term: string; label: string; badge: string | null; listName: string }[] = [];
   for (const sid of field.vocabSources || []) {
-    const vl = lists.find((v) => v.id === sid);
-    if (!vl) continue;
-    out.push({ list: vl, terms: vl.termData || _VT[sid] || [] });
-  }
-  return out;
-}
-
-/** Flatten a vocab field's sources into [{term, listName}]. */
-export function vterms(field: CatalogueField, lists: VocabList[]): { term: string; listName: string }[] {
-  const out: { term: string; listName: string }[] = [];
-  for (const { list, terms } of resolveVocabSources(field, lists)) {
-    const nm = displayName(list);
-    for (const t of terms) out.push({ term: t, listName: nm });
+    const vs = sources.find((v) => v.id === sid);
+    if (!vs) continue;
+    const nm = displayName(vs);
+    for (const entry of termCache[sid] || []) {
+      const label = resolveColumn(entry, vs.labelField) ?? entry.term;
+      const badge = resolveColumn(entry, vs.badgeField);
+      out.push({ term: entry.term, label, badge, listName: nm });
+    }
   }
   return out;
 }

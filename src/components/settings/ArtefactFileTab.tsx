@@ -1,17 +1,21 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FileText, GripVertical, Plus } from "lucide-react";
+import { Eye, FileText, GripVertical, Plus } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { _DEF_AF } from "../../app/defaults";
 import { fieldsDiffer } from "../../app/drafts";
+import { buildPromptPreview } from "../../lib/ai";
+import type { Settings } from "../../app/types";
 import { CardActions } from "./CardActions";
-import { Field, FieldInput, Segmented } from "./FormControls";
+import { Field, FieldInput, FieldTextarea } from "./FormControls";
+import { PromptPreviewSheet } from "./PromptPreviewSheet";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
@@ -27,7 +31,32 @@ export function ArtefactFileTab({ state, actions }: Props) {
 
   // Render from the pending draft if there are unsaved edits, otherwise from
   // persisted settings. Edits accumulate in the draft and only hit disk on Save.
-  const live = state.artefactDraft ?? { artefactFields: settings.artefactFields || _DEF_AF };
+  const live = state.artefactDraft ?? {
+    visionSystemPromptInstruction: settings.visionSystemPromptInstruction ?? "",
+    artefactFields: settings.artefactFields || _DEF_AF,
+  };
+  const visionInstrDirty =
+    !!state.artefactDraft &&
+    (state.artefactDraft.visionSystemPromptInstruction ?? "") !== (settings.visionSystemPromptInstruction ?? "");
+
+  // Local UI state for the Vision Analysis Prompt Preview sheet — mirrors
+  // FieldsTab's previewOpen. Transient tab affordance, not reducer state.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  // Effective settings (persisted merged with the in-progress draft) so the
+  // preview reflects exactly what would be sent if the user saved now. Memoized
+  // so the preview builder below has a stable dependency.
+  const previewSettings: Settings = useMemo(
+    () => ({
+      ...settings,
+      artefactFields: live.artefactFields,
+      visionSystemPromptInstruction: live.visionSystemPromptInstruction,
+    }),
+    [settings, live.artefactFields, live.visionSystemPromptInstruction]
+  );
+  const buildVisionPreview = useCallback(
+    () => buildPromptPreview(previewSettings),
+    [previewSettings]
+  );
 
   // Per-row DOM refs so a newly-added row can be scrolled into view. A ref
   // tracks the previous column count so the scroll fires ONLY when the count
@@ -76,11 +105,60 @@ export function ArtefactFileTab({ state, actions }: Props) {
           <div className="text-muted-foreground text-[13px] leading-relaxed">
             The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
-          <ul className="text-muted-foreground list-disc space-y-1 pl-4 text-[13px] leading-relaxed">
-            <li><strong className="text-foreground">Required</strong> — the column must be present when the file is parsed, even if some cells are empty.</li>
-            <li><strong className="text-foreground">Include for AI</strong> — controls whether the column's values are sent to the AI in the cataloguing prompt.</li>
-            <li>Excluded or additional (unconfigured) columns are still parsed and always appear in the source record panel.</li>
-          </ul>
+          <div className="text-muted-foreground text-[13px] leading-relaxed">
+            Every column configured here must be present when the file is parsed, even if some cells are empty. Additional (unconfigured) columns are still parsed and appear in the source record panel. All parsed columns are sent to the AI in the vision-analysis prompt.
+          </div>
+        </div>
+      </Card>
+
+      {/* Unified System Prompt (Call 1). Persona + output-format preamble in one
+          Override-gated field — disabled by default since its preamble tells the
+          model how to format responses (editing it can break parsing). The
+          dynamic per-field XML enumeration and the <artefact_file> record block
+          are appended by Rust at runtime (visible in the Preview). */}
+      <Card className="gap-2 py-3.5">
+        <Field
+          label="System Prompt"
+          desc="Persona + output format for Call 1. The image and per-column guidance below attach alongside; the artefact-file record is included. Edit with care."
+          action={
+            <>
+              <Button onClick={() => setPreviewOpen(true)} variant="secondary" size="sm" className="shrink-0">
+                <Eye className="size-3" />
+                <span>Preview Prompt</span>
+              </Button>
+              {state.contractEditing ? (
+                <Button
+                  onClick={() => { actions.updateVisionSystemPromptInstruction(""); actions.setPromptEditing(false); }}
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0"
+                >
+                  Reset to default
+                </Button>
+              ) : (
+                <Button onClick={() => void actions.overridePrompt()} variant="secondary" size="sm" className="shrink-0">
+                  Override
+                </Button>
+              )}
+            </>
+          }
+          className="px-4"
+        >
+          <Textarea
+            value={live.visionSystemPromptInstruction || ""}
+            onChange={(e) => actions.updateVisionSystemPromptInstruction(e.target.value)}
+            readOnly={!state.contractEditing}
+            rows={5}
+            className={cn("resize-y leading-relaxed", !state.contractEditing && "bg-muted/40 text-muted-foreground")}
+          />
+        </Field>
+        <div className="px-4">
+          <CardActions
+            dirty={visionInstrDirty}
+            status={state.artefactCardSaveStatus["vision-instruction"] ?? null}
+            onSave={() => { void actions.saveVisionSystemPromptInstruction(); actions.setPromptEditing(false); }}
+            onDiscard={() => { actions.discardVisionSystemPromptInstruction(); actions.setPromptEditing(false); }}
+          />
         </div>
       </Card>
 
@@ -90,10 +168,9 @@ export function ArtefactFileTab({ state, actions }: Props) {
       />
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className="bg-muted/30 grid grid-cols-[24px_1fr_120px_1fr] gap-2.5 border-b px-3.5 py-1.75">
+        <div className="bg-muted/30 grid grid-cols-[24px_1fr_1fr] gap-2.5 border-b px-3.5 py-1.75">
           <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Column Name</span>
-          <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Required</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Description</span>
         </div>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
@@ -101,9 +178,9 @@ export function ArtefactFileTab({ state, actions }: Props) {
             {live.artefactFields.map((af) => {
               const saved = (settings.artefactFields || _DEF_AF).find((s) => s.id === af.id);
               const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
-                { ...af, description: af.description ?? "", includeForAI: af.includeForAI ?? true },
-                { ...saved, description: saved.description ?? "", includeForAI: saved.includeForAI ?? true },
-                ["id", "name", "required", "description", "includeForAI"],
+                { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
+                { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
+                ["id", "name", "description", "prompt"],
               ));
               return (
                 <ArtefactColumnRow
@@ -127,6 +204,22 @@ export function ArtefactFileTab({ state, actions }: Props) {
       <Button onClick={actions.startAddAF} variant="outline" className="text-muted-foreground w-full border-dashed">
         <Plus className="size-3" /><span>Add Column</span>
       </Button>
+
+      <PromptPreviewSheet
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        build={buildVisionPreview}
+        description={
+          <>
+            The exact message sent to your AI provider as the unified Call 1 of each parsing job,
+            including the persona, output-format preamble, and the Rust-appended per-field XML
+            enumeration. The artefact row&apos;s source values are produced at parse time, so the
+            <span className="px-1 font-mono">&lt;artefact_file&gt;</span>
+            record is shown as an empty placeholder; the extracted image is attached as a separate
+            content block. Reflects your current (possibly unsaved) edits.
+          </>
+        }
+      />
     </div>
   );
 }
@@ -134,7 +227,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
 /** A single artefact-column row. Clicking anywhere on the row toggles the
  *  editor (mirrors FieldsTab's SortableFieldRow). */
 interface ArtefactColumnRowProps {
-  field: { id: string; name: string; required: boolean; description: string; includeForAI?: boolean };
+  field: { id: string; name: string; description: string; prompt: string };
   expanded: boolean;
   /** Whether this column has unsaved content edits. */
   dirty: boolean;
@@ -159,7 +252,7 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
     >
       <div
         onClick={() => actions.toggleAF(af.id)}
-        className="grid cursor-pointer grid-cols-[24px_1fr_120px_1fr] items-center gap-2.5 px-3.5 py-2.25"
+        className="grid cursor-pointer grid-cols-[24px_1fr_1fr] items-center gap-2.5 px-3.5 py-2.25"
       >
         <div
           className={cn("text-muted-foreground flex items-center", isDragging ? "cursor-grabbing" : "cursor-grab")}
@@ -172,9 +265,6 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
           <span className="truncate text-[15px] font-semibold">{af.name || "Untitled column"}</span>
           <UnsavedBadge dirty={dirty} />
         </div>
-        <Badge variant={af.required ? "default" : "secondary"} className="w-fit tracking-[0.04em]">
-          {af.required ? "Required" : "Optional"}
-        </Badge>
         <span className="text-muted-foreground truncate text-sm">{af.description || "—"}</span>
       </div>
       {expanded && (
@@ -185,20 +275,6 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             onChange={(e) => actions.updateAF(af.id, "name", e.target.value)}
             desc="Must match a column header in the uploaded spreadsheet (case-insensitive)."
           />
-          <Field label="Required?" desc="Whether this column must be present when the file is parsed, even if some cells are empty.">
-            <Segmented
-              value={af.required ? "yes" : "no"}
-              onChange={(v) => actions.updateAF(af.id, "required", v === "yes")}
-              options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
-            />
-          </Field>
-          <Field label="Include for AI?" desc="Whether this column's values are sent to the AI in the cataloguing prompt.">
-            <Segmented
-              value={af.includeForAI === false ? "no" : "yes"}
-              onChange={(v) => actions.updateAF(af.id, "includeForAI", v === "yes")}
-              options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
-            />
-          </Field>
           <FieldInput
             label="Description"
             value={af.description}
@@ -206,6 +282,16 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             placeholder="What does this column contain?"
             desc="Internal note about this column, shown in the columns list — not sent to the AI."
             labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
+          />
+          <FieldTextarea
+            label="Prompt Instruction"
+            value={af.prompt}
+            onChange={(e) => actions.updateAF(af.id, "prompt", e.target.value)}
+            placeholder="How should the vision-analysis step use this column's value? (optional)"
+            desc="Optional per-column guidance for the vision-analysis call. Leave blank to send this column's value with no field-specific guidance — it is omitted from the prompt."
+            labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
+            rows={2}
+            className="resize-y leading-relaxed"
           />
           {/* Per-card actions: Delete/Discard/Save target only this column.
               Delete buffers into the draft (flushed by the Apply banner). */}
