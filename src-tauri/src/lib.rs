@@ -5,12 +5,16 @@
 //!   * `state`    — load/save the single settings.json beside the exe
 //!   * `images`   — write extracted spreadsheet images to <exedir>/tmp/...,
 //!                  wiping that subtree on startup and on app quit
-//!   * `ai`       — OpenAI-compatible chat completion calls (keys never
-//!                  touch the renderer, so there is no CORS)
+//!   * `ai`       — three-step XML cataloguing pipeline (Call 1 vision +
+//!                  extraction → embedding search → optional Call 3 vocab
+//!                  validation); keys never touch the renderer, so there is
+//!                  no CORS
 
 mod ai;
+mod embeddings;
 mod images;
 mod settings;
+mod vocab_files;
 
 // `Manager` is only needed for the dev-only devtools call below; keep the
 // import so the trait is in scope when that code is compiled in.
@@ -28,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(ai::default_registry())
+        .manage(embeddings::default_sync_registry())
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
@@ -68,8 +73,18 @@ pub fn run() {
             images::cleanup_temp,
             ai::catalogue_artefact,
             ai::cancel_catalogue,
-            ai::build_prompts_preview,
+            ai::build_vision_prompt_preview,
             ai::test_connection,
+            embeddings::test_embedding_connection,
+            embeddings::sync_vocab_source,
+            embeddings::cancel_vocab_sync,
+            embeddings::flush_vocab_source,
+            embeddings::flush_all_vocab,
+            embeddings::list_vocab_terms,
+            vocab_files::stage_vocab_file,
+            vocab_files::remove_vocab_file,
+            vocab_files::download_vocab_file,
+            vocab_files::delete_vocab_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Artefact Cataloguer");

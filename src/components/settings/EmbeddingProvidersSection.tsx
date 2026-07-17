@@ -1,28 +1,29 @@
 import { useEffect, useRef } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi, XCircle } from "lucide-react";
 import type { AppActions } from "../../app/actions";
-import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
+import { embeddingProviderDraftFromSettings, type AppState, type EmbeddingProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
-import type { SaveState } from "./SaveActions.types";
-import type { ApiFormat, Provider } from "../../app/types";
-import { providerEndpoints } from "../../lib/ai";
+import type { EmbeddingApiFormat, EmbeddingProvider } from "../../app/types";
+import { embeddingProviderEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
-import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
-import { StatusIndicator } from "./SaveActions";
+import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import type { SaveState } from "./SaveActions.types";
+import { StatusIndicator } from "./SaveActions";
 
 interface Props {
   state: AppState;
   actions: AppActions;
 }
 
-/** True when a single draft entry differs from its persisted provider — drives
- *  the per-row "unsaved" badge. Mirrors isProvidersDirty but per row. */
-function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boolean {
+/** True when a single draft entry differs from its persisted embedding
+ *  provider — drives the per-row "unsaved" badge. Mirrors entryDiffers in
+ *  ProvidersTab.tsx. */
+function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: EmbeddingProvider): boolean {
   return fieldsDiffer(
     e,
     {
@@ -31,46 +32,44 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
       baseUrl: p.baseUrl,
       apiKey: p.apiKey,
       model: p.model,
-      apiFormat: (p.apiFormat ?? "openai") as ApiFormat,
+      apiFormat: (p.apiFormat ?? "openai") as EmbeddingApiFormat,
+      supportsImageInput: p.supportsImageInput ?? false,
       modelOptions: p.modelOptions ?? [],
+      dimensions: p.dimensions ?? null,
       connStatus: p.connStatus ?? "untested",
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "supportsImageInput", "modelOptions", "dimensions", "connStatus"],
   );
 }
 
-export function ProvidersTab({ state, actions }: Props) {
-  const { settings, provStatus, showProvKey } = state;
-  // Render from the unified draft when there are pending edits, else settings.
-  const live = state.providerDraft ?? providerDraftFromSettings(settings);
+/** Embedding-model provider list, rendered as a second card-list within the
+ *  same "ai" tab, below the chat ProvidersTab. Structurally a near-copy of
+ *  ProvidersTab.tsx — same draft/save/discard shape — since embeddings may run
+ *  on a completely different vendor/endpoint than chat+vision. */
+export function EmbeddingProvidersSection({ state, actions }: Props) {
+  const { settings, showEmbProvKey } = state;
+  const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(settings);
 
-  // Per-row DOM refs so a newly-added row can be scrolled into view,
-  // anchoring its editor within the scroll pane. A ref tracks the previous
-  // provider count so the scroll fires ONLY when the count grows (an Add),
-  // never on content edits or deletes — which also change `live.providers`.
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const prevCountRef = useRef(live.providers.length);
   useEffect(() => {
     const grew = live.providers.length > prevCountRef.current;
     prevCountRef.current = live.providers.length;
     if (!grew) return;
-    // Add appends, so the new row is the last. Scroll it into view.
     const last = live.providers[live.providers.length - 1];
     const node = last ? cardRefs.current[last.id] : null;
-    // block:"nearest" avoids jumping when the row is already partly visible;
-    // a small timeout lets the expanded body measure before scrolling.
     const t = setTimeout(() => node?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 30);
     return () => clearTimeout(t);
   }, [live.providers]);
 
-  // Grid template shared by the header row and each provider row so columns
-  // align exactly: Provider / Model / Status / Active.
   const GRID = "grid grid-cols-[1fr_1fr_120px_104px] gap-2.5 px-3.5";
 
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Configure the AI providers used to catalogue artefacts. Add at least one provider to run the catalogue; click a row to edit its credentials and model.
+        Configure the models used to embed vocabulary terms and, at parse time, artefact descriptions/images for shortlisted
+        retrieval. Embeddings can run on a different vendor than the AI Provider above — e.g. a local model here alongside a
+        hosted chat/vision provider.
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
@@ -83,32 +82,24 @@ export function ProvidersTab({ state, actions }: Props) {
 
         {live.providers.map((entry) => {
           const isActive = entry.id === live.activeProvider;
-          const saved = settings.providers.find((p) => p.id === entry.id);
-          // A row is "unsaved" when it's newly added (no persisted match), its
-          // draft entry differs from the persisted provider, or the user just made
-          // it the active selection (active-flip is committed by this row's Save).
-          const cardDirty = !!state.providerDraft && (
-            !saved || entryDiffers(entry, saved) || (isActive && settings.activeProvider !== entry.id)
+          const saved = settings.embeddingProviders.find((p) => p.id === entry.id);
+          const cardDirty = !!state.embProviderDraft && (
+            !saved || entryDiffers(entry, saved) || (isActive && settings.activeEmbeddingProvider !== entry.id)
           );
-          // Resolve the Status shown in the row: the transient Test Connection
-          // outcome wins (it carries the live "testing" + just-run result that
-          // hasn't been Saved yet); when there's no transient entry, fall back to
-          // the draft's persisted connStatus so the last verified result survives
-          // a restart. "untested" maps to null ("Not tested").
-          const transient = provStatus[entry.id]?.test ?? null;
+          const transient = state.embProvStatus[entry.id]?.test ?? null;
           const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
           return (
-            <ProviderRow
+            <EmbeddingProviderRow
               key={entry.id}
               entry={entry}
               grid={GRID}
               testStatus={testStatus}
-              showProvKey={showProvKey}
+              showEmbProvKey={showEmbProvKey}
               isActive={isActive}
               dirty={cardDirty}
-              cardStatus={state.provCardSaveStatus[entry.id] ?? null}
-              cardError={state.provCardError[entry.id]}
-              expanded={!!state.providerExpanded[entry.id]}
+              cardStatus={state.embProvCardSaveStatus[entry.id] ?? null}
+              cardError={state.embProvCardError[entry.id]}
+              expanded={!!state.embProviderExpanded[entry.id]}
               cardRef={(node) => { cardRefs.current[entry.id] = node; }}
               actions={actions}
             />
@@ -117,42 +108,33 @@ export function ProvidersTab({ state, actions }: Props) {
 
         {live.providers.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">
-            No AI providers configured. Add one below to enable cataloguing.
+            No embedding providers configured. Vocabulary sources will fall back to full-list prompts until one is added.
           </div>
         )}
       </Card>
 
-      <Button onClick={actions.startAddProv} variant="outline" className="text-muted-foreground w-full border-dashed">
-        <Plus className="size-3" /><span>Add Provider</span>
+      <Button onClick={actions.startAddEmbProv} variant="outline" className="text-muted-foreground w-full border-dashed">
+        <Plus className="size-3" /><span>Add Embedding Provider</span>
       </Button>
     </div>
   );
 }
 
 interface RowProps {
-  entry: ProviderDraft["providers"][number];
-  /** Shared grid template (header + rows) so columns align. */
+  entry: EmbeddingProviderDraft["providers"][number];
   grid: string;
   testStatus: "testing" | "ok" | "err" | null;
-  showProvKey: boolean;
+  showEmbProvKey: boolean;
   isActive: boolean;
-  /** Whether this row has unsaved draft changes (drives the "unsaved" badge). */
   dirty: boolean;
-  /** Persist status of this row's own Save button. */
   cardStatus: SaveState;
-  /** Specific reason the row's Save failed, shown inline instead of "Not saved". */
   cardError?: string;
-  /** Whether the editor body is expanded. Collapsed shows the summary row only. */
   expanded: boolean;
-  /** Registers this row's root DOM node so the parent can scroll it into view. */
   cardRef?: (node: HTMLDivElement | null) => void;
   actions: AppActions;
 }
 
-function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
-  // The model dropdown is only meaningful after a successful connection, which
-  // is what populates `modelOptions`. Before that, show a muted hint so the user
-  // understands the dependency.
+function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
   const modelOptions = entry.modelOptions.includes(entry.model) || !entry.model ? entry.modelOptions : [entry.model, ...entry.modelOptions];
   const modelsReady = modelOptions.length > 0;
   const id = entry.id;
@@ -160,15 +142,13 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
 
   return (
     <div ref={cardRef} className="border-border/60 border-b">
-      {/* Clickable summary row — grid-aligned to the header. */}
-      <div onClick={() => actions.toggleProv(id)} className={cn("grid cursor-pointer items-center py-2.25", grid)}>
-        {/* Provider: chevron + name (inline-editable when expanded) + unsaved badge */}
+      <div onClick={() => actions.toggleEmbProv(id)} className={cn("grid cursor-pointer items-center py-2.25", grid)}>
         <div className="flex min-w-0 items-center gap-2">
           {expanded ? <ChevronDown className="text-muted-foreground size-3" /> : <ChevronRight className="text-muted-foreground size-3" />}
           {expanded ? (
             <Input
               value={entry.name}
-              onChange={(e) => actions.setProvF(id, "name", e)}
+              onChange={(e) => actions.setEmbProvF(id, "name", e)}
               onClick={(e) => e.stopPropagation()}
               placeholder="Provider name"
               aria-label="Provider name"
@@ -181,17 +161,13 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
             </>
           )}
         </div>
-        {/* Model */}
         <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
-        {/* Status */}
         <StatusBadge status={testStatus} />
-        {/* Active: kept interactive via stopPropagation so the row doesn't toggle.
-            "Set Active" buffers into the draft and is committed by this row's Save. */}
         <div onClick={(e) => e.stopPropagation()}>
           {isActive ? (
             <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
           ) : (
-            <Button onClick={() => actions.setActiveProv(id)} variant="outline" size="sm">Set Active</Button>
+            <Button onClick={() => actions.setActiveEmbProv(id)} variant="outline" size="sm">Set Active</Button>
           )}
         </div>
       </div>
@@ -200,55 +176,64 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
             label="Base URL"
-            desc="The API root URL for this provider, without a trailing path."
+            desc="The full embeddings endpoint for this provider — requests are posted here directly, so it must include any provider-specific path (e.g. /embeddings, /embed). /models is appended only to look up available models."
             hint={entry.baseUrl.trim() ? (
-              <>POST <code className="text-foreground">{providerEndpoints(entry).completions}</code></>
+              <>POST <code className="text-foreground">{embeddingProviderEndpoints(entry).embeddings}</code></>
             ) : undefined}
           >
-            <Input value={entry.baseUrl} onChange={(e) => actions.setProvF(id, "baseUrl", e)} placeholder="https://api.openai.com/v1" />
+            <Input value={entry.baseUrl} onChange={(e) => actions.setEmbProvF(id, "baseUrl", e)} placeholder="https://api.openai.com/v1/embeddings" />
           </Field>
 
           <FieldSelect
             label="API Format"
             value={entry.apiFormat}
-            onChange={(v) => actions.setProvApiFormat(id, v as ApiFormat)}
-            desc="Determines the auth scheme and endpoint paths."
+            onChange={(v) => actions.setEmbProvApiFormat(id, v as EmbeddingApiFormat)}
+            hint="Anthropic has no embeddings API, so only OpenAI- and Gemini-shaped endpoints are supported here."
           >
             <FieldSelectOption value="openai">OpenAI</FieldSelectOption>
-            <FieldSelectOption value="anthropic">Anthropic</FieldSelectOption>
             <FieldSelectOption value="gemini">Gemini</FieldSelectOption>
           </FieldSelect>
 
-          <Field label="API Key" desc="Sent with each request to authenticate — stored locally, never shared.">
+          <Field label="API Key">
             <div className="flex gap-1.5">
-              <Input type={showProvKey ? "text" : "password"} value={entry.apiKey} onChange={(e) => actions.setProvF(id, "apiKey", e)} placeholder="sk-…" />
+              <Input type={showEmbProvKey ? "text" : "password"} value={entry.apiKey} onChange={(e) => actions.setEmbProvF(id, "apiKey", e)} placeholder="sk-…" />
               <Button
-                onClick={actions.toggleProvKey}
+                onClick={actions.toggleEmbProvKey}
                 variant="outline"
                 size="icon"
-                title={showProvKey ? "Hide key" : "Reveal key"}
+                title={showEmbProvKey ? "Hide key" : "Reveal key"}
                 className="h-9"
               >
-                {showProvKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                {showEmbProvKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
               </Button>
             </div>
           </Field>
 
+          <Field
+            label="Supports image input?"
+            desc="Whether this model accepts image input, for the parse-time image-embedding step. Vocabulary terms are always embedded with this same model, so image-based retrieval only works when it's genuinely multimodal (e.g. CLIP-family, Voyage multimodal-3, Cohere embed-v4) — a text-only model rejects the image call and the pipeline falls back to text-only automatically."
+          >
+            <Segmented
+              value={entry.supportsImageInput ? "yes" : "no"}
+              onChange={(v) => { if ((v === "yes") !== entry.supportsImageInput) actions.toggleEmbProvSupportsImage(id); }}
+              options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
+            />
+          </Field>
+
           <div className="flex items-center justify-start gap-2.5">
-            <Button onClick={() => void actions.testConn(id)} variant="secondary" size="sm">
+            <Button onClick={() => void actions.testEmbConn(id)} variant="secondary" size="sm">
               {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
               <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
             </Button>
-            <ConnectionStatus status={testStatus} />
+            <ConnectionStatus status={testStatus} dimensions={entry.dimensions} />
           </div>
 
           <FieldSelect
             label="Model"
             value={entry.model}
-            onChange={(v) => actions.setProvModel(id, v)}
+            onChange={(v) => actions.setEmbProvModel(id, v)}
             disabled={!modelsReady}
             ariaLabel="Model"
-            desc="The model used for cataloguing requests, populated by Test Connection."
             placeholder={modelsReady ? (entry.model ? undefined : "Select a model…") : "Available after Test Connection"}
           >
             {modelOptions.map((m) => (
@@ -256,16 +241,13 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
             ))}
           </FieldSelect>
 
-          {/* Per-row actions: Delete/Discard/Save target only this provider.
-              Delete persists immediately (after its confirm); Discard/Save
-              operate on this row's content alone. */}
           <CardActions
             dirty={dirty}
             status={cardStatus}
             errorMessage={cardError}
-            onSave={() => void actions.saveProvCard(id)}
-            onDiscard={() => actions.discardProvCard(id)}
-            onDelete={() => void actions.deleteProv(id)}
+            onSave={() => void actions.saveEmbProvCard(id)}
+            onDiscard={() => actions.discardEmbProvCard(id)}
+            onDelete={() => void actions.deleteEmbProv(id)}
             deleteLabel="Delete Provider"
           />
         </div>
@@ -274,7 +256,6 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
   );
 }
 
-/** Compact connection-status badge for the row's Status column. */
 function StatusBadge({ status }: { status: "testing" | "ok" | "err" | null }) {
   if (status === "ok") return <Badge variant="default" className="w-fit gap-1 tracking-[0.04em]"><CheckCircle2 className="size-2.5" />Connected</Badge>;
   if (status === "err") return <Badge variant="destructive" className="w-fit gap-1 tracking-[0.04em]"><XCircle className="size-2.5" />Failed</Badge>;
@@ -282,7 +263,13 @@ function StatusBadge({ status }: { status: "testing" | "ok" | "err" | null }) {
   return <Badge variant="secondary" className="w-fit tracking-[0.04em]">Not tested</Badge>;
 }
 
-function ConnectionStatus({ status }: { status: "testing" | "ok" | "err" | null }) {
-  const message = status === "testing" ? "Testing connection…" : status === "ok" ? "Connection successful" : status === "err" ? "Failed — check URL and API key" : "No status";
+function ConnectionStatus({ status, dimensions }: { status: "testing" | "ok" | "err" | null; dimensions: number | null }) {
+  const message = status === "testing"
+    ? "Testing connection…"
+    : status === "ok"
+      ? `Connection successful${dimensions ? ` (dims: ${dimensions})` : ""}`
+      : status === "err"
+        ? "Failed — check URL and API key"
+        : "No status";
   return <StatusIndicator state={status === "testing" ? "busy" : status} message={message} />;
 }

@@ -24,7 +24,7 @@ export function UploadPanel({ state, actions }: Props) {
   // parse loop must not be alive: startParse would otherwise dispatch stale
   // aiResults/fieldSelections after the reset clears them (see startParse).
   const canReset = (!noFiles || state.parseStatus !== "idle") && !isActive;
-  const reqCols = (state.settings.artefactFields || _DEF_AF).filter((af) => af.required).map((af) => af.name).join(", ");
+  const reqCols = (state.settings.artefactFields || _DEF_AF).map((af) => af.name).join(", ");
   const queueLabel =
     files.length === 0
       ? "No files in queue"
@@ -105,6 +105,23 @@ export function UploadPanel({ state, actions }: Props) {
             <div className="text-muted-foreground mt-1.5 border-destructive/20 border-t pt-1.5 text-[13px]">
               Required columns: <span className="text-foreground text-[13px]">{reqCols}</span>
             </div>
+          </div>
+        </Card>
+      )}
+
+      {state.parseError && (
+        <Card className="bg-destructive/10 border-destructive/20 mx-5 my-2 rounded-md py-2.5">
+          <div className="flex items-start gap-1.25 px-3">
+            <AlertCircle className="text-destructive mt-0.5 size-3 shrink-0" />
+            <div className="text-destructive flex-1 text-sm">{state.parseError}</div>
+            <Button
+              onClick={actions.dismissParseError}
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-destructive -mt-1 -mr-1 size-6"
+            >
+              <X className="size-3" />
+            </Button>
           </div>
         </Card>
       )}

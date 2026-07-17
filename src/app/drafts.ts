@@ -3,8 +3,11 @@
 // The four settings tabs (Fields, Vocab, Providers, Artefact File) each keep an
 // in-memory draft and compute a "dirty" flag to gate the Save/Discard buttons.
 // The comparison logic was duplicated four times with the same reason to change;
-// these helpers consolidate it. Two strategies are needed because some tabs are
-// order-significant (a reorder counts as dirty) and some compare by id.
+// these helpers consolidate it. Every tab compares by id, not position: every
+// tab's reorder action already persists straight to disk (see reorderFields/
+// reorderVocab/reorderAF in actions.ts), so a pending reorder never exists to
+// flag — and every tab's own per-row dirty badge is id-keyed too, so a
+// positional comparison could flag the tab dirty with no row to show it on.
 
 import type { AppState } from "./state";
 import type { SettingsTab } from "./types";
@@ -29,21 +32,8 @@ export function fieldsDiffer<T>(a: T, b: T, keys?: readonly (keyof T)[]): boolea
   return ks.some((k) => valueDiffers(ar[k], br[k]));
 }
 
-/** True when the two lists differ, comparing positionally (a reorder is dirty).
- *  Used by order-significant drafts (Fields, Artefact File). */
-export function differByOrder<T>(draft: readonly T[], saved: readonly T[], keys?: readonly (keyof T)[]): boolean {
-  if (draft.length !== saved.length) return true;
-  for (let i = 0; i < draft.length; i++) {
-    const b = saved[i];
-    if (!b) return true;
-    if (fieldsDiffer(draft[i], b, keys)) return true;
-  }
-  return false;
-}
-
 /** True when the two lists differ, keyed by `idKey` (a reorder is NOT dirty).
- *  Used by id-keyed drafts (Providers, Vocab). A draft item with no saved
- *  counterpart (newly added) counts as dirty. */
+ *  A draft item with no saved counterpart (newly added) counts as dirty. */
 export function differById<T>(draft: readonly T[], saved: readonly T[], idKey: keyof T, keys?: readonly (keyof T)[]): boolean {
   if (draft.length !== saved.length) return true;
   const byId = new Map(saved.map((item) => [item[idKey], item] as const));
@@ -69,23 +59,30 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
     case "fields": {
       const d = state.fieldDraft;
       if (!d) return false;
-      if (d.systemPromptInstruction !== settings.systemPromptInstruction) return true;
-      if ((d.systemPromptContractOverride ?? "") !== (settings.systemPromptContractOverride ?? "")) return true;
-      return differByOrder(d.fields, settings.fields, ["id", "name", "type", "layout", "prompt", "vocabSources"]);
+      // Id-keyed, not positional: reorderFields persists immediately (mirrors
+      // reorderVocab/reorderAF below), so a pending reorder never exists here —
+      // comparing by position would flag the tab dirty whenever the draft and
+      // settings arrays are momentarily out of step in order (e.g. across the
+      // save round-trip) even though no row actually differs, and no per-row
+      // badge would reflect it since FieldsTab's own dirty check is id-keyed.
+      return differById(d.fields, settings.fields, "id", ["name", "type", "layout", "prompt", "vocabSources"]);
     }
     case "vocab": {
       const d = state.vocabDraft;
       if (!d) return false;
-      // Order is now significant (reorder is a structural change), so compare
-      // positionally like FieldsTab does rather than by id alone.
-      return differByOrder(d.vocabularyLists, settings.vocabularyLists, ["id", "name", "filename", "terms", "uploadDate"]);
+      // Id-keyed, not positional — see the "fields" case above for why.
+      // Files/fields/sync status have real Rust-side disk effects and persist
+      // immediately (mirrors reorderVocab/removeVocabList) — only the Display
+      // Name is draft-buffered, so that's all that's compared here.
+      return differById(d.vocabSources, settings.vocabSources, "id", ["name"]);
     }
     case "ai": {
       // Providers are id-keyed; the draft is dirty when any provider is new,
-      // removed, content-edited, or the active selection flipped.
+      // removed, content-edited, or the active selection flipped. Both the chat
+      // and embedding provider lists live on this one tab, so either draft
+      // being dirty makes the tab dirty.
       const d = state.providerDraft;
-      if (!d) return false;
-      return differById(
+      const chatDirty = !!d && (differById(
         d.providers,
         settings.providers.map((p) => ({
           id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
@@ -94,14 +91,31 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
         })),
         "id",
         ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus"],
-      ) || d.activeProvider !== settings.activeProvider;
+      ) || d.activeProvider !== settings.activeProvider);
+      const ed = state.embProviderDraft;
+      const embDirty = !!ed && (differById(
+        ed.providers,
+        settings.embeddingProviders.map((p) => ({
+          id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
+          apiFormat: (p.apiFormat ?? "openai"), supportsImageInput: p.supportsImageInput ?? false,
+          modelOptions: p.modelOptions ?? [], dimensions: p.dimensions ?? null,
+          connStatus: p.connStatus ?? "untested",
+        })),
+        "id",
+        ["name", "baseUrl", "apiKey", "model", "apiFormat", "supportsImageInput", "modelOptions", "dimensions", "connStatus"],
+      ) || ed.activeProvider !== settings.activeEmbeddingProvider);
+      return chatDirty || embDirty;
     }
     case "artefactFile": {
       const d = state.artefactDraft;
       if (!d) return false;
-      const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", includeForAI: f.includeForAI ?? true }));
-      const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", includeForAI: f.includeForAI ?? true }));
-      return differByOrder(draftFields, savedFields, ["id", "name", "required", "description", "includeForAI"]);
+      // Vision-analysis system instruction is draft-buffered like the catalogue
+      // tab's Part-1 instruction.
+      if ((d.visionSystemPromptInstruction ?? "") !== (settings.visionSystemPromptInstruction ?? "")) return true;
+      // Id-keyed, not positional — see the "fields" case above for why.
+      const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
+      const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
+      return differById(draftFields, savedFields, "id", ["name", "description", "prompt"]);
     }
     case "about":
     default:

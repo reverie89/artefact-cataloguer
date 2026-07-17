@@ -23,7 +23,21 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 thiserror = "1"
+lancedb = { version = "0.22", default-features = false }
+arrow-array = "56"
+arrow-schema = "56"
+csv = "1"
+calamine = "0.31"
+blake3 = "1"
+futures = "0.3"
 
 [features]
 # By default Tauri ships a smaller binary without custom protocol overhead we don't need.
 default = []
+
+[profile.dev]
+# lancedb pulls in Arrow/DataFusion, which is generic-heavy; full debug info
+# bloats the intermediate .lib/.pdb to multiple GB and makes the Windows
+# linker extremely slow/memory-hungry. Line tables are enough for panic
+# stack traces while keeping link times sane.
+debug = "line-tables-only"

@@ -4,7 +4,8 @@
 
 import { _DEF, _DEF_AF } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
-import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, FieldSelection, ParseStatus, Screen, Settings, SettingsTab, VocabList } from "./types";
+import type { VocabTermEntry } from "../lib/vocab";
+import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, ParseStatus, Screen, Settings, SettingsTab, VocabSource } from "./types";
 
 /** One editable provider row in the unified providers draft. Mirrors a
  *  persisted Provider, plus the model list discovered by a successful Test
@@ -29,10 +30,10 @@ export type ProviderDraftEntry = {
 /** In-memory draft of the editable parts of the Cataloguing Fields tab. Unlike
  *  `PATCH_SETTINGS` (which persists on every keystroke), edits accumulate here
  *  and are only written to disk when the user clicks Save — mirroring the
- *  providers draft layer. `null` means "no pending edits; render settings". */
+ *  providers draft layer. `null` means "no pending edits; render settings".
+ *  The unified System Prompt moved to the Artefact File tab (Override-gated),
+ *  so this draft now carries only the per-field list. */
 export type FieldDraft = {
-  systemPromptInstruction: string;
-  systemPromptContractOverride: string;
   fields: CatalogueField[];
 };
 
@@ -44,16 +45,41 @@ export type ProviderDraft = {
   activeProvider: string | null;
 };
 
-/** In-memory draft of the Vocabulary Lists tab. Uploaded/renamed/deleted lists
- *  accumulate here and persist only on Save — mirrors FieldDraft/ProviderDraft.
- *  `null` means "no pending edits; render settings". */
+/** In-memory draft of the Vocabulary Lists tab. Uploaded/renamed/deleted
+ *  sources (and their files/fields) accumulate here and persist only on Save
+ *  — mirrors FieldDraft/ProviderDraft. `null` means "no pending edits; render
+ *  settings". */
 export type VocabDraft = {
-  vocabularyLists: VocabList[];
+  vocabSources: VocabSource[];
 };
 
-/** In-memory draft of the Artefact File tab's required-column config. Mirrors
- *  the other drafts; `null` means "no pending edits; render settings". */
+/** One editable embedding-provider row in the unified embedding-providers
+ *  draft. Mirrors ProviderDraftEntry. */
+export type EmbeddingProviderDraftEntry = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: EmbeddingApiFormat;
+  supportsImageInput: boolean;
+  modelOptions: string[];
+  dimensions: number | null;
+  connStatus: "ok" | "err" | "untested";
+};
+
+/** In-memory draft of the whole Embedding Providers section — mirrors
+ *  ProviderDraft. `null` means "no pending edits; render settings". */
+export type EmbeddingProviderDraft = {
+  providers: EmbeddingProviderDraftEntry[];
+  activeProvider: string | null;
+};
+
+/** In-memory draft of the Artefact File tab's required-column config + the
+ *  vision-analysis system instruction. Mirrors the other drafts; `null` means
+ *  "no pending edits; render settings". */
 export type ArtefactDraft = {
+  visionSystemPromptInstruction: string;
   artefactFields: ArtefactField[];
 };
 
@@ -61,8 +87,8 @@ export type ArtefactDraft = {
  *  add/remove-vocab-source actions, not the generic setter). */
 export type EditableCatalogueFieldKey = "name" | "type" | "prompt";
 
-/** Editable keys of an existing required-column row. */
-export type EditableArtefactFieldKey = "name" | "required" | "description" | "includeForAI";
+/** Editable keys of an existing artefact-column row. */
+export type EditableArtefactFieldKey = "name" | "description" | "prompt";
 
 export interface AppState {
   darkMode: boolean;
@@ -99,12 +125,31 @@ export interface AppState {
   /** Which provider cards are expanded, keyed by id — mirrors
    *  settingsFieldExpanded for collapsible AI Provider cards. */
   providerExpanded: Record<string, boolean>;
-  vocabDragOver: boolean;
-  /** Vocabulary Lists tab deferred draft. Uploaded/renamed/deleted lists buffer
-   *  here until Save, mirroring fieldDraft/providerDraft. */
+  /** Vocabulary Lists tab deferred draft. Only a source's Display Name is
+   *  draft-buffered — files/fields/sync have real Rust-side disk effects and
+   *  persist immediately (mirrors reorderVocab/removeVocabList), so they're
+   *  never part of this draft. */
   vocabDraft: VocabDraft | null;
-  /** Per-card save status for the Vocab inline editor (keyed by list id). */
+  /** Per-card save status for the Vocab inline editor (keyed by source id). Also
+   *  used to surface Add-file(s) failures, since staging has the same
+   *  real-disk-effect/no-draft shape as the card Save. */
   vocabCardSaveStatus: Record<string, SaveState>;
+  /** Specific reason a vocab card's Save or Add-file(s) failed (keyed by source
+   *  id), shown in place of the generic "Not saved". Cleared on the next
+   *  successful/again attempt. */
+  vocabCardError: Record<string, string>;
+  /** Live progress for an in-flight `sync_vocab_source` run, keyed by source
+   *  id — transient (not persisted); the source's `embedding` status in
+   *  settings is what survives a restart. Absent = no sync in flight. */
+  vocabSyncProgress: Record<string, { rowsDone: number; rowsTotal: number }>;
+  /** Full term list fetched from a synced source's LanceDB table, keyed by
+   *  source id — transient (not persisted), populated on demand by
+   *  `ensureVocabTermsLoaded` and consumed by `vterms` (app/styles.ts) to
+   *  drive the manual vocab-picker dropdown. Absent = not yet fetched. */
+  vocabTermCache: Record<string, VocabTermEntry[]>;
+  /** Source ids with a `listVocabTerms` fetch currently in flight, so
+   *  `ensureVocabTermsLoaded` doesn't fire a duplicate concurrent request. */
+  vocabTermCacheLoading: Record<string, boolean>;
 
   // Providers form — a single unified draft (mirrors fieldDraft): edits, adds,
   // deletes, and active-selection changes all accumulate here and persist only
@@ -123,6 +168,16 @@ export interface AppState {
    *  Save attempt. */
   provCardError: Record<string, string>;
   showProvKey: boolean;
+
+  // Embedding Providers section (AI tab) — mirrors the providers draft block
+  // above exactly, one field at a time, for the separate embedding-model list.
+  embProviderDraft: EmbeddingProviderDraft | null;
+  embProviderExpanded: Record<string, boolean>;
+  embProvStatus: Record<string, { test: "testing" | "ok" | "err" | null }>;
+  embProvSaveStatus: "saving" | "ok" | "err" | null;
+  embProvCardSaveStatus: Record<string, SaveState>;
+  embProvCardError: Record<string, string>;
+  showEmbProvKey: boolean;
 
   // Catalogue field edits — a deferred draft (mirrors providerDraft). Field
   // edits/adds/deletes accumulate here until the tab-level Save; rows expand on
@@ -190,9 +245,12 @@ export const initialState: AppState = {
   settingsFieldExpanded: {},
   settingsVocabExpanded: {},
   providerExpanded: {},
-  vocabDragOver: false,
   vocabDraft: null,
   vocabCardSaveStatus: {},
+  vocabCardError: {},
+  vocabSyncProgress: {},
+  vocabTermCache: {},
+  vocabTermCacheLoading: {},
 
   providerDraft: null,
   provStatus: {},
@@ -200,6 +258,14 @@ export const initialState: AppState = {
   provCardSaveStatus: {},
   provCardError: {},
   showProvKey: false,
+
+  embProviderDraft: null,
+  embProviderExpanded: {},
+  embProvStatus: {},
+  embProvSaveStatus: null,
+  embProvCardSaveStatus: {},
+  embProvCardError: {},
+  showEmbProvKey: false,
 
   fieldCardSaveStatus: {},
   fieldDraft: null,
@@ -229,7 +295,7 @@ export type Action =
   | { type: "RESET_UPLOAD" }
   | { type: "SET_UPLOAD_DRAG"; drag: boolean }
   | { type: "START_PARSE"; results: ArtefactRow[] }
-  | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, { value: string; confidence: number }[]> }
+  | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, { value: string; similarity?: number }[]> }
   | { type: "SET_ROW_IMAGE"; uid: string; imagePath: string }
   | { type: "SET_PARSE_STATUS"; status: ParseStatus }
   | { type: "SET_PARSE_ERROR"; error: string | null }
@@ -245,7 +311,7 @@ export type Action =
       value: string;
       source: "ai" | "vocab" | "manual";
       listName: string;
-      confidence: number | null;
+      similarity: number | null;
     }
   | { type: "CLEAR_FIELD"; key: string }
   | { type: "SET_OPEN_VALUE"; key: string; value: string }
@@ -254,10 +320,16 @@ export type Action =
   | { type: "TOGGLE_SF"; id: string }
   | { type: "TOGGLE_VOCAB"; id: string }
   | { type: "TOGGLE_PROV"; id: string }
-  | { type: "SET_VOCAB_DRAG"; drag: boolean }
   | { type: "PATCH_VOCAB_DRAFT"; patch: (d: VocabDraft) => VocabDraft }
   | { type: "CLEAR_VOCAB_DRAFT" }
   | { type: "SET_VOCAB_CARD_STATUS"; id: string; status: SaveState }
+  | { type: "SET_VOCAB_CARD_ERROR"; id: string; error: string | null }
+  | { type: "SET_VOCAB_SYNC_PROGRESS"; id: string; rowsDone: number; rowsTotal: number }
+  | { type: "CLEAR_VOCAB_SYNC_PROGRESS"; id: string }
+  | { type: "SET_VOCAB_TERMS_LOADING"; id: string }
+  | { type: "SET_VOCAB_TERMS"; id: string; terms: VocabTermEntry[] }
+  | { type: "CLEAR_VOCAB_TERMS"; id: string }
+  | { type: "CLEAR_ALL_VOCAB_TERMS" }
   | { type: "PATCH_PROVIDER_DRAFT"; patch: (d: ProviderDraft) => ProviderDraft }
   | { type: "CLEAR_PROVIDER_DRAFT" }
   | { type: "SET_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null }
@@ -266,6 +338,15 @@ export type Action =
   | { type: "SET_PROV_CARD_STATUS"; id: string; status: SaveState }
   | { type: "SET_PROV_CARD_ERROR"; id: string; error: string | null }
   | { type: "SET_SHOW_PROV_KEY"; show: boolean }
+  | { type: "TOGGLE_EMB_PROV"; id: string }
+  | { type: "PATCH_EMB_PROVIDER_DRAFT"; patch: (d: EmbeddingProviderDraft) => EmbeddingProviderDraft }
+  | { type: "CLEAR_EMB_PROVIDER_DRAFT" }
+  | { type: "SET_EMB_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null }
+  | { type: "CLEAR_EMB_PROV_STATUS"; id: string }
+  | { type: "SET_EMB_PROV_SAVE_STATUS"; status: "saving" | "ok" | "err" | null }
+  | { type: "SET_EMB_PROV_CARD_STATUS"; id: string; status: SaveState }
+  | { type: "SET_EMB_PROV_CARD_ERROR"; id: string; error: string | null }
+  | { type: "SET_SHOW_EMB_PROV_KEY"; show: boolean }
   | { type: "SET_FIELD_CARD_STATUS"; id: string; status: SaveState }
   | { type: "PATCH_FIELD_DRAFT"; patch: (d: FieldDraft) => FieldDraft }
   | { type: "CLEAR_FIELD_DRAFT" }
@@ -274,12 +355,12 @@ export type Action =
   | { type: "PATCH_ARTEFACT_DRAFT"; patch: (d: ArtefactDraft) => ArtefactDraft }
   | { type: "CLEAR_ARTEFACT_DRAFT" }
   | { type: "SET_ARTEFACT_CARD_STATUS"; id: string; status: SaveState }
-  | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded"; ids: string[]; expanded: boolean };
+  | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "embProviderExpanded" | "artefactFieldExpanded"; ids: string[]; expanded: boolean };
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "INIT":
-      return { ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, loaded: true, fieldDraft: null, providerDraft: null, vocabDraft: null, artefactDraft: null };
+      return { ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, loaded: true, fieldDraft: null, providerDraft: null, embProviderDraft: null, vocabDraft: null, artefactDraft: null };
     case "SET_DARK":
       return { ...state, darkMode: action.darkMode };
     case "SET_SCREEN":
@@ -361,7 +442,7 @@ export function reducer(state: AppState, action: Action): AppState {
           if (fieldSelections[key]) continue;
           const top = action.ai[field.name]?.[0];
           if (!top) continue;
-          additions[key] = { source: "ai", value: top.value, values: [top.value], listName: "AI", confidence: top.confidence };
+          additions[key] = { source: "ai", value: top.value, values: [top.value], listName: "AI", similarity: top.similarity ?? null };
         }
         if (Object.keys(additions).length > 0) {
           fieldSelections = { ...fieldSelections, ...additions };
@@ -415,8 +496,8 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       const selection: FieldSelection =
         values.length > 1
-          ? { source: "multi", value: values.join(" | "), values, listName: "", confidence: null }
-          : { source: action.source, value: values[0], values, listName: action.listName, confidence: action.confidence };
+          ? { source: "multi", value: values.join(" | "), values, listName: "", similarity: null }
+          : { source: action.source, value: values[0], values, listName: action.listName, similarity: action.similarity };
       return { ...state, fieldSelections: { ...state.fieldSelections, [action.key]: selection } };
     }
     case "CLEAR_FIELD": {
@@ -429,7 +510,7 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         fieldSelections: {
           ...state.fieldSelections,
-          [action.key]: { source: "open", value: action.value, values: [action.value], listName: "", confidence: null },
+          [action.key]: { source: "open", value: action.value, values: [action.value], listName: "", similarity: null },
         },
       };
 
@@ -453,9 +534,6 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, providerExpanded: e };
     }
 
-    case "SET_VOCAB_DRAG":
-      return { ...state, vocabDragOver: action.drag };
-
     case "PATCH_VOCAB_DRAFT": {
       // Self-heal: seed from persisted settings when no draft exists yet. Edits
       // accumulate without persisting (the no-save twin of PATCH_SETTINGS).
@@ -467,6 +545,37 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, vocabDraft: null };
     case "SET_VOCAB_CARD_STATUS":
       return { ...state, vocabCardSaveStatus: { ...state.vocabCardSaveStatus, [action.id]: action.status } };
+    case "SET_VOCAB_CARD_ERROR": {
+      const vocabCardError = { ...state.vocabCardError };
+      if (action.error === null) delete vocabCardError[action.id];
+      else vocabCardError[action.id] = action.error;
+      return { ...state, vocabCardError };
+    }
+    case "SET_VOCAB_SYNC_PROGRESS":
+      return { ...state, vocabSyncProgress: { ...state.vocabSyncProgress, [action.id]: { rowsDone: action.rowsDone, rowsTotal: action.rowsTotal } } };
+    case "CLEAR_VOCAB_SYNC_PROGRESS": {
+      if (!state.vocabSyncProgress[action.id]) return state;
+      const vocabSyncProgress = { ...state.vocabSyncProgress };
+      delete vocabSyncProgress[action.id];
+      return { ...state, vocabSyncProgress };
+    }
+    case "SET_VOCAB_TERMS_LOADING":
+      return { ...state, vocabTermCacheLoading: { ...state.vocabTermCacheLoading, [action.id]: true } };
+    case "SET_VOCAB_TERMS": {
+      const vocabTermCacheLoading = { ...state.vocabTermCacheLoading };
+      delete vocabTermCacheLoading[action.id];
+      return { ...state, vocabTermCache: { ...state.vocabTermCache, [action.id]: action.terms }, vocabTermCacheLoading };
+    }
+    case "CLEAR_VOCAB_TERMS": {
+      if (!(action.id in state.vocabTermCache) && !state.vocabTermCacheLoading[action.id]) return state;
+      const vocabTermCache = { ...state.vocabTermCache };
+      const vocabTermCacheLoading = { ...state.vocabTermCacheLoading };
+      delete vocabTermCache[action.id];
+      delete vocabTermCacheLoading[action.id];
+      return { ...state, vocabTermCache, vocabTermCacheLoading };
+    }
+    case "CLEAR_ALL_VOCAB_TERMS":
+      return { ...state, vocabTermCache: {}, vocabTermCacheLoading: {} };
 
     case "PATCH_PROVIDER_DRAFT": {
       // Self-heal: seed from persisted settings when no draft exists yet. Edits
@@ -502,6 +611,46 @@ export function reducer(state: AppState, action: Action): AppState {
     }
     case "SET_SHOW_PROV_KEY":
       return { ...state, showProvKey: action.show };
+
+    case "TOGGLE_EMB_PROV": {
+      const e = { ...state.embProviderExpanded };
+      e[action.id] = !e[action.id];
+      return { ...state, embProviderExpanded: e };
+    }
+    case "PATCH_EMB_PROVIDER_DRAFT": {
+      // Self-heal: seed from persisted settings when no draft exists yet. Edits
+      // accumulate without persisting (the no-save twin of PATCH_SETTINGS).
+      const base = state.embProviderDraft ?? embeddingProviderDraftFromSettings(state.settings);
+      return { ...state, embProviderDraft: action.patch(base) };
+    }
+    case "CLEAR_EMB_PROVIDER_DRAFT":
+      // Discard: drop the whole embedding-providers draft so the UI renders settings again.
+      return { ...state, embProviderDraft: null };
+    case "SET_EMB_PROV_STATUS": {
+      // Transient Test Connection outcome for a single row. This is verification,
+      // not config, so it lives outside the draft.
+      const embProvStatus = { ...state.embProvStatus, [action.id]: { test: action.test } };
+      return { ...state, embProvStatus };
+    }
+    case "CLEAR_EMB_PROV_STATUS": {
+      // Drop a row's stale test status (e.g. after editing its credentials).
+      if (!state.embProvStatus[action.id]) return state;
+      const embProvStatus = { ...state.embProvStatus };
+      delete embProvStatus[action.id];
+      return { ...state, embProvStatus };
+    }
+    case "SET_EMB_PROV_SAVE_STATUS":
+      return { ...state, embProvSaveStatus: action.status };
+    case "SET_EMB_PROV_CARD_STATUS":
+      return { ...state, embProvCardSaveStatus: { ...state.embProvCardSaveStatus, [action.id]: action.status } };
+    case "SET_EMB_PROV_CARD_ERROR": {
+      const embProvCardError = { ...state.embProvCardError };
+      if (action.error === null) delete embProvCardError[action.id];
+      else embProvCardError[action.id] = action.error;
+      return { ...state, embProvCardError };
+    }
+    case "SET_SHOW_EMB_PROV_KEY":
+      return { ...state, showEmbProvKey: action.show };
 
     case "SET_FIELD_CARD_STATUS":
       return { ...state, fieldCardSaveStatus: { ...state.fieldCardSaveStatus, [action.id]: action.status } };
@@ -547,8 +696,6 @@ export function reducer(state: AppState, action: Action): AppState {
  *  the baseline a draft is seeded from and compared against for dirty checks. */
 function fieldDraftFromSettings(s: Settings): FieldDraft {
   return {
-    systemPromptInstruction: s.systemPromptInstruction,
-    systemPromptContractOverride: s.systemPromptContractOverride ?? "",
     // Shallow-clone each field and its vocabSources array so patch fns can
     // mutate copies without touching persisted state.
     fields: s.fields.map((f) => ({ ...f, vocabSources: [...f.vocabSources] })),
@@ -581,9 +728,35 @@ export function providerDraftFromSettings(s: Settings): ProviderDraft {
  *  fieldDraftFromSettings. */
 export function vocabDraftFromSettings(s: Settings): VocabDraft {
   return {
-    // Clone each list so patch fns can mutate copies without touching persisted
-    // state (termData is shared by reference — lists are read-only after parse).
-    vocabularyLists: s.vocabularyLists.map((v) => ({ ...v })),
+    // Clone each source and its files/fields arrays so patch fns can mutate
+    // copies without touching persisted state.
+    vocabSources: s.vocabSources.map((v) => ({
+      ...v,
+      files: v.files.map((f) => ({ ...f })),
+      fields: v.fields.map((f) => ({ ...f })),
+      embedding: { ...v.embedding },
+    })),
+  };
+}
+
+/** Snapshot of the Embedding Providers section from persisted settings — the
+ *  baseline an embedding-providers draft is seeded from and compared against
+ *  for dirty checks. Mirrors providerDraftFromSettings. */
+export function embeddingProviderDraftFromSettings(s: Settings): EmbeddingProviderDraft {
+  return {
+    activeProvider: s.activeEmbeddingProvider,
+    providers: s.embeddingProviders.map((p) => ({
+      id: p.id,
+      name: p.name,
+      baseUrl: p.baseUrl,
+      apiKey: p.apiKey,
+      model: p.model,
+      apiFormat: p.apiFormat ?? "openai",
+      supportsImageInput: p.supportsImageInput ?? false,
+      modelOptions: [...(p.modelOptions ?? [])],
+      dimensions: p.dimensions ?? null,
+      connStatus: p.connStatus ?? "untested",
+    })),
   };
 }
 
@@ -592,6 +765,7 @@ export function vocabDraftFromSettings(s: Settings): VocabDraft {
  *  checks. Mirrors fieldDraftFromSettings. */
 export function artefactDraftFromSettings(s: Settings): ArtefactDraft {
   return {
+    visionSystemPromptInstruction: s.visionSystemPromptInstruction ?? "",
     artefactFields: (s.artefactFields || _DEF_AF).map((f) => ({ ...f })),
   };
 }

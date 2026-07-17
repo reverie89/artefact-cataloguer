@@ -3,12 +3,10 @@
 // can surface them — there is no demo fallback.
 
 import { invoke } from "@tauri-apps/api/core";
-import { _DEF_SYSTEM_PROMPT_CONTRACT } from "../app/defaults";
-import { resolveVocabSources } from "../app/styles";
-import type { CatalogueField, Provider, Settings } from "../app/types";
+import type { CatalogueField, EmbeddingProvider, Provider, Settings } from "../app/types";
 
 interface RawCatalogueResult {
-  fieldResults: Record<string, { value: string; confidence: number }[]>;
+  fieldResults: Record<string, { value: string; similarity?: number }[]>;
 }
 
 /**
@@ -37,20 +35,99 @@ interface RustField {
   name: string;
   type: string;
   prompt: string;
-  allowed: string[];
+  vocabSourceIds: string[];
+}
+
+interface RustEmbeddingProvider {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: string;
+  supportsImageInput: boolean;
+}
+
+function toRustEmbeddingProvider(provider: EmbeddingProvider): RustEmbeddingProvider {
+  return {
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    model: provider.model,
+    apiFormat: provider.apiFormat ?? "openai",
+    supportsImageInput: provider.supportsImageInput ?? false,
+  };
+}
+
+interface RustArtefactColumn {
+  name: string;
+  prompt: string;
 }
 
 interface RustArtefact {
   record: Record<string, string>;
   imagePath: string | null;
-  systemPrompt: string;
-  systemPromptContract: string;
+  /** The unified Call-1 prompt (persona + output-format preamble). The XML
+   *  field enumeration and `<artefact_file>` record block are appended by Rust. */
+  visionSystemPrompt: string;
+  artefactColumns: RustArtefactColumn[];
 }
 
-/** Flatten a vocab field's allowed terms from its vocabSources lists. */
-function allowedTerms(field: CatalogueField, settings: Settings): string[] {
+/** Ids of this field's vocab sources whose embedded index is ready for
+ *  server-side retrieval (never-synced/stale/error sources resolve to
+ *  nothing until the user syncs them in Settings). */
+export function vocabSourceIdsForRetrieval(field: CatalogueField, settings: Settings): string[] {
   if (field.type !== "vocab") return [];
-  return resolveVocabSources(field, settings.vocabularyLists).flatMap(({ terms }) => terms);
+  return (field.vocabSources || []).filter((sid) => {
+    const vs = settings.vocabSources.find((v) => v.id === sid);
+    return !!vs && vs.embedding.status === "synced";
+  });
+}
+
+/** True when a vocab source's embedded index is ready for server-side
+ *  retrieval. `never`/`stale`/`error` are not: `vocabSourceIdsForRetrieval`
+ *  omits them, which would otherwise silently fall through to Rust's `else`
+ *  branch in `build_combined_prompt` — the field is prompted as
+ *  *unconstrained free text*, not the vocab list, since an empty
+ *  `vocabSourceIds` reads as "not a vocab field" there. Cataloguing must not
+ *  run against a source in this state; see `findUnsyncedVocabField`. */
+function isVocabSourceReady(vs: Settings["vocabSources"][number]): boolean {
+  return vs.embedding.status === "synced";
+}
+
+/**
+ * Find the first vocab field/source pair that would silently lose its
+ * controlled-vocabulary constraint if cataloguing ran right now (see
+ * {@link isVocabSourceReady}). Checked once before a Parse run — mirrors the
+ * "active provider required" pre-flight check — so a forgotten Sync fails
+ * loudly instead of producing free-text answers for a field that looks like
+ * a controlled-vocabulary pick list everywhere else in the UI.
+ */
+export function findUnsyncedVocabField(settings: Settings): { fieldName: string; sourceName: string } | null {
+  for (const field of settings.fields) {
+    if (field.type !== "vocab") continue;
+    for (const sid of field.vocabSources || []) {
+      const vs = settings.vocabSources.find((v) => v.id === sid);
+      if (vs && !isVocabSourceReady(vs)) {
+        return { fieldName: field.name || "Untitled field", sourceName: vs.name || "Untitled source" };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Vocab fields are resolved purely by embedding search against the Call-1
+ * description — no LLM call, no vocab list in any prompt. That requires an
+ * active embedding provider; without one, a vocab field would silently yield
+ * empty results. Returns the first such field so a Parse run can fail loudly
+ * with a pointer to fix it, mirroring {@link findUnsyncedVocabField}.
+ */
+export function findVocabFieldWithoutEmbedding(settings: Settings): { fieldName: string } | null {
+  const hasVocabField = settings.fields.some((f) => f.type === "vocab" && (f.vocabSources || []).length > 0);
+  if (!hasVocabField) return null;
+  if (activeEmbeddingProvider(settings)) return null;
+  const first = settings.fields.find((f) => f.type === "vocab" && (f.vocabSources || []).length > 0);
+  return { fieldName: first?.name || "Untitled field" };
 }
 
 /**
@@ -72,10 +149,12 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
 }
 
 /**
- * Catalogue one artefact via the active provider with a single prompt. The
- * image (when present) is inlined into the same call by the Rust side. Returns
- * per-field ranked suggestions. Throws on transport/HTTP errors so callers can
- * surface them — there is no demo fallback.
+ * Catalogue one artefact via the active provider. The image (when present) is
+ * inlined into Call 1 by the Rust side; the three-call XML pipeline (Call 1
+ * vision+extraction → embedding → Call 3 validation) runs entirely in Rust.
+ * Returns per-field suggestions: open-ended fields carry no similarity;
+ * controlled-vocab fields carry cosine `similarity`. Throws on transport/HTTP
+ * errors so callers can surface them — there is no demo fallback.
  *
  * `cancelKey` identifies this call in Rust's cancel registry (see
  * {@link cancelCatalogue}); cancelling it makes the Rust side drop the in-flight
@@ -88,7 +167,7 @@ export async function catalogueArtefact(
   imagePath: string | undefined,
   settings: Settings,
   cancelKey: string
-): Promise<Record<string, { value: string; confidence: number }[]>> {
+): Promise<Record<string, { value: string; similarity?: number }[]>> {
   const rustProvider: RustProvider = {
     name: provider.name,
     baseUrl: provider.baseUrl,
@@ -96,27 +175,34 @@ export async function catalogueArtefact(
     model: provider.model,
     apiFormat: provider.apiFormat ?? "openai",
   };
-  const sharedInstruction = settings.systemPromptInstruction?.trim();
-  // Part 2 of the system instructions: use the user's override if any, else the
-  // built-in default. Resolved here so the default lives in one place.
-  const effectiveContract = settings.systemPromptContractOverride?.trim() || _DEF_SYSTEM_PROMPT_CONTRACT;
   const rustFields: RustField[] = fields.map((f) => ({
     name: f.name,
     type: f.type,
     prompt: f.prompt,
-    allowed: allowedTerms(f, settings),
+    // Vocab fields are resolved by per-field embedding search + Call 3
+    // validation on the Rust side. findUnsyncedVocabField +
+    // findVocabFieldWithoutEmbedding guarantee a vocab field's sources are
+    // synced AND an embedding provider is active by call time.
+    vocabSourceIds: vocabSourceIdsForRetrieval(f, settings),
   }));
   const rustArtefact: RustArtefact = {
     record,
     imagePath: imagePath || null,
-    systemPrompt: sharedInstruction || "",
-    systemPromptContract: effectiveContract,
+    // The unified Call-1 prompt: persona + output-format preamble. Rust appends
+    // the XML field enumeration and the <artefact_file> record block.
+    visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
+    artefactColumns: (settings.artefactFields || []).map((c) => ({ name: c.name, prompt: c.prompt ?? "" })),
   };
+  const embProvider = activeEmbeddingProvider(settings);
   const res = await invoke<RawCatalogueResult>("catalogue_artefact", {
     provider: rustProvider,
     fields: rustFields,
     artefact: rustArtefact,
     jobId: cancelKey,
+    embeddingProvider: embProvider ? toRustEmbeddingProvider(embProvider) : null,
+    netCount: settings.vocabNetCount,
+    shortlistCount: settings.vocabShortlistCount,
+    call3Enabled: settings.call3Enabled,
   });
   return res.fieldResults || {};
 }
@@ -132,29 +218,30 @@ export async function cancelCatalogue(cancelKey: string): Promise<void> {
 }
 
 /**
- * Assemble the exact combined prompt `catalogueArtefact` would send for one
- * artefact, without making any network call. Used by the Settings "Prompt
- * Preview" tab. Resolves the effective contract (override or default) the same
- * way the real call does, so the preview never drifts. The row record is
- * runtime-only data Settings doesn't have, so it's passed empty — Rust renders
- * it as an `Artefact File information: {}` placeholder.
+ * Assemble the exact unified Call-1 prompt `catalogueArtefact` would send as
+ * its first user turn, without making any network call. Used by the Artefact
+ * File tab's prompt preview. The row's source values are produced at parse
+ * time, so the record is shown as a placeholder; the image attaches as a
+ * separate content block in real runs.
+ *
+ * Includes ALL fields (open + vocab): both emit XML blocks in the unified
+ * prompt's enumeration, so the preview reflects exactly what Call 1 sends.
  */
-export async function buildPromptsPreview(fields: CatalogueField[], settings: Settings): Promise<string> {
-  const sharedInstruction = settings.systemPromptInstruction?.trim();
-  const effectiveContract = settings.systemPromptContractOverride?.trim() || _DEF_SYSTEM_PROMPT_CONTRACT;
-  const rustFields: RustField[] = fields.map((f) => ({
-    name: f.name,
-    type: f.type,
-    prompt: f.prompt,
-    allowed: allowedTerms(f, settings),
-  }));
+export async function buildPromptPreview(settings: Settings): Promise<string> {
   const rustArtefact: RustArtefact = {
     record: {},
     imagePath: null,
-    systemPrompt: sharedInstruction || "",
-    systemPromptContract: effectiveContract,
+    visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
+    artefactColumns: [],
   };
-  return invoke<string>("build_prompts_preview", { fields: rustFields, artefact: rustArtefact });
+  const columns: RustArtefactColumn[] = (settings.artefactFields || []).map((c) => ({ name: c.name, prompt: c.prompt ?? "" }));
+  const fields: RustField[] = (settings.fields || []).map((f) => ({
+    name: f.name,
+    type: f.type,
+    prompt: f.prompt,
+    vocabSourceIds: [],
+  }));
+  return invoke<string>("build_vision_prompt_preview", { columns, fields, artefact: rustArtefact });
 }
 
 /** Ping the provider (GET /models) to validate URL + key and fetch the model list. */
@@ -169,6 +256,48 @@ export async function testConnection(provider: Provider): Promise<RawConnectionT
     },
   });
   return res;
+}
+
+/** Shape returned by the Rust `test_embedding_connection` command — mirrors
+ *  RawConnectionTest, plus the vector width learned from a real embed call. */
+interface RawEmbeddingConnectionTest {
+  ok: string;
+  models: string[];
+  dimensions: number;
+}
+
+/** Derive the live embeddings endpoint an embedding provider's calls hit —
+ *  mirrors providerEndpoints for the chat provider list. */
+export function embeddingProviderEndpoints(provider: Pick<EmbeddingProvider, "baseUrl" | "apiFormat">): { embeddings: string; models: string } {
+  const base = provider.baseUrl.replace(/\/$/, "");
+  switch (provider.apiFormat ?? "openai") {
+    case "gemini":
+      return { embeddings: `${base}/v1beta/models`, models: `${base}/v1beta/models` };
+    default:
+      return { embeddings: base, models: `${base}/models` };
+  }
+}
+
+/** Ping the embedding provider with a real 1-item embed call to validate URL +
+ *  key, fetch the model list, and learn the vector width. Mirrors
+ *  testConnection for the chat provider list. */
+export async function testEmbeddingConnection(provider: EmbeddingProvider): Promise<RawEmbeddingConnectionTest> {
+  const res = await invoke<RawEmbeddingConnectionTest>("test_embedding_connection", {
+    provider: {
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      model: provider.model,
+      apiFormat: provider.apiFormat ?? "openai",
+    },
+  });
+  return res;
+}
+
+/** Look up the active embedding provider object, if any. */
+export function activeEmbeddingProvider(settings: Settings): EmbeddingProvider | undefined {
+  if (!settings.activeEmbeddingProvider) return undefined;
+  return settings.embeddingProviders.find((p) => p.id === settings.activeEmbeddingProvider);
 }
 
 /** True when a usable provider is configured and active. */

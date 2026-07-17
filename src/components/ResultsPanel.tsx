@@ -69,8 +69,8 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
         </Button>
       </div>
       {/* Column header */}
-      <div className="bg-muted/30 border-border/60 grid grid-cols-[120px_1fr_150px_115px] shrink-0 border-b px-5 py-1.5">
-        {["Obj. Number", "Title", "Category", "Status"].map((h) => (
+      <div className="bg-muted/30 border-border/60 grid grid-cols-[80px_1fr] shrink-0 border-b px-5 py-1.5">
+        {["S/N", "Status"].map((h) => (
           <span key={h} className="text-muted-foreground text-xs uppercase tracking-[0.1em]">{h}</span>
         ))}
       </div>
@@ -83,8 +83,8 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           </div>
         </div>
       ) : (
-        filtered.map((row) => (
-          <ResultRow key={row.uid} row={row} state={state} actions={actions} convertFileSrc={convertFileSrc} />
+        filtered.map((row, i) => (
+          <ResultRow key={row.uid} row={row} index={i + 1} state={state} actions={actions} convertFileSrc={convertFileSrc} />
         ))
       )}
     </div>

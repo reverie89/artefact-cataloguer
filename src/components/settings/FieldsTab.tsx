@@ -1,22 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { AlertTriangle, Eye, GripVertical, Plus, X } from "lucide-react";
+import { AlertTriangle, GripVertical, Plus, X } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
-import { _DEF_SYSTEM_PROMPT_CONTRACT } from "../../app/defaults";
 import { fieldsDiffer } from "../../app/drafts";
 import { displayName } from "../../app/styles";
-import type { CatalogueField, FieldType, Settings, VocabList } from "../../app/types";
+import type { CatalogueField, FieldType, VocabSource } from "../../app/types";
 import { CardActions } from "./CardActions";
 import { Field, FieldInput, FieldTextarea, Segmented } from "./FormControls";
-import { PromptPreviewSheet } from "./PromptPreviewSheet";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -39,13 +35,10 @@ export function FieldsTab({ state, actions }: Props) {
 
   // Render from the pending draft if there are unsaved edits, otherwise from
   // persisted settings. Edits accumulate in the draft and only hit disk on Save.
-  const live = state.fieldDraft ?? {
-    systemPromptInstruction: settings.systemPromptInstruction,
-    systemPromptContractOverride: settings.systemPromptContractOverride ?? "",
-    fields: settings.fields,
-  };
-  const instrDirty = !!state.fieldDraft && state.fieldDraft.systemPromptInstruction !== settings.systemPromptInstruction;
-  const contractDirty = !!state.fieldDraft && (state.fieldDraft.systemPromptContractOverride ?? "") !== (settings.systemPromptContractOverride ?? "");
+  const live = useMemo(
+    () => state.fieldDraft ?? { fields: settings.fields },
+    [state.fieldDraft, settings.fields]
+  );
 
   // Per-row DOM refs so a newly-added row can be scrolled into view. A ref
   // tracks the previous field count so the scroll fires ONLY when the count
@@ -66,13 +59,6 @@ export function FieldsTab({ state, actions }: Props) {
     return () => clearTimeout(t);
   }, [live.fields]);
 
-  // Local UI state for the Prompt Preview sheet. `previewOpen` lives here rather
-  // than in the app reducer because the sheet is a transient FieldsTab affordance.
-  const [previewOpen, setPreviewOpen] = useState(false);
-  // Settings with the in-progress draft merged in, so the preview reflects
-  // exactly what would be sent if the user saved now.
-  const previewSettings: Settings = { ...settings, ...live };
-
   // Require a small drag threshold so a normal click on a row still toggles the
   // editor instead of starting a drag.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -90,88 +76,12 @@ export function FieldsTab({ state, actions }: Props) {
     [live.fields, actions]
   );
 
-  // The output-contract (Part 2) box is read-only unless the user has pressed
-  // Override (gated by a warning confirmation in actions.overrideContract). It
-  // always re-locks on Save/Discard, so overriding always starts with Override.
-  const contractEditing = state.contractEditing;
-  const contractValue = live.systemPromptContractOverride || _DEF_SYSTEM_PROMPT_CONTRACT;
-
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
         Configure the fields the AI will extract for each artefact. Click a row to edit its prompt and type.
+        The unified system prompt and output format live on the Artefact File tab.
       </div>
-
-      {/* Part 1 — editable context prose. Prepended verbatim to every request. */}
-      <Card className="gap-2 py-3.5">
-        <Field
-          label="System Instructions"
-          desc="Your customizable context and guidance. Prepended verbatim to every catalogue request."
-          action={
-            <Button onClick={() => setPreviewOpen(true)} variant="secondary" size="sm" className="shrink-0">
-              <Eye className="size-3" />
-              <span>Preview Prompt</span>
-            </Button>
-          }
-          className="px-4"
-        >
-          <Textarea
-            value={live.systemPromptInstruction || ""}
-            onChange={(e) => actions.updateSystemPromptInstruction(e.target.value)}
-            rows={4}
-            className="resize-y leading-relaxed"
-          />
-        </Field>
-        <div className="px-4">
-          <CardActions
-            dirty={instrDirty}
-            status={state.fieldCardSaveStatus["system-instruction"] ?? null}
-            onSave={() => void actions.saveSystemInstruction()}
-            onDiscard={actions.discardSystemInstruction}
-          />
-        </div>
-      </Card>
-
-      {/* Part 2 — locked output contract. Read-only unless overridden. */}
-      <Card className="gap-2 py-3.5">
-        <Field
-          label="Output Contract"
-          desc="Required for the app to read responses. Do not edit unless you know what you&apos;re doing!"
-          action={
-            contractEditing ? (
-              <Button
-                onClick={() => { actions.updateSystemPromptContract(""); actions.setContractEditing(false); }}
-                variant="ghost"
-                size="sm"
-                className="shrink-0"
-              >
-                Reset to default
-              </Button>
-            ) : (
-              <Button onClick={() => void actions.overrideContract()} variant="secondary" size="sm" className="shrink-0">
-                Override
-              </Button>
-            )
-          }
-          className="px-4"
-        >
-          <Textarea
-            value={contractValue}
-            onChange={(e) => actions.updateSystemPromptContract(e.target.value)}
-            readOnly={!contractEditing}
-            rows={5}
-            className={cn("resize-y leading-relaxed", !contractEditing && "bg-muted/40 text-muted-foreground")}
-          />
-        </Field>
-        <div className="px-4">
-          <CardActions
-            dirty={contractDirty}
-            status={state.fieldCardSaveStatus["output-contract"] ?? null}
-            onSave={() => void actions.saveContract()}
-            onDiscard={actions.discardContract}
-          />
-        </div>
-      </Card>
 
       <ExpandCollapseAll
         onExpandAll={() => actions.setAllExpanded("settingsFieldExpanded", live.fields.map((f) => f.id), true)}
@@ -193,7 +103,7 @@ export function FieldsTab({ state, actions }: Props) {
                 <SortableFieldRow
                   key={f.id}
                   field={f}
-                  lists={settings.vocabularyLists}
+                  lists={settings.vocabSources}
                   expanded={!!settingsFieldExpanded[f.id]}
                   dirty={fieldDirty}
                   cardStatus={state.fieldCardSaveStatus[f.id] ?? null}
@@ -209,8 +119,6 @@ export function FieldsTab({ state, actions }: Props) {
       <Button onClick={actions.startAddField} variant="outline" className="text-muted-foreground w-full border-dashed">
         <Plus className="size-3" /><span>Add Field</span>
       </Button>
-
-      <PromptPreviewSheet open={previewOpen} onClose={() => setPreviewOpen(false)} settings={previewSettings} />
     </div>
   );
 }
@@ -219,7 +127,7 @@ export function FieldsTab({ state, actions }: Props) {
  *  drag anchor; clicking anywhere else on the row toggles the editor. */
 interface SortableFieldRowProps {
   field: CatalogueField;
-  lists: VocabList[];
+  lists: VocabSource[];
   expanded: boolean;
   /** Whether this field row has unsaved content edits. */
   dirty: boolean;
@@ -289,7 +197,7 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
  *  editor. Kept as a component so the field edits stay in one place (DRY). */
 interface FieldEditorProps {
   field: { name: string; type: FieldType; prompt: string; vocabSources: string[] };
-  lists: VocabList[];
+  lists: VocabSource[];
   onName: (v: string) => void;
   onType: (v: FieldType) => void;
   onPrompt: (v: string) => void;
@@ -311,8 +219,12 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
         value={field.name}
         onChange={(e) => onName(e.target.value)}
         placeholder="Field name"
+        desc="Shown in the fields list and as the column header in exported results."
       />
-      <Field label="Type">
+      <Field
+        label="Type"
+        desc="Whether the AI can suggest any value (Open-ended) or must pick from attached vocabulary sources (Controlled vocab)."
+      >
         <Segmented
           value={field.type}
           onChange={(v) => onType(v as FieldType)}
@@ -323,16 +235,16 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
         />
       </Field>
       {field.type === "vocab" && (
-        <div className="flex flex-col gap-1.25">
-          <div className="flex items-center gap-1.5">
-            <Label className="text-muted-foreground text-xs uppercase tracking-[0.08em]">Vocabulary Sources</Label>
-            {sources.length === 0 && (
-              <Badge variant="destructive" className="gap-1 text-[10px] font-normal tracking-[0.04em]">
-                <AlertTriangle className="size-2.5" />
-                No source added
-              </Badge>
-            )}
-          </div>
+        <Field
+          label="Vocabulary Sources"
+          labelSuffix={sources.length === 0 && (
+            <Badge variant="destructive" className="gap-1 text-[10px] font-normal tracking-[0.04em]">
+              <AlertTriangle className="size-2.5" />
+              No source added
+            </Badge>
+          )}
+          desc="Terms the AI can draw from and match against for this field."
+        >
           <div className="flex flex-wrap items-center gap-1.25">
             {sources.map((sid) => {
               const vl = lists.find((v) => v.id === sid);
@@ -357,11 +269,13 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
               </Select>
             )}
           </div>
-        </div>
+        </Field>
       )}
       <FieldTextarea
         label="Prompt Instruction"
-        desc="Field-specific instruction. The system instructions above are prepended automatically."
+        desc={field.type === "vocab"
+          ? "Field-specific guidance applied when Call 3 validates candidates (e.g. tiebreak preferences)."
+          : "Field-specific guidance for this field's answer in Call 1."}
         value={field.prompt}
         onChange={(e) => onPrompt(e.target.value)}
         rows={2}
