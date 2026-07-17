@@ -75,7 +75,9 @@ export function ProvidersTab({ state, actions }: Props) {
 
       <Card className="gap-0 overflow-hidden p-0">
         <div className={cn("bg-muted/30 border-b py-1.75", GRID)}>
-          <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Provider</span>
+          <span className="text-muted-foreground text-xs uppercase tracking-[0.1em] flex items-center gap-1.5">
+            Provider <Badge variant="secondary" className="text-[10px]">Vision</Badge>
+          </span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Model</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Status</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Active</span>
