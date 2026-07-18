@@ -1,5 +1,5 @@
-import type { AppActions } from "../app/actions";
-import type { AppState } from "../app/state";
+import type { AppActions } from "../../app/actions";
+import type { AppState } from "../../app/state";
 import { UploadPanel } from "./UploadPanel";
 import { ResultsPanel } from "./ResultsPanel";
 

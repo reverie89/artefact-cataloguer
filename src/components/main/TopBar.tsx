@@ -7,10 +7,10 @@ import {
   Sun,
   Zap,
 } from "lucide-react";
-import type { AppActions } from "../app/actions";
-import type { AppState } from "../app/state";
-import { activeProvider, hasProvider } from "../lib/ai";
-import { useLogErrorCount } from "../lib/logs";
+import type { AppActions } from "../../app/actions";
+import type { AppState } from "../../app/state";
+import { activeProvider, hasProvider } from "../../lib/ai";
+import { useLogErrorCount } from "../../lib/logs";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 

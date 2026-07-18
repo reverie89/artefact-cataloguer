@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 
 import { ConfirmDialog } from "./ConfirmDialog";
-import { useConfirmDelete } from "./useConfirmDelete";
+import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 
 afterEach(() => {
   cleanup();

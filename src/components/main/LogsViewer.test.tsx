@@ -3,7 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { LogsViewer } from "./LogsViewer";
-import { clearLogs, pushLog } from "../lib/logs";
+import { clearLogs, pushLog } from "../../lib/logs";
 
 beforeEach(() => {
   clearLogs();
