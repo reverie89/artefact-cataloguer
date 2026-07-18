@@ -39,7 +39,7 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
   );
 }
 
-export function ProvidersTab({ state, actions }: Props) {
+export function VisionProvidersSection({ state, actions }: Props) {
   const { settings, provStatus, showProvKey } = state;
   // Render from the unified draft when there are pending edits, else settings.
   const live = state.providerDraft ?? providerDraftFromSettings(settings);
@@ -70,13 +70,13 @@ export function ProvidersTab({ state, actions }: Props) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Configure the AI providers used to catalogue artefacts. Add at least one provider to run the catalogue; click a row to edit its credentials and model.
+        Configure the vision providers that power vision analysis and validation. Add at least one provider to run the catalogue; click a row to edit its credentials and model.
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
         <div className={cn("bg-muted/30 border-b py-1.75", GRID)}>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em] flex items-center gap-1.5">
-            Provider <Badge variant="secondary" className="text-[10px]">Vision</Badge>
+            Vision Provider
           </span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Model</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Status</span>
@@ -86,11 +86,11 @@ export function ProvidersTab({ state, actions }: Props) {
         {live.providers.map((entry) => {
           const isActive = entry.id === live.activeProvider;
           const saved = settings.providers.find((p) => p.id === entry.id);
-          // A row is "unsaved" when it's newly added (no persisted match), its
-          // draft entry differs from the persisted provider, or the user just made
-          // it the active selection (active-flip is committed by this row's Save).
+          // A row is "unsaved" when it's newly added (no persisted match) or its
+          // draft entry differs from the persisted provider. ("Set Active" persists
+          // immediately, so it doesn't contribute to per-card dirtiness.)
           const cardDirty = !!state.providerDraft && (
-            !saved || entryDiffers(entry, saved) || (isActive && settings.activeProvider !== entry.id)
+            !saved || entryDiffers(entry, saved)
           );
           // Resolve the Status shown in the row: the transient Test Connection
           // outcome wins (it carries the live "testing" + just-run result that
@@ -119,7 +119,7 @@ export function ProvidersTab({ state, actions }: Props) {
 
         {live.providers.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">
-            No AI providers configured. Add one below to enable cataloguing.
+            No vision providers configured. Add one below to enable cataloguing.
           </div>
         )}
       </Card>
@@ -187,15 +187,15 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
         <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
         {/* Status */}
         <StatusBadge status={testStatus} />
-        {/* Active: kept interactive via stopPropagation so the row doesn't toggle.
-            "Set Active" buffers into the draft and is committed by this row's Save. */}
-        <div onClick={(e) => e.stopPropagation()}>
-          {isActive ? (
-            <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
-          ) : (
-            <Button onClick={() => actions.setActiveProv(id)} variant="outline" size="sm">Set Active</Button>
-          )}
-        </div>
+{/* Active: kept interactive via stopPropagation so the row doesn't toggle.
+    "Set Active" persists immediately to disk (no per-card Save needed). */}
+<div onClick={(e) => e.stopPropagation()}>
+  {isActive ? (
+    <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
+  ) : (
+    <Button onClick={() => void actions.setActiveProv(id)} variant="outline" size="sm">Set Active</Button>
+  )}
+</div>
       </div>
 
       {expanded && (

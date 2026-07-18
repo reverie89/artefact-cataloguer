@@ -6,7 +6,7 @@ import { fieldsDiffer } from "../../app/drafts";
 import type { EmbeddingApiFormat, EmbeddingProvider } from "../../app/types";
 import { embeddingProviderEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
-import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
+import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,19 +33,19 @@ function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: Embeddi
       apiKey: p.apiKey,
       model: p.model,
       apiFormat: (p.apiFormat ?? "openai") as EmbeddingApiFormat,
-      supportsImageInput: p.supportsImageInput ?? false,
       modelOptions: p.modelOptions ?? [],
       dimensions: p.dimensions ?? null,
       connStatus: p.connStatus ?? "untested",
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "supportsImageInput", "modelOptions", "dimensions", "connStatus"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "dimensions", "connStatus"],
   );
 }
 
 /** Embedding-model provider list, rendered as a second card-list within the
- *  same "ai" tab, below the chat ProvidersTab. Structurally a near-copy of
- *  ProvidersTab.tsx — same draft/save/discard shape — since embeddings may run
- *  on a completely different vendor/endpoint than chat+vision. */
+ *  same "modelProviders" tab, below the vision VisionProvidersSection.
+ *  Structurally a near-copy of VisionProvidersSection.tsx — same
+ *  draft/save/discard shape — since embeddings may run on a completely
+ *  different vendor/endpoint than chat+vision. */
 export function EmbeddingProvidersSection({ state, actions }: Props) {
   const { settings, showEmbProvKey } = state;
   const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(settings);
@@ -67,15 +67,16 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Configure the models used to embed vocabulary terms and, at parse time, artefact descriptions/images for shortlisted
-        retrieval. Embeddings can run on a different vendor than the AI Provider above — e.g. a local model here alongside a
-        hosted chat/vision provider.
+        Configure the models used to embed vocabulary terms and, at parse time, artefact descriptions and the artefact image
+        for shortlisted retrieval. Embedding models MUST be multimodal (text + image) — the per-row pipeline embeds the
+        artefact image unconditionally, so a text-only model hard-fails that row. Embeddings can run on a different vendor
+        than the vision provider above — e.g. a local multimodal model here alongside a hosted vision provider.
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
         <div className={cn("bg-muted/30 border-b py-1.75", GRID)}>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em] flex items-center gap-1.5">
-            Provider <Badge variant="outline" className="text-[10px]">Embedding</Badge>
+            Embedding Provider
           </span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Model</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Status</span>
@@ -86,7 +87,7 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
           const isActive = entry.id === live.activeProvider;
           const saved = settings.embeddingProviders.find((p) => p.id === entry.id);
           const cardDirty = !!state.embProviderDraft && (
-            !saved || entryDiffers(entry, saved) || (isActive && settings.activeEmbeddingProvider !== entry.id)
+            !saved || entryDiffers(entry, saved)
           );
           const transient = state.embProvStatus[entry.id]?.test ?? null;
           const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
@@ -169,7 +170,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
           {isActive ? (
             <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
           ) : (
-            <Button onClick={() => actions.setActiveEmbProv(id)} variant="outline" size="sm">Set Active</Button>
+            <Button onClick={() => void actions.setActiveEmbProv(id)} variant="outline" size="sm">Set Active</Button>
           )}
         </div>
       </div>
@@ -209,17 +210,6 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
                 {showEmbProvKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
               </Button>
             </div>
-          </Field>
-
-          <Field
-            label="Supports image input?"
-            desc="Whether this model accepts image input, for the parse-time image-embedding step. Vocabulary terms are always embedded with this same model, so image-based retrieval only works when it's genuinely multimodal (e.g. CLIP-family, Voyage multimodal-3, Cohere embed-v4) — a text-only model rejects the image call and the pipeline falls back to text-only automatically."
-          >
-            <Segmented
-              value={entry.supportsImageInput ? "yes" : "no"}
-              onChange={(v) => { if ((v === "yes") !== entry.supportsImageInput) actions.toggleEmbProvSupportsImage(id); }}
-              options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]}
-            />
           </Field>
 
           <div className="flex items-center justify-start gap-2.5">
