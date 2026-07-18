@@ -27,10 +27,16 @@ export interface ExtractionResult {
  * Extract images from a .xlsx file, attributing each to a data row index.
  * `imageRowIndices` is only a hint from visible Image cell values. Embedded
  * images often have no cell value, so drawing anchors are the source of truth.
+ *
+ * `sheetRowToDataRow` (1-based sheet row → 0-based data-row index, or -1 if
+ * the sheet row was skipped as fully-empty by the parser) is used to translate
+ * a drawing anchor's raw sheet row into the post-skip data array position.
+ * Without it, skipping empty middle/trailing rows would mis-attach images.
  */
 export async function extractImagesFromXlsx(
   file: File,
   imageRowIndices: number[],
+  sheetRowToDataRow: number[],
   sessionId: string
 ): Promise<ExtractionResult> {
   const buf = new Uint8Array(await file.arrayBuffer());
@@ -98,8 +104,14 @@ export async function extractImagesFromXlsx(
       const rId = blip ? blip[1] : null;
       const mediaPath = rId ? rels[rId] : null;
       if (mediaPath && media[mediaPath]) {
+        // `<xdr:row>` is 0-based (0 = header / sheet row 1). Translate to the
+        // 1-based sheet row and look up the post-skip data-row index. If the
+        // anchor's own row was skipped as fully-empty (-1) or out of range,
+        // fall back to the draw order so the image is not silently dropped.
+        const sheetRow = row + 1;
+        const mapped = sheetRow >= 0 && sheetRow < sheetRowToDataRow.length ? sheetRowToDataRow[sheetRow] : -1;
         entries.push({
-          rowIndex: row >= 0 ? row - 1 : drawIdx, // -1 because sheet row 1 is the header
+          rowIndex: mapped >= 0 ? mapped : drawIdx,
           filename: mediaPath.split("/").pop() || `image-${drawIdx}.png`,
           bytes: media[mediaPath],
         });
@@ -112,25 +124,36 @@ export async function extractImagesFromXlsx(
     return { rowIndexToFileId: new Map() };
   }
 
-  // 3. Attribute each drawing to the nearest requested image-row.
-  //    If imageRowIndices is provided, snap each drawing to the closest data
-  //    row index; otherwise use the drawing's own row.
+  // 3. Attribute each drawing to a data row.
+  //    Strongest signal first: if visible Image-cell hints exist, snap to the
+  //    closest. Otherwise use the drawing's own mapped row. If that row was
+  //    skipped as fully-empty (or could not be mapped), snap to the closest
+  //    non-skipped data row by index — keeping the image on a real artefact
+  //    instead of dropping it or landing on a draw-order guess.
+  const nonSkippedDataRows = [...new Set(sheetRowToDataRow.filter((i) => i >= 0))].sort((a, b) => a - b);
+  const closest = (from: number, candidates: number[]) => {
+    if (!candidates.length) return -1;
+    let best = candidates[0];
+    let bestDist = Math.abs(best - from);
+    for (const c of candidates) {
+      const d = Math.abs(c - from);
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    return best;
+  };
+
   const rowIndexToFileId = new Map<number, string>();
   const toSend: { filename: string; bytes: number[] }[] = [];
   for (const e of entries) {
     let target = e.rowIndex;
     if (imageRowIndices.length) {
-      // pick the closest requested row index
-      let best = imageRowIndices[0];
-      let bestDist = Math.abs(best - e.rowIndex);
-      for (const ri of imageRowIndices) {
-        const d = Math.abs(ri - e.rowIndex);
-        if (d < bestDist) {
-          bestDist = d;
-          best = ri;
-        }
-      }
-      target = best;
+      target = closest(e.rowIndex, imageRowIndices);
+    } else if (target < 0) {
+      const snapped = closest(0, nonSkippedDataRows);
+      if (snapped >= 0) target = snapped;
     }
     // de-dupe: keep the first image per target row
     if (rowIndexToFileId.has(target)) continue;

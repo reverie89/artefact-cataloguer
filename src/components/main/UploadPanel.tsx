@@ -1,8 +1,8 @@
 import { AlertCircle, Ban, CheckCircle, FileSpreadsheet, Pause, Play, Plus, RotateCcw, Upload, X, XCircle, Zap, Loader2 } from "lucide-react";
-import type { AppActions } from "../app/actions";
-import type { AppState } from "../app/state";
-import { _DEF_AF } from "../app/defaults";
-import { hasProvider } from "../lib/ai";
+import type { AppActions } from "../../app/actions";
+import type { AppState } from "../../app/state";
+import { _DEF_AF } from "../../app/defaults";
+import { hasProvider } from "../../lib/ai";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -116,6 +116,27 @@ export function UploadPanel({ state, actions }: Props) {
             <div className="text-destructive flex-1 text-sm">{state.parseError}</div>
             <Button
               onClick={actions.dismissParseError}
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-destructive -mt-1 -mr-1 size-6"
+            >
+              <X className="size-3" />
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {/* Export warning — surfaced in the same panel as parse errors when the
+          export can't proceed (e.g. no artefact-file columns toggled on).
+          Structurally identical to the parse-error banner so the two share one
+          visual treatment for "blocking, dismissable, destructive". */}
+      {state.exportWarning && (
+        <Card className="bg-destructive/10 border-destructive/20 mx-5 my-2 rounded-md py-2.5">
+          <div className="flex items-start gap-1.25 px-3">
+            <AlertCircle className="text-destructive mt-0.5 size-3 shrink-0" />
+            <div className="text-destructive flex-1 text-sm">{state.exportWarning}</div>
+            <Button
+              onClick={actions.dismissExportWarning}
               variant="ghost"
               size="icon"
               className="text-muted-foreground hover:text-destructive -mt-1 -mr-1 size-6"
