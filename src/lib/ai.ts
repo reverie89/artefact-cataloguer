@@ -44,7 +44,6 @@ interface RustEmbeddingProvider {
   apiKey: string;
   model: string;
   apiFormat: string;
-  supportsImageInput: boolean;
 }
 
 function toRustEmbeddingProvider(provider: EmbeddingProvider): RustEmbeddingProvider {
@@ -54,7 +53,6 @@ function toRustEmbeddingProvider(provider: EmbeddingProvider): RustEmbeddingProv
     apiKey: provider.apiKey,
     model: provider.model,
     apiFormat: provider.apiFormat ?? "openai",
-    supportsImageInput: provider.supportsImageInput ?? false,
   };
 }
 
@@ -66,8 +64,9 @@ interface RustArtefactColumn {
 interface RustArtefact {
   record: Record<string, string>;
   imagePath: string | null;
-  /** The unified Call-1 prompt (persona + output-format preamble). The XML
-   *  field enumeration and `<artefact_file>` record block are appended by Rust. */
+  /** The unified vision-analysis prompt (persona + output-format preamble).
+   *  The XML field enumeration and `<artefact_file>` record block are appended
+   *  by Rust. */
   visionSystemPrompt: string;
   artefactColumns: RustArtefactColumn[];
 }
@@ -116,11 +115,12 @@ export function findUnsyncedVocabField(settings: Settings): { fieldName: string;
 }
 
 /**
- * Vocab fields are resolved purely by embedding search against the Call-1
- * description — no LLM call, no vocab list in any prompt. That requires an
- * active embedding provider; without one, a vocab field would silently yield
- * empty results. Returns the first such field so a Parse run can fail loudly
- * with a pointer to fix it, mirroring {@link findUnsyncedVocabField}.
+ * Vocab fields are resolved purely by embedding search against the
+ * vision-analysis description — no LLM call, no vocab list in any prompt.
+ * That requires an active embedding provider; without one, a vocab field
+ * would silently yield empty results. Returns the first such field so a Parse
+ * run can fail loudly with a pointer to fix it, mirroring
+ * {@link findUnsyncedVocabField}.
  */
 export function findVocabFieldWithoutEmbedding(settings: Settings): { fieldName: string } | null {
   const hasVocabField = settings.fields.some((f) => f.type === "vocab" && (f.vocabSources || []).length > 0);
@@ -150,11 +150,12 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
 
 /**
  * Catalogue one artefact via the active provider. The image (when present) is
- * inlined into Call 1 by the Rust side; the three-call XML pipeline (Call 1
- * vision+extraction → embedding → Call 3 validation) runs entirely in Rust.
- * Returns per-field suggestions: open-ended fields carry no similarity;
- * controlled-vocab fields carry cosine `similarity`. Throws on transport/HTTP
- * errors so callers can surface them — there is no demo fallback.
+ * inlined into vision analysis by the Rust side; the three-step XML pipeline
+ * (vision analysis vision+extraction → embedding → validation) runs entirely
+ * in Rust. Returns per-field suggestions: open-ended fields carry no
+ * similarity; controlled-vocab fields carry cosine `similarity`. Throws on
+ * transport/HTTP errors so callers can surface them — there is no demo
+ * fallback.
  *
  * `cancelKey` identifies this call in Rust's cancel registry (see
  * {@link cancelCatalogue}); cancelling it makes the Rust side drop the in-flight
@@ -179,17 +180,18 @@ export async function catalogueArtefact(
     name: f.name,
     type: f.type,
     prompt: f.prompt,
-    // Vocab fields are resolved by per-field embedding search + Call 3
-    // validation on the Rust side. findUnsyncedVocabField +
-    // findVocabFieldWithoutEmbedding guarantee a vocab field's sources are
-    // synced AND an embedding provider is active by call time.
+    // Vocab fields are resolved by per-field embedding search + validation on
+    // the Rust side. findUnsyncedVocabField + findVocabFieldWithoutEmbedding
+    // guarantee a vocab field's sources are synced AND an embedding provider
+    // is active by call time.
     vocabSourceIds: vocabSourceIdsForRetrieval(f, settings),
   }));
   const rustArtefact: RustArtefact = {
     record,
     imagePath: imagePath || null,
-    // The unified Call-1 prompt: persona + output-format preamble. Rust appends
-    // the XML field enumeration and the <artefact_file> record block.
+    // The unified vision-analysis prompt: persona + output-format preamble.
+    // Rust appends the XML field enumeration and the <artefact_file> record
+    // block.
     visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
     artefactColumns: (settings.artefactFields || []).map((c) => ({ name: c.name, prompt: c.prompt ?? "" })),
   };
@@ -202,7 +204,7 @@ export async function catalogueArtefact(
     embeddingProvider: embProvider ? toRustEmbeddingProvider(embProvider) : null,
     netCount: settings.vocabNetCount,
     shortlistCount: settings.vocabShortlistCount,
-    call3Enabled: settings.call3Enabled,
+    validationEnabled: settings.validationEnabled,
   });
   return res.fieldResults || {};
 }
@@ -218,14 +220,15 @@ export async function cancelCatalogue(cancelKey: string): Promise<void> {
 }
 
 /**
- * Assemble the exact unified Call-1 prompt `catalogueArtefact` would send as
- * its first user turn, without making any network call. Used by the Artefact
- * File tab's prompt preview. The row's source values are produced at parse
- * time, so the record is shown as a placeholder; the image attaches as a
+ * Assemble the exact unified vision-analysis prompt `catalogueArtefact` would
+ * send as its first user turn, without making any network call. Used by the
+ * Artefact File tab's prompt preview. The row's source values are produced at
+ * parse time, so the record is shown as a placeholder; the image attaches as a
  * separate content block in real runs.
  *
  * Includes ALL fields (open + vocab): both emit XML blocks in the unified
- * prompt's enumeration, so the preview reflects exactly what Call 1 sends.
+ * prompt's enumeration, so the preview reflects exactly what vision analysis
+ * sends.
  */
 export async function buildPromptPreview(settings: Settings): Promise<string> {
   const rustArtefact: RustArtefact = {

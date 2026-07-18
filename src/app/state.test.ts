@@ -30,9 +30,9 @@ describe("reducer TOGGLE_FIELD_VALUE", () => {
 
 describe("reducer", () => {
   it("updates the active settings tab", () => {
-    const next = reducer(initialState, { type: "SET_TAB", tab: "ai" });
+    const next = reducer(initialState, { type: "SET_TAB", tab: "modelProviders" });
 
-    expect(next.settingsTab).toBe("ai");
+    expect(next.settingsTab).toBe("modelProviders");
     expect(next).not.toBe(initialState);
   });
 
@@ -40,7 +40,7 @@ describe("reducer", () => {
     const populated = {
       ...initialState,
       parseStatus: "completed" as const,
-      results: [{ uid: "u1", id: "A1", title: "Cup", category: "Ceramics", status: "done" as const, record: {} }],
+      results: [{ uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } }],
       aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
       expandedRows: { u1: true },
     };
@@ -58,7 +58,7 @@ describe("reducer", () => {
       ...initialState,
       files: [{ id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "valid", errors: [] }],
       parseStatus: "completed",
-      results: [{ uid: "u1", id: "A1", title: "Cup", category: "Ceramics", status: "done" as const, record: {} }],
+      results: [{ uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } }],
       aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
       expandedRows: { u1: true },
       fieldSelections: { u1_material: { source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 } },
@@ -120,7 +120,7 @@ describe("reducer", () => {
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "" }] }),
+      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeInExport: true }] }),
     });
     expect(next.artefactDraft).not.toBeNull();
     expect(next.artefactDraft!.artefactFields.length).toBe(before + 1);
@@ -207,8 +207,8 @@ describe("reducer", () => {
       ...initialState,
       parseStatus: "completed",
       results: [
-        { uid: "u1", id: "", title: "Cup", category: "Ceramics", status: "done" as const, record: {} },
-        { uid: "u2", id: "", title: "Bowl", category: "Ceramics", status: "done" as const, record: {} },
+        { uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } },
+        { uid: "u2", status: "done" as const, record: { "Object Name": "Bowl" } },
       ],
     };
 
@@ -217,5 +217,40 @@ describe("reducer", () => {
 
     expect(next.results[0].imagePath).toBe("/img/cup.png");
     expect(next.results[1].imagePath).toBe("/img/bowl.png");
+  });
+});
+
+describe("reducer search column scope", () => {
+  it("TOGGLE_SEARCH_COL_AF removes the last AF column (no 'keep at least one' guard)", () => {
+    // Regression: previously the reducer silently no-op'd when the user
+    // unselected the last column, forcing them to use Clear to empty the
+    // scope. The per-item toggle must be symmetric with the Clear/All button.
+    const base: typeof initialState = { ...initialState, searchColsAf: ["a1"] };
+    const next = reducer(base, { type: "TOGGLE_SEARCH_COL_AF", id: "a1" });
+    expect(next.searchColsAf).toEqual([]);
+  });
+
+  it("TOGGLE_SEARCH_COL_AF adds a missing id and removes a non-last present id", () => {
+    let s: typeof initialState = { ...initialState, searchColsAf: ["a1"] };
+    s = reducer(s, { type: "TOGGLE_SEARCH_COL_AF", id: "a2" });
+    expect(s.searchColsAf).toEqual(["a1", "a2"]);
+    s = reducer(s, { type: "TOGGLE_SEARCH_COL_AF", id: "a1" });
+    expect(s.searchColsAf).toEqual(["a2"]);
+  });
+
+  it("TOGGLE_SEARCH_COL_CAT mirrors the AF behaviour for the catalogue scope", () => {
+    let s: typeof initialState = { ...initialState, searchColsCat: ["c1"] };
+    s = reducer(s, { type: "TOGGLE_SEARCH_COL_CAT", id: "c1" });
+    expect(s.searchColsCat).toEqual([]);
+    s = reducer(s, { type: "TOGGLE_SEARCH_COL_CAT", id: "c2" });
+    expect(s.searchColsCat).toEqual(["c2"]);
+  });
+
+  it("SET_SEARCH_COLS_AF / SET_SEARCH_COLS_CAT accept an empty array", () => {
+    let s: typeof initialState = { ...initialState, searchColsAf: ["a1"], searchColsCat: ["c1"] };
+    s = reducer(s, { type: "SET_SEARCH_COLS_AF", ids: [] });
+    s = reducer(s, { type: "SET_SEARCH_COLS_CAT", ids: [] });
+    expect(s.searchColsAf).toEqual([]);
+    expect(s.searchColsCat).toEqual([]);
   });
 });

@@ -11,12 +11,17 @@ export type ApiFormat = "openai" | "anthropic" | "gemini";
  *  vision-analysis prompt. `prompt` is an optional per-column instruction for
  *  how the vision call should use that column's value — empty means "no
  *  field-specific guidance" and is omitted from the prompt (the value still
- *  reaches the model via the record). */
+ *  reaches the model via the record). `includeInExport` controls whether this
+ *  column is written as a leading column in the exported spreadsheet, before
+ *  the catalogue fields; an image column's bytes are embedded per row. */
 export interface ArtefactField {
   id: string;
   name: string;
   description: string;
   prompt: string;
+  /** Whether this column is emitted as a leading column in xlsx export,
+   *  before the catalogue fields. Default true (opt-out). */
+  includeInExport: boolean;
 }
 
 /** A catalogue field the AI extracts per artefact. */
@@ -123,10 +128,6 @@ export interface EmbeddingProvider {
   model: string;
   modelOptions?: string[];
   apiFormat?: EmbeddingApiFormat;
-  /** User-declared capability: whether this model accepts image input for
-   *  the parse-time image-embedding step. A hint, not a guarantee — the
-   *  Rust side still falls back to text-only on a rejected image call. */
-  supportsImageInput?: boolean;
   /** Vector width learned from a successful Test Connection embed call. */
   dimensions?: number;
   connStatus?: "ok" | "err" | "untested";
@@ -134,20 +135,21 @@ export interface EmbeddingProvider {
 
 /** The whole persisted settings object. */
 export interface Settings {
-  /** The unified Call-1 system prompt: the museum-cataloguing persona + the
-   *  output-format preamble (instructs the model to read `<artefact_file>` and
-   *  reply in XML). The dynamic per-field XML enumeration and the record block
-   *  are appended by Rust at runtime, so this holds only the user-editable
-   *  prose. Gated behind an Override in the UI (disabled by default). */
+  /** The unified vision-analysis system prompt: the museum-cataloguing persona
+   *  + the output-format preamble (instructs the model to read `<artefact_file>`
+   *  and reply in XML). The dynamic per-field XML enumeration and the record
+   *  block are appended by Rust at runtime, so this holds only the
+   *  user-editable prose. Gated behind an Override in the UI (disabled by
+   *  default). */
   visionSystemPromptInstruction: string;
-  /** Candidates the embedding search returns per vocab field before Call 3
-   *  validation (the "net"). Default 20. */
+  /** Candidates the embedding search returns per vocab field before validation
+   *  (the "net"). Default 20. */
   vocabNetCount: number;
-  /** Final picks per vocab field after Call 3 validation (or cosine top-N when
-   *  Call 3 is off). Default 3. */
+  /** Final picks per vocab field after validation (or cosine top-N when
+   *  validation is off). Default 3. */
   vocabShortlistCount: number;
-  /** Whether Call 3 (vision validation) runs. Default true. */
-  call3Enabled: boolean;
+  /** Whether validation runs. Default false. */
+  validationEnabled: boolean;
   fields: CatalogueField[];
   vocabSources: VocabSource[];
   providers: Provider[];
@@ -163,22 +165,14 @@ export interface ArtefactRow {
    *  reducer matching, and the expandedRows/fieldSelections/aiResults map keys.
    *  Never empty, never duplicated. */
   uid: string;
-  /** Accession No value from the sheet — display data only, not identity. May
-   *  be empty or duplicated across rows; never use this to match/state a row. */
-  id: string;
-  title: string;
-  category: string;
   /** Set at parse time. `cancelled` = skipped because the user cancelled the
    *  run before this row was reached (terminal, like `done`/`error`). */
   status?: "queued" | "processing" | "done" | "error" | "cancelled";
-  /** Arbitrary source columns from the sheet (key → value). */
+  /** Arbitrary source columns from the sheet (key → value) — every non-image
+   *  column the parser found, in the sheet's own header casing. */
   record?: Record<string, string>;
   /** Absolute path to the extracted image beside the binary, if any. */
   imagePath?: string;
-  /** Legacy display fields kept for parity with the reference rows. */
-  altNo?: string;
-  acquired?: string;
-  dimensions?: string;
 }
 
 export interface AiSuggestion {
@@ -208,7 +202,7 @@ export interface FieldSelection {
 }
 
 export type Screen = "main" | "settings";
-export type SettingsTab = "about" | "artefactFile" | "fields" | "vocab" | "ai";
+export type SettingsTab = "about" | "artefactFile" | "fields" | "vocab" | "modelProviders";
 
 /** Lifecycle of the current parse run. `idle` = nothing has run yet for the
  *  current upload; `running`/`paused` = the loop is alive; `completed`/

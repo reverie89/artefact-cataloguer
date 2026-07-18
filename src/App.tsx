@@ -5,20 +5,22 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { initialState, reducer } from "./app/state";
 import { loadState, makeDebouncedSaver } from "./lib/store";
 import { useActions } from "./app/actions";
-import { TopBar } from "./components/TopBar";
-import { MainScreen } from "./components/MainScreen";
+import { TopBar } from "./components/main/TopBar";
+import { MainScreen } from "./components/main/MainScreen";
 import { SettingsScreen } from "./components/settings/SettingsScreen";
-import { LogsViewer } from "./components/LogsViewer";
-import { useConfirmDelete } from "./components/useConfirmDelete";
+import { LogsViewer } from "./components/main/LogsViewer";
+import { useConfirmDelete } from "./hooks/useConfirmDelete";
 import { pushLog, type LogVerbose } from "./lib/logs";
 
-/** A vision-pipeline stage emitted by Rust (ai.rs `do_vision_query`) onto the
- *  "ac-logs" event. Each maps to one row in the Logs Viewer; `verbose` carries
- *  the redacted request/response envelope shown on row click. */
-interface VisionStageEvent {
-  stage: "postSent" | "jobFound" | "done" | "timeout" | "failed";
-  /** Group id tying every stage of one vision call together, used to resolve
-   *  earlier "busy" dots when a terminal stage lands. */
+/** A cataloguing-pipeline stage emitted by Rust onto the "ac-logs" event.
+ *  Carries vision-analysis and validation stages from `ai.rs` and embedding
+ *  stages from `embeddings.rs` (each with its own jobGroup). Each maps to one
+ *  row in the Logs Viewer; `verbose` carries the redacted request/response
+ *  envelope shown on row click. */
+interface PipelineStageEvent {
+  stage: string;
+  /** Group id tying every stage of one call together, used to resolve earlier
+   *  "busy" dots when a terminal stage lands. */
   jobGroup: string;
   label?: string;
   detail?: string;
@@ -27,8 +29,10 @@ interface VisionStageEvent {
   verbose?: LogVerbose;
 }
 
-/** Human label for each Rust vision stage, used unless Rust supplied one. */
-const VISION_STAGE_LABEL: Record<VisionStageEvent["stage"], string> = {
+/** Human label for the legacy vision-completion stages (postSent/jobFound/
+ *  done/timeout/failed), used when Rust omits `label`. Embedding-stage emits
+ *  always supply their own label, so they don't need an entry here. */
+const VISION_STAGE_LABEL: Record<string, string> = {
   postSent: "Sent POST request, waiting for job ID",
   jobFound: "Job ID found, polling for response",
   done: "Response received",
@@ -64,20 +68,21 @@ export default function App() {
     };
   }, []);
 
-  // Rust→frontend vision-stage bridge. `do_vision_query` (ai.rs) emits the
-  // POST → job-ID → poll → timeout/response stages onto "ac-logs"; forward each
-  // into the Logs Viewer stream so the run transcript shows the live vision
-  // sub-flow (which otherwise only surfaces as raw HTTP on "ac-http").
+  // Rust→frontend pipeline-stage bridge. `ai.rs` emits the vision-analysis and
+  // validation call stages onto "ac-logs" (POST → job-ID → poll → response),
+  // and `embeddings.rs` emits the per-row embedding stages (text batch + image
+  // + retry). Forward each into the Logs Viewer stream so the run transcript
+  // shows the live sub-flows that otherwise only surface as a long busy dot.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let active = true;
     void (async () => {
-      unlisten = await listen<VisionStageEvent>("ac-logs", (ev) => {
+      unlisten = await listen<PipelineStageEvent>("ac-logs", (ev) => {
         const e = ev.payload;
         pushLog({
           status: e.status,
           jobId: e.jobGroup,
-          label: e.label ?? VISION_STAGE_LABEL[e.stage],
+          label: e.label ?? VISION_STAGE_LABEL[e.stage] ?? e.stage,
           detail: e.detail,
           elapsedMs: e.elapsedMs,
           verbose: e.verbose,

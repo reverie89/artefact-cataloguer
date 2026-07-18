@@ -64,7 +64,7 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // comparing by position would flag the tab dirty whenever the draft and
       // settings arrays are momentarily out of step in order (e.g. across the
       // save round-trip) even though no row actually differs, and no per-row
-      // badge would reflect it since FieldsTab's own dirty check is id-keyed.
+      // badge would reflect it since CataloguingFieldsTab's own dirty check is id-keyed.
       return differById(d.fields, settings.fields, "id", ["name", "type", "layout", "prompt", "vocabSources"]);
     }
     case "vocab": {
@@ -76,7 +76,7 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // Name is draft-buffered, so that's all that's compared here.
       return differById(d.vocabSources, settings.vocabSources, "id", ["name"]);
     }
-    case "ai": {
+    case "modelProviders": {
       // Providers are id-keyed; the draft is dirty when any provider is new,
       // removed, content-edited, or the active selection flipped. Both the chat
       // and embedding provider lists live on this one tab, so either draft
@@ -97,12 +97,12 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
         ed.providers,
         settings.embeddingProviders.map((p) => ({
           id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
-          apiFormat: (p.apiFormat ?? "openai"), supportsImageInput: p.supportsImageInput ?? false,
+          apiFormat: (p.apiFormat ?? "openai"),
           modelOptions: p.modelOptions ?? [], dimensions: p.dimensions ?? null,
           connStatus: p.connStatus ?? "untested",
         })),
         "id",
-        ["name", "baseUrl", "apiKey", "model", "apiFormat", "supportsImageInput", "modelOptions", "dimensions", "connStatus"],
+        ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "dimensions", "connStatus"],
       ) || ed.activeProvider !== settings.activeEmbeddingProvider);
       return chatDirty || embDirty;
     }
@@ -115,7 +115,7 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // Id-keyed, not positional — see the "fields" case above for why.
       const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
       const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
-      return differById(draftFields, savedFields, "id", ["name", "description", "prompt"]);
+      return differById(draftFields, savedFields, "id", ["name", "description", "prompt", "includeInExport"]);
     }
     case "about":
     default:

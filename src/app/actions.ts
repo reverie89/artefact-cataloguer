@@ -3,23 +3,24 @@
 // mutations dispatch PATCH_SETTINGS and the debounced saver persists them.
 
 import { useCallback, useEffect, useRef } from "react";
+import ExcelJS from "exceljs";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile, writeFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
 
 import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
 import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
-import type { ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldType, Provider, Settings, SettingsTab } from "./types";
+import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab } from "./types";
 import { isTabDirty } from "./drafts";
-import { parseArtefactFile, roleFieldNames } from "../lib/spreadsheet";
+import { parseArtefactFile } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
 import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
 import * as vocabLib from "../lib/vocab";
 import { pushLog } from "../lib/logs";
 import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, stripBuiltinLegacyVocabFields } from "../lib/store";
 import { PersistedSettingsSchema } from "./schema";
-import type { ConfirmDeleteOptions } from "../components/ConfirmDialog";
+import type { ConfirmDeleteOptions } from "../components/common/ConfirmDialog";
 
 export interface AppActions {
   // theme/nav/zoom
@@ -78,6 +79,17 @@ export interface AppActions {
   toggleRow(uid: string): void;
   setFilter(e: React.ChangeEvent<HTMLSelectElement>): void;
   setSearch(e: React.ChangeEvent<HTMLInputElement>): void;
+  /** Toggle an artefact-file column in/out of the results search scope. The
+   *  scope may be emptied — searching an empty scope yields no matches. */
+  toggleSearchColAf(id: string): void;
+  /** Toggle a catalogue-field column in/out of the results search scope. */
+  toggleSearchColCat(id: string): void;
+  /** Replace the whole AF search-column set (Clear/All in the picker). */
+  setSearchColsAf(ids: string[]): void;
+  /** Replace the whole catalogue-field search-column set. */
+  setSearchColsCat(ids: string[]): void;
+  /** Dismiss the transient export warning banner. */
+  dismissExportWarning(): void;
   exportResults(): Promise<void>;
   onTriggerClick(key: string): void;
   setFieldSearch(key: string, val: string): void;
@@ -167,12 +179,12 @@ export interface AppActions {
   discardVocabCard(id: string): void;
 
   // settings: vocab retrieval — top-level (not draft-buffered). Persist on change.
-  /** Candidates the embedding search returns per vocab field before Call 3 (1–100). */
+  /** Candidates the embedding search returns per vocab field before validation (1–100). */
   setVocabNetCount(n: number): void;
-  /** Final picks per vocab field after Call 3 (≤ net count). */
+  /** Final picks per vocab field after validation (≤ net count). */
   setVocabShortlistCount(n: number): void;
-  /** Whether Call 3 (vision validation) runs. */
-  setCall3Enabled(on: boolean): void;
+  /** Whether validation runs. */
+  setValidationEnabled(on: boolean): void;
 
   // settings: providers — edits accumulate in a unified draft and persist only
   // on the tab-level Save (see saveProviders). Test Connection is the one
@@ -186,7 +198,7 @@ export interface AppActions {
   saveProviders(): Promise<void>;
   discardProviders(): void;
   deleteProv(id: string): Promise<void>;
-  setActiveProv(id: string): void;
+  setActiveProv(id: string): Promise<void>;
   /** Persist only this provider card's content edits to disk (independent of
    *  any pending structural changes buffered for the tab-level Apply). */
   saveProvCard(id: string): Promise<void>;
@@ -195,17 +207,16 @@ export interface AppActions {
 
   // settings: embedding providers — same per-card draft/save/discard shape as
   // the chat providers above, kept as a separate list/section within the same
-  // "ai" tab (see EmbeddingProvidersSection.tsx).
+  // "modelProviders" tab (see EmbeddingProvidersSection.tsx).
   toggleEmbProv(id: string): void;
   startAddEmbProv(): void;
   setEmbProvF(id: string, k: keyof EmbeddingProvider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>): void;
   setEmbProvModel(id: string, model: string): void;
   setEmbProvApiFormat(id: string, format: EmbeddingApiFormat): void;
-  toggleEmbProvSupportsImage(id: string): void;
   toggleEmbProvKey(): void;
   testEmbConn(id: string): Promise<void>;
   deleteEmbProv(id: string): Promise<void>;
-  setActiveEmbProv(id: string): void;
+  setActiveEmbProv(id: string): Promise<void>;
   saveEmbProvCard(id: string): Promise<void>;
   discardEmbProvCard(id: string): void;
 
@@ -222,8 +233,8 @@ export interface AppActions {
   saveArtefactCard(id: string): Promise<void>;
   /** Revert only this artefact-column row's content edits. */
   discardArtefactCard(id: string): void;
-  /** Update the unified system prompt (Call 1 persona + output-format preamble)
-   *  in the draft. */
+  /** Update the unified system prompt (vision-analysis persona +
+   *  output-format preamble) in the draft. */
   updateVisionSystemPromptInstruction(value: string): void;
   /** Persist the unified system prompt to disk. */
   saveVisionSystemPromptInstruction(): Promise<void>;
@@ -245,8 +256,102 @@ export interface AppActions {
 type Dispatch = (action: Action) => void;
 type Persist = () => void;
 type ConfirmDelete = (opts: ConfirmDeleteOptions) => Promise<boolean>;
-type ParsedStore = Record<string, { rows: ArtefactRow[]; imageRowIndices: number[]; discardedColumns: Record<string, string>; file: File }>;
+type ParsedStore = Record<string, { rows: ArtefactRow[]; imageRowIndices: number[]; sheetRowToDataRow: number[]; discardedColumns: Record<string, string>; file: File }>;
 type AppWindow = Window & { __acFi?: HTMLInputElement; __acParsed?: ParsedStore };
+
+/**
+ * Neutralize CSV formula injection (OWASP guidance). Spreadsheet apps treat a
+ * cell whose value begins with `= + - @` (or a TAB/CR) as a formula; a
+ * malicious source cell, or an LLM open-field answer, could emit e.g.
+ * `=HYPERLINK(...)` and have it execute when the exported CSV is opened. Prefix
+ * such values with a single quote — Excel/LibreOffice/Sheets treat the leading
+ * quote as a text marker and drop it on display, rendering the cell as text.
+ * Exported for unit testing.
+ */
+export function csvSafeCell(value: string): string {
+  const first = value[0];
+  if (first === "=" || first === "+" || first === "-" || first === "@" || first === "\t" || first === "\r") {
+    return "'" + value;
+  }
+  return value;
+}
+
+/** Derive a human-readable label for a parsed row, for log detail lines.
+ *  Reads the most identifying text column from `record` (Object Name or
+ *  Title by convention, case-insensitive) since `ArtefactRow` no longer
+ *  carries structured id/title fields. Falls back to a positional label so
+ *  the log line is never empty. */
+function rowLabel(row: ArtefactRow, index?: number): string {
+  const record = row.record ?? {};
+  const find = (re: RegExp) => {
+    const k = Object.keys(record).find((kk) => re.test(kk.trim().toLowerCase()));
+    return k ? record[k] : "";
+  };
+  const name = find(/^(object\s*)?name$/) || find(/^title$/);
+  if (name) return name;
+  return index != null ? `Row ${index + 1}` : "row";
+}
+
+/** Convert a 0-based column index to an Excel column letter (0 → A, 26 → AA).
+ *  Used to build the range string for image anchoring in xlsx export. */
+function colIndexToLetter(index: number): string {
+  let n = index;
+  let s = "";
+  do {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return s;
+}
+
+/** The image role column name regex — kept here (and re-checked against export
+ *  settings) so export doesn't have to import from spreadsheet.ts's
+ *  parse-only `roleFieldNames`. Mirrors the parser's image-column match. */
+const IMAGE_COL_RE = /^images?$/;
+
+/** Pure composition of an export table from current state. Returns the headers
+ *  and per-row values (strings only — image bytes are embedded separately by
+ *  `exportResults` once an ExcelJS workbook exists). Exported so the column
+ *  ordering, opt-out filtering, case-insensitive record lookup, and value
+ *  resolution can be unit-tested without ExcelJS or Tauri in the loop.
+ *
+ *  Column order: every `includeInExport` artefact-file column (in configured
+ *  order), then every catalogue field (in configured order). AF values read
+ *  from the row's parsed `record`; catalogue values fall back through manual
+ *  selection → first AI suggestion → empty. Returns `null` when zero AF
+ *  columns are selected for export — the caller surfaces the warning. */
+export function composeExportTable(
+  settings: Settings,
+  results: ArtefactRow[],
+  aiResults: AiResults,
+  fieldSelections: Record<string, FieldSelection>,
+): { headers: string[]; rows: string[][]; imageColName: string | null } | null {
+  const exportAf = (settings.artefactFields || []).filter((f) => f.includeInExport);
+  if (exportAf.length === 0) return null;
+  const afHeaders = exportAf.map((f) => f.name);
+  const fieldHeaders = settings.fields.map((f) => f.name);
+  const headers = [...afHeaders, ...fieldHeaders];
+  const imageCol = exportAf.find((f) => IMAGE_COL_RE.test(f.name.trim().toLowerCase()));
+  const rows = results
+    .filter((r) => r.status === "done")
+    .map((r) => {
+      const ai = aiResults[r.uid] || {};
+      const record = r.record ?? {};
+      const afVals = exportAf.map((f) => {
+        // Case-insensitive lookup against the sheet's actual header casing,
+        // mirroring parseArtefactFile's reader — record keys come from the
+        // sheet's headers, af.name is the configured casing.
+        const k = Object.keys(record).find((kk) => kk.toLowerCase() === f.name.toLowerCase());
+        return k ? record[k] : "";
+      });
+      const fieldVals = settings.fields.map((f) => {
+        const sel = fieldSelections[`${r.uid}_${f.id}`];
+        return sel ? sel.value : ai[f.name]?.[0]?.value || "";
+      });
+      return [...afVals, ...fieldVals];
+    });
+  return { headers, rows, imageColName: imageCol ? imageCol.name : null };
+}
 
 export function useActions(state: AppState, dispatch: Dispatch, persist: Persist, confirmDelete: ConfirmDelete): AppActions {
   // Coarse control flags polled by the startParse loop. One shared ref is safe
@@ -338,7 +443,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     switch (tab) {
       case "fields": dispatch({ type: "CLEAR_FIELD_DRAFT" }); break;
       case "vocab": dispatch({ type: "CLEAR_VOCAB_DRAFT" }); break;
-      case "ai":
+      case "modelProviders":
         dispatch({ type: "CLEAR_PROVIDER_DRAFT" }); dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
         dispatch({ type: "CLEAR_EMB_PROVIDER_DRAFT" }); dispatch({ type: "SET_EMB_PROV_SAVE_STATUS", status: null });
         break;
@@ -448,7 +553,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           const errs = parsed.missingColumns.length
             ? parsed.missingColumns.map((c) => ({ message: `Missing required column: ${c}` }))
             : [];
-          store[it.id] = { rows: parsed.rows, imageRowIndices: parsed.imageRowIndices, discardedColumns: parsed.discardedColumns, file: it.file };
+          store[it.id] = { rows: parsed.rows, imageRowIndices: parsed.imageRowIndices, sheetRowToDataRow: parsed.sheetRowToDataRow, discardedColumns: parsed.discardedColumns, file: it.file };
           dispatch({ type: "SET_FILE_STATUS", id: it.id, status: errs.length ? "invalid" : "valid", errors: errs, validationErrors: [] });
         } catch (e) {
           dispatch({ type: "SET_FILE_STATUS", id: it.id, status: "invalid", errors: [{ message: `Could not read file: ${(e as Error).message}` }], validationErrors: [] });
@@ -500,12 +605,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
     const rows = entry.rows.map((r) => ({ ...r, status: "queued" as const }));
     const imageRowIndices = entry.imageRowIndices;
+    const sheetRowToDataRow = entry.sheetRowToDataRow;
     const file = entry.file;
 
     // A single active provider catalogues each artefact in one multimodal prompt.
     const prov = activeProvider(state.settings);
     if (!prov) {
-      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → AI." });
+      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → Model Providers." });
       return;
     }
     // A vocab field whose source hasn't been synced yet resolves to neither
@@ -519,10 +625,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
     // Vocab fields are resolved purely by embedding search (no LLM), so they
     // need an active embedding provider — without one they'd silently come
-    // back empty. Fail loudly with a pointer to Settings → AI.
+    // back empty. Fail loudly with a pointer to Settings → Model Providers.
     const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
     if (noEmbed) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → AI before parsing.` });
+      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → Model Providers before parsing.` });
       return;
     }
 
@@ -536,7 +642,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (file) {
       try {
         const sessionId = gid();
-        const res = await extractImagesFromXlsx(file, imageRowIndices, sessionId);
+        const res = await extractImagesFromXlsx(file, imageRowIndices, sheetRowToDataRow, sessionId);
         res.rowIndexToFileId.forEach((absPath, rowIdx) => {
           const row = rows[rowIdx];
           if (row) {
@@ -595,7 +701,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         status: "busy",
         jobId,
         label: `Now parsing row ID ${i + 1}`,
-        detail: row.id ? `Obj. Number ${row.id}` : row.title,
+        detail: rowLabel(row, i),
         verbose: { record },
       });
       await delay(200); // brief tick so the UI shows processing
@@ -611,7 +717,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         // is fail-stop on the loop itself.) Any other error stays fail-fast.
         if (message === CANCEL_ERROR) {
           dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "cancelled" });
-          pushLog({ status: "ok", jobId, label: `Row ${i + 1} cancelled`, detail: row.id ? `Obj. Number ${row.id}` : row.title, elapsedMs: Math.round(performance.now() - rowStart) });
+          pushLog({ status: "ok", jobId, label: `Row ${i + 1} cancelled`, detail: rowLabel(row, i), elapsedMs: Math.round(performance.now() - rowStart) });
           continue;
         }
         pushLog({ status: "fail", jobId, label: `Row ${i + 1} failed`, detail: message, elapsedMs: Math.round(performance.now() - rowStart), verbose: { error: message } });
@@ -691,7 +797,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
     const prov = activeProvider(state.settings);
     if (!prov) {
-      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → AI." });
+      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → Model Providers." });
       return;
     }
     const unsynced = findUnsyncedVocabField(state.settings);
@@ -701,7 +807,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
     const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
     if (noEmbed) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → AI before parsing.` });
+      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → Model Providers before parsing.` });
       return;
     }
 
@@ -716,7 +822,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       status: "busy",
       jobId,
       label: "Retrying row",
-      detail: row.id ? `Obj. Number ${row.id}` : row.title,
+      detail: rowLabel(row),
       verbose: { record },
     });
 
@@ -742,7 +848,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       // stay quiet in the logs (Stop has no error to surface).
       if (message === CANCEL_ERROR) {
         dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "cancelled" });
-        pushLog({ status: "ok", jobId, label: "Row cancelled", detail: row.id ? `Obj. Number ${row.id}` : row.title });
+        pushLog({ status: "ok", jobId, label: "Row cancelled", detail: rowLabel(row) });
         return;
       }
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "error" });
@@ -786,38 +892,94 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const toggleRow = useCallback((uid: string) => dispatch({ type: "TOGGLE_ROW", uid }), [dispatch]);
   const setFilter = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => dispatch({ type: "SET_FILTER", filter: e.target.value }), [dispatch]);
   const setSearch = useCallback((e: React.ChangeEvent<HTMLInputElement>) => dispatch({ type: "SET_SEARCH", search: e.target.value }), [dispatch]);
+  // Search column scope (multi-select in the Results column picker). The
+  // scope may be emptied; an empty scope returns no matches when searched.
+  const toggleSearchColAf = useCallback((id: string) => dispatch({ type: "TOGGLE_SEARCH_COL_AF", id }), [dispatch]);
+  const toggleSearchColCat = useCallback((id: string) => dispatch({ type: "TOGGLE_SEARCH_COL_CAT", id }), [dispatch]);
+  const setSearchColsAf = useCallback((ids: string[]) => dispatch({ type: "SET_SEARCH_COLS_AF", ids }), [dispatch]);
+  const setSearchColsCat = useCallback((ids: string[]) => dispatch({ type: "SET_SEARCH_COLS_CAT", ids }), [dispatch]);
+  const dismissExportWarning = useCallback(() => dispatch({ type: "SET_EXPORT_WARNING", message: null }), [dispatch]);
 
   const exportResults = useCallback(async () => {
     const { results, settings, aiResults, fieldSelections } = state;
-    // Header labels for the id/title/category columns follow the configured
-    // field names so export stays in lock-step with Settings.
-    const roles = roleFieldNames(settings.artefactFields || []);
-    const hdrs = [roles.id || "Obj. Number", roles.title || "Title", roles.category || "Category", ...settings.fields.map((f) => f.name)];
-    const rows = results
-      .filter((r) => r.status === "done")
-      .map((r) => {
-        const ai = aiResults[r.uid] || {};
-        const vals = settings.fields.map((f) => {
-          const sel = fieldSelections[`${r.uid}_${f.id}`];
-          return sel ? sel.value : ai[f.name]?.[0]?.value || "";
-        });
-        return [r.id, r.title, r.category, ...vals];
-      });
-    const csv = [hdrs, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const table = composeExportTable(settings, results, aiResults, fieldSelections);
+    if (!table) {
+      // Zero artefact-file columns selected — surface as a dismissable warning
+      // in the same panel as parse errors, instead of silently writing a
+      // header-only file. Catalogue fields alone are never exported without a
+      // leading AF column to anchor the row.
+      dispatch({ type: "SET_EXPORT_WARNING", message: "No artefact-file columns are selected for export. Enable at least one column's export toggle in Settings → Artefact File." });
+      return;
+    }
+    dispatch({ type: "SET_EXPORT_WARNING", message: null });
+    const { headers, rows, imageColName } = table;
+    const doneRows = results.filter((r) => r.status === "done");
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Catalogue");
+    ws.columns = headers.map((h) => ({ header: h, key: h }));
+    ws.getRow(1).font = { bold: true };
+    rows.forEach((vals) => {
+      // Prefix formula-injection triggers (= + - @ \t \r) with a single quote
+      // so spreadsheet apps render these as text — same guard the old CSV
+      // exporter applied via csvSafeCell, now applied per cell as the row is
+      // added. Keeps the protection in lockstep with the value resolution.
+      const safe = vals.map((c) => csvSafeCell(String(c)));
+      ws.addRow(Object.fromEntries(headers.map((h, i) => [h, safe[i]])));
+    });
+
+    // Embed the actual image bytes for any toggled-on image column. The image
+    // column carries no text (its bytes go to vision separately at parse), so
+    // its cell above is empty; this anchors the extracted image to that cell.
+    if (imageColName) {
+      const colIdx = headers.indexOf(imageColName); // 0-based
+      const colLetter = colIndexToLetter(colIdx);
+      await Promise.all(doneRows.map(async (r, rowIdx) => {
+        if (!r.imagePath) return;
+        try {
+          // Image bytes live on disk beside the binary (written by
+          // extract_images at parse). Read them back and embed anchored to
+          // this row's image cell. ExcelJS accepts Uint8Array/ArrayBuffer at
+          // runtime for the buffer and a range string for the anchor — its
+          // bundled TS types lag the runtime (they want Buffer + Anchor
+          // instances), so we feed it the simpler shapes the docs document.
+          const bytes = await readFile(r.imagePath);
+          const lower = r.imagePath.toLowerCase();
+          const extension: "png" | "jpeg" = lower.endsWith(".jpg") || lower.endsWith(".jpeg") ? "jpeg" : "png";
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const id = wb.addImage({ buffer: bytes as any, extension });
+          // Data rows start at sheet row 2 (row 1 is the header). Anchor each
+          // image to span its own cell with a one-cell range string, so the
+          // image stays in its row (ExcelJS stretches it to the cell bounds).
+          const cell = `${colLetter}${rowIdx + 2}`;
+          ws.addImage(id, `${cell}:${cell}`);
+        } catch {
+          // Missing/unreadable image — leave the cell empty rather than abort
+          // the whole export. Logged for diagnosis via the existing extract
+          // log path; no separate user-facing error here.
+        }
+      }));
+    }
 
     try {
-      const target = await save({ defaultPath: "artefact_catalogue.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
+      const target = await save({ defaultPath: "artefact_catalogue.xlsx", filters: [{ name: "Excel", extensions: ["xlsx"] }] });
       if (target) {
-        await writeTextFile(target, csv);
+        const buf = await wb.xlsx.writeBuffer();
+        await writeFile(target, new Uint8Array(buf));
       }
     } catch {
       // Fallback: data URL download (e.g. if the dialog plugin is unavailable).
+      // xlsx is binary; fall back to a CSV dump of the text cells (images are
+      // lost) so the user at least gets the catalogue content out.
+      const csv = [headers, ...rows]
+        .map((r) => r.map((c) => `"${csvSafeCell(String(c)).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
       const a = document.createElement("a");
       a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
       a.download = "artefact_catalogue.csv";
       a.click();
     }
-  }, [state]);
+  }, [state, dispatch]);
 
   const onTriggerClick = useCallback(
     (key: string) => {
@@ -947,7 +1109,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
   // Append an empty catalogue-field row directly into the draft and expand it,
   // mirroring startAddProv — the user fills it in inline rather than via a
-  // separate "New Field" form. FieldsTab scrolls the new row into view.
+  // separate "New Field" form. CataloguingFieldsTab scrolls the new row into view.
   const startAddField = useCallback(() => {
     const id = gid();
     patchDraft((d) => ({ ...d, fields: [...d.fields, { id, name: "", type: "open", layout: "row", prompt: "", vocabSources: [] }] }));
@@ -1132,7 +1294,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: 0, rowsTotal: 0 });
     try {
       const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, (ev) => {
-        dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: ev.rowsDone, rowsTotal: ev.rowsTotal });
+        dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: ev.rowsDone, rowsTotal: ev.rowsTotal, fileProgress: ev.fileProgress });
       });
       const files = source.files.map((f) => {
         const rowCountLast = result.fileRowCounts[f.filename];
@@ -1321,8 +1483,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const setVocabShortlistCount = useCallback((n: number) => {
     patch((s) => ({ ...s, vocabShortlistCount: Math.max(1, Math.min(s.vocabNetCount, Math.round(n) || 1)) }));
   }, [patch]);
-  const setCall3Enabled = useCallback((on: boolean) => {
-    patch((s) => ({ ...s, call3Enabled: on }));
+  const setValidationEnabled = useCallback((on: boolean) => {
+    patch((s) => ({ ...s, validationEnabled: on }));
   }, [patch]);
 
   // --- settings: providers ---
@@ -1496,10 +1658,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
           connStatus: entry.connStatus,
         }];
-    // "Set Active" is card-owned: this card's Save also commits the
-    // active-selection when the user made this provider active. (Only this card
-    // can have flipped active to itself, so scoping it here is correct.)
-    const activeProvider = draft.activeProvider === id ? id : state.settings.activeProvider;
+    // "Set Active" now persists immediately (see setActiveProv), so
+    // draft.activeProvider always mirrors state.settings.activeProvider — read
+    // the source of truth directly.
+    const activeProvider = state.settings.activeProvider;
     const newSettings: Settings = { ...state.settings, providers, activeProvider };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
@@ -1532,10 +1694,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       });
       return;
     }
-    // "Set Active" is card-owned, so if the user made this card active,
-    // reverting also restores the persisted active selection. (Only this card
-    // can have flipped active to itself.)
-    const wasSetActive = draft.activeProvider === id && state.settings.activeProvider !== id;
+    // Revert this card's content only. "Set Active" persists immediately, so
+    // there's no buffered active-flip to restore here.
     dispatch({
       type: "PATCH_PROVIDER_DRAFT",
       patch: (d) => ({
@@ -1546,10 +1706,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           modelOptions: [...(saved.modelOptions ?? [])],
           connStatus: saved.connStatus ?? "untested",
         } : e)),
-        activeProvider: wasSetActive ? state.settings.activeProvider : d.activeProvider,
       }),
     });
-  }, [state.providerDraft, state.settings.providers, state.settings.activeProvider, mapDraftEntry, dispatch]);
+  }, [state.providerDraft, state.settings.providers, mapDraftEntry, dispatch]);
 
   const deleteProv = useCallback(async (id: string) => {
     // Label from the live draft (or settings) so the confirm matches the screen.
@@ -1585,13 +1744,24 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.providerDraft, state.settings, state.darkMode, state.zoom, patchProvDraft, dispatch, confirmDelete]);
 
-  const setActiveProv = useCallback((id: string) => {
-    // "Set Active" is card-owned: the selection is buffered into the draft and
-    // committed when that card's own Save runs. Clear the card's stale status so
-    // a prior "Saved" doesn't linger once it becomes dirty from the flip.
-    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
-    patchProvDraft((d) => ({ ...d, activeProvider: id }));
-  }, [patchProvDraft, dispatch]);
+  const setActiveProv = useCallback(async (id: string) => {
+    // "Set Active" persists immediately rather than buffering for the row's Save
+    // — the active selection is a single-field structural change, not per-card
+    // content. Modelled on deleteProv: write to disk, then mirror into any
+    // pending draft so other buffered per-card edits survive.
+    const newSettings: Settings = { ...state.settings, activeProvider: id };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      if (state.providerDraft) {
+        patchProvDraft((d) => ({ ...d, activeProvider: id }));
+      }
+    } catch {
+      // Settings not updated on failure: the button stays clickable and the
+      // row surfaces the error, matching deleteProv's catch.
+      dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
+    }
+  }, [state.settings, state.darkMode, state.zoom, state.providerDraft, patchProvDraft, dispatch]);
 
   // --- settings: embedding providers ---
   // Same per-card draft/save/discard shape as chat providers above, just a
@@ -1602,7 +1772,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const id = gid();
     patchEmbProvDraft((d) => ({
       ...d,
-      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", supportsImageInput: false, modelOptions: [], dimensions: null, connStatus: "untested" }],
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], dimensions: null, connStatus: "untested" }],
     }));
     dispatch({ type: "TOGGLE_EMB_PROV", id });
   }, [patchEmbProvDraft, dispatch]);
@@ -1633,10 +1803,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, model })));
   }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
 
-  const toggleEmbProvSupportsImage = useCallback((id: string) => {
-    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
-    patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, supportsImageInput: !entry.supportsImageInput })));
-  }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
 
   const toggleEmbProvKey = useCallback(() => dispatch({ type: "SET_SHOW_EMB_PROV_KEY", show: !state.showEmbProvKey }), [state.showEmbProvKey, dispatch]);
 
@@ -1682,14 +1848,15 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const persisted = state.settings.embeddingProviders.some((p) => p.id === id);
     const toPersisted = (): EmbeddingProvider => ({
       id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
-      model: entry.model, apiFormat: entry.apiFormat, supportsImageInput: entry.supportsImageInput,
+      model: entry.model, apiFormat: entry.apiFormat,
       modelOptions: entry.modelOptions, dimensions: entry.dimensions ?? undefined, connStatus: entry.connStatus,
     });
     const embeddingProviders = persisted
       ? state.settings.embeddingProviders.map((p) => (p.id === id ? toPersisted() : p))
       : [...state.settings.embeddingProviders, toPersisted()];
-    // "Set Active" is card-owned, mirroring saveProvCard.
-    const activeEmbeddingProvider = draft.activeProvider === id ? id : state.settings.activeEmbeddingProvider;
+    // "Set Active" now persists immediately (see setActiveEmbProv), so read the
+    // active selection from settings directly.
+    const activeEmbeddingProvider = state.settings.activeEmbeddingProvider;
     const newSettings: Settings = { ...state.settings, embeddingProviders, activeEmbeddingProvider };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
@@ -1712,26 +1879,24 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({
         type: "PATCH_EMB_PROVIDER_DRAFT",
         patch: mapEmbDraftEntry(id, () => ({
-          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", supportsImageInput: false, modelOptions: [], dimensions: null, connStatus: "untested",
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], dimensions: null, connStatus: "untested",
         })),
       });
       return;
     }
-    const wasSetActive = draft.activeProvider === id && state.settings.activeEmbeddingProvider !== id;
     dispatch({
       type: "PATCH_EMB_PROVIDER_DRAFT",
       patch: (d) => ({
         ...d,
         providers: d.providers.map((e) => (e.id === id ? {
           id: saved.id, name: saved.name, baseUrl: saved.baseUrl, apiKey: saved.apiKey,
-          model: saved.model, apiFormat: saved.apiFormat ?? "openai", supportsImageInput: saved.supportsImageInput ?? false,
+          model: saved.model, apiFormat: saved.apiFormat ?? "openai",
           modelOptions: [...(saved.modelOptions ?? [])], dimensions: saved.dimensions ?? null,
           connStatus: saved.connStatus ?? "untested",
         } : e)),
-        activeProvider: wasSetActive ? state.settings.activeEmbeddingProvider : d.activeProvider,
       }),
     });
-  }, [state.embProviderDraft, state.settings.embeddingProviders, state.settings.activeEmbeddingProvider, mapEmbDraftEntry, dispatch]);
+  }, [state.embProviderDraft, state.settings.embeddingProviders, mapEmbDraftEntry, dispatch]);
 
   const deleteEmbProv = useCallback(async (id: string) => {
     const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(state.settings);
@@ -1760,10 +1925,19 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.embProviderDraft, state.settings, state.darkMode, state.zoom, patchEmbProvDraft, dispatch, confirmDelete]);
 
-  const setActiveEmbProv = useCallback((id: string) => {
-    dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: null });
-    patchEmbProvDraft((d) => ({ ...d, activeProvider: id }));
-  }, [patchEmbProvDraft, dispatch]);
+  const setActiveEmbProv = useCallback(async (id: string) => {
+    // "Set Active" persists immediately — see setActiveProv for rationale.
+    const newSettings: Settings = { ...state.settings, activeEmbeddingProvider: id };
+    try {
+      await saveState(newSettings, state.darkMode, state.zoom);
+      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      if (state.embProviderDraft) {
+        patchEmbProvDraft((d) => ({ ...d, activeProvider: id }));
+      }
+    } catch {
+      dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
+    }
+  }, [state.settings, state.darkMode, state.zoom, state.embProviderDraft, patchEmbProvDraft, dispatch]);
 
   // --- settings: artefact fields ---
   // The required-column config is one deferred draft (mirrors the catalogue-
@@ -1790,7 +1964,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch { console.error("[artefact] reorderAF: save failed"); }
   }, [state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch]);
   const updateAF = useCallback((id: string, key: EditableArtefactFieldKey, value: string) => {
-    patchArtefactDraft((d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...f, [key]: value } : f)) }));
+    // `includeInExport` is a boolean persisted on ArtefactField, but the Segmented
+    // toggle emits the string "true"/"false" — coerce here so the draft carries
+    // the typed value, while name/description/prompt stay string passthroughs.
+    const coerced = key === "includeInExport" ? value === "true" : value;
+    patchArtefactDraft((d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...f, [key]: coerced } : f)) }));
   }, [patchArtefactDraft]);
   const removeAF = useCallback(async (id: string) => {
     const live = state.artefactDraft ?? artefactDraftFromSettings(state.settings);
@@ -1812,7 +1990,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [state.artefactDraft, state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch, confirmDelete]);
   const startAddAF = useCallback(() => {
     const id = gid();
-    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "" }] }));
+    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "", includeInExport: true }] }));
     dispatch({ type: "TOGGLE_AF", id });
   }, [patchArtefactDraft, dispatch]);
 
@@ -1858,9 +2036,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" } : f)) }) });
   }, [state.artefactDraft, state.settings.artefactFields, dispatch]);
 
-  // --- vision-analysis system instruction (artefact tab, Call 1 of the
-  // threaded pipeline). Deferred draft + per-card save, mirroring the
-  // catalogue tab's System Instructions trio.
+  // --- vision-analysis system instruction (artefact tab, vision-analysis
+  // stage of the threaded pipeline). Deferred draft + per-card save,
+  // mirroring the catalogue tab's System Instructions trio.
   const updateVisionSystemPromptInstruction = useCallback((value: string) => {
     patchArtefactDraft((d) => ({ ...d, visionSystemPromptInstruction: value }));
   }, [patchArtefactDraft]);
@@ -1956,11 +2134,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     setAllExpanded,
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
     onUploadClick, addAnotherFile, onDragOver, onDragLeave, onDrop, removeFile, startParse, pauseParse, resumeParse, cancelParse, dismissParseError, resetUpload, retryRow, stopRow, retryAllFailed, onResizeStart,
-    toggleRow, setFilter, setSearch, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
+    toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
-    startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setCall3Enabled,
+    startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
     startAddProv, setProvF, setProvModel, setProvApiFormat, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
-    toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvSupportsImage, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
+    toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
     toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateVisionSystemPromptInstruction, saveVisionSystemPromptInstruction, discardVisionSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
   };

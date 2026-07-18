@@ -20,20 +20,21 @@ export const _DEF_FIELDS: CatalogueField[] = [
   { id: "f4", name: "Obj./Work type", type: "vocab", layout: "row", prompt: "When two or more candidates are otherwise equally plausible, rank the one hinted \"Thesaurus: NHB\" above the others.", vocabSources: ["vocab-object-type"] },
   { id: "f5", name: "Place", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-place"] },
   { id: "f6", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-material"] },
-  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-technique"] },
+  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "Name the specific making process, never use generic terms. Review everything in <artefact_file> to evaluate the making process.", vocabSources: ["vocab-technique"] },
   { id: "f8", name: "Shape", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-shape"] },
-  { id: "f9", name: "Date/Period", type: "open", layout: "row", prompt: "Translate and convert to the Gregorian calendar if needed; if a date refers only to a century, express it in Gregorian century notation (e.g., \"19th century\" → \"1800s\", \"20th century\" → \"1900s\").", vocabSources: [] },
+  { id: "f9", name: "Date/Period", type: "open", layout: "row", prompt: "Translate and convert to the Gregorian calendar and even if only century notation can be derived, you must express it in Gregorian (e.g., \"19th century\" → \"1800s\", \"20th century\" → \"1900s\").", vocabSources: [] },
   { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-colour"] },
 ];
 
-/** The unified Call-1 system prompt: the museum-cataloguing persona plus the
- *  output-format preamble that tells the model to read `<artefact_file>` and
- *  reply in XML. The dynamic per-field `<extraction>`/`<open_field>` enumeration
- *  and the `<artefact_file>` record block are appended by Rust at runtime from
- *  the live field config and the row's values — they cannot live in this static
- *  text. Gated behind an Override in the UI; editing is discouraged. */
+/** The unified vision-analysis system prompt: the museum-cataloguing persona
+ *  plus the output-format preamble that tells the model to read
+ *  `<artefact_file>` and reply in XML. The dynamic per-field
+ *  `<extraction>`/`<open_field>` enumeration and the `<artefact_file>` record
+ *  block are appended by Rust at runtime from the live field config and the
+ *  row's values — they cannot live in this static text. Gated behind an
+ *  Override in the UI; editing is discouraged. */
 export const _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION =
-  "You are an experienced museum cataloguing assistant specializing in Southeast Asia artefact collections; draw on museum, art-historical, and cultural context when interpreting each object. Prioritize accurate, evidence-based description and avoid unsupported claims.\n\nAlways observe and describe the artefact using both the attached image and the metadata in <artefact_file>. Distinguish the actual object(s) from any supplementary notes or labels in the image (e.g., museum placards, curator's tags) that describe but are not the object. The reverse can also be true: a text-bearing item such as calligraphy, a manuscript, a document, or a bank note is the artefact itself when it is visually the primary subject — not a label about something else. Notes may be handwritten or in a foreign language; use them to enhance your description when clear, but prefer the object's visible physical evidence when they conflict. Do not presume an unfamiliar object's nature, identity, or function from unfamiliarity alone; describe what you can observe.\n\nReply ONLY in this XML format, using the field names exactly as tagged. Do not add prose, explanations, or code fences:\n<image_description> a rich, evidence-based description of the artefact </image_description>\n<extraction field=\"{Field Name}\"> the specific text describing this aspect of the artefact, to be matched against the {Field Name} vocabulary list </extraction>\n<open_field field=\"{Field Name}\"> the free-text answer for this catalogue field </open_field>";
+  "You are an experienced museum cataloguing assistant specializing in Southeast Asia artefact collections; draw on museum, art-historical, and cultural context when interpreting each object. Prioritize accurate, evidence-based description and avoid unsupported claims.\n\nAlways observe and describe the artefact using both the attached image and the metadata in <artefact_file>. Distinguish the actual object(s) from any supplementary notes or labels in the image (e.g., museum placards, curator's tags) that describe but are not the object. The reverse can also be true: a text-bearing item such as calligraphy, a manuscript, a document, or a bank note is the artefact itself when it is visually the primary subject — not a label about something else. Notes may be handwritten or in a foreign language; use them to enhance your description when clear, but prefer the object's visible physical evidence when they conflict. Do not presume an unfamiliar object's nature, identity, or function from unfamiliarity alone; describe what you can observe.\n\nReply ONLY in this XML format, using the field names exactly as tagged. Do not add prose, explanations, or code fences:\n<image_description> a rich, evidence-based description of the artefact </image_description>\n<extraction field=\"{Field Name}\"> the specific text describing this aspect of the artefact, to be aligned to this field's controlled vocabulary downstream </extraction>\n<open_field field=\"{Field Name}\"> the free-text answer for this catalogue field </open_field>";
 
 /** Column layout shared by every seeded vocabulary source — mirrors the live
  *  in-app configuration: `Term` is both the ingestion key and the display
@@ -42,7 +43,7 @@ export const _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION =
 const VOCAB_TERM_COLUMNS: VocabSource["fields"] = [
   { name: "Field Name", includeForAI: false },
   { name: "Term", includeForAI: true },
-  { name: "Thesaurus", includeForAI: true },
+  { name: "Thesaurus", includeForAI: false },
 ];
 
 /** Build a seeded vocabulary source with the shared column layout and a fresh
@@ -90,7 +91,7 @@ export function _DEF(): Settings {
     visionSystemPromptInstruction: _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION,
     vocabNetCount: 20,
     vocabShortlistCount: 3,
-    call3Enabled: false,
+    validationEnabled: false,
     fields: _DEF_FIELDS.map((f) => ({ ...f, vocabSources: [...f.vocabSources] })),
     vocabSources: _DEF_VOCAB.map((v) => ({ ...v, files: [...v.files], fields: [...v.fields], embedding: { ...v.embedding } })),
     providers: [] as Provider[],
