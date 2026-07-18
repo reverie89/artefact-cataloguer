@@ -30,6 +30,7 @@ csv = "1"
 calamine = "0.31"
 blake3 = "1"
 futures = "0.3"
+keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "linux-native"] }
 
 [features]
 # By default Tauri ships a smaller binary without custom protocol overhead we don't need.

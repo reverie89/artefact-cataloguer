@@ -31,7 +31,7 @@ pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn settings_path() -> PathBuf {
@@ -49,6 +49,10 @@ pub fn load_state() -> StateBundle {
         Ok(text) => match serde_json::from_str::<StateBundle>(&text) {
             Ok(mut b) => {
                 normalize_prompt_settings(&mut b.settings);
+                // Reattach API keys from the OS keychain (and migrate any
+                // plaintext keys still in the file on first load after the
+                // keychain rollout). Keys are never persisted in settings.json.
+                crate::secrets::rehydrate(&mut b.settings);
                 b
             }
             Err(e) => {
@@ -87,6 +91,10 @@ pub fn save_state(mut bundle: StateBundle) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     normalize_prompt_settings(&mut bundle.settings);
+    // Move API keys into the OS keychain and scrub them from the JSON so
+    // settings.json never holds a key in cleartext. On a keychain failure the
+    // key is left in place (graceful degradation) rather than being dropped.
+    crate::secrets::scrub(&mut bundle.settings);
     let text = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
 
     let tmp = path.with_extension("json.tmp");
