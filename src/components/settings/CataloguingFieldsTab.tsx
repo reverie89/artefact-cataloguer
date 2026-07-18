@@ -30,7 +30,7 @@ interface Props {
   actions: AppActions;
 }
 
-export function FieldsTab({ state, actions }: Props) {
+export function CataloguingFieldsTab({ state, actions }: Props) {
   const { settings, settingsFieldExpanded } = state;
 
   // Render from the pending draft if there are unsaved edits, otherwise from
@@ -274,8 +274,8 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
       <FieldTextarea
         label="Prompt Instruction"
         desc={field.type === "vocab"
-          ? "Field-specific guidance applied when Call 3 validates candidates (e.g. tiebreak preferences)."
-          : "Field-specific guidance for this field's answer in Call 1."}
+          ? "Field-specific guidance applied when validation picks candidates (e.g. tiebreak preferences)."
+          : "Field-specific guidance for this field's answer in vision analysis."}
         value={field.prompt}
         onChange={(e) => onPrompt(e.target.value)}
         rows={2}

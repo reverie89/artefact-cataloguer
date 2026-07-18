@@ -5,10 +5,9 @@ import type { AppState } from "../../app/state";
 import type { SettingsTab } from "../../app/types";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FieldsTab } from "./FieldsTab";
+import { CataloguingFieldsTab } from "./CataloguingFieldsTab";
 import { VocabTab } from "./VocabTab";
-import { ProvidersTab } from "./ProvidersTab";
-import { EmbeddingProvidersSection } from "./EmbeddingProvidersSection";
+import { ModelProvidersTab } from "./ModelProvidersTab";
 import { ArtefactFileTab } from "./ArtefactFileTab";
 import { AboutTab } from "./AboutTab";
 
@@ -22,7 +21,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "artefactFile", label: "Artefact File" },
   { key: "fields", label: "Cataloguing Fields" },
   { key: "vocab", label: "Vocabulary Lists" },
-  { key: "ai", label: "AI Provider" },
+  { key: "modelProviders", label: "Model Providers" },
 ];
 
 export function SettingsScreen({ state, actions }: Props) {
@@ -61,14 +60,9 @@ export function SettingsScreen({ state, actions }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-5">
-        {tab === "fields" && <FieldsTab state={state} actions={actions} />}
+        {tab === "fields" && <CataloguingFieldsTab state={state} actions={actions} />}
         {tab === "vocab" && <VocabTab state={state} actions={actions} />}
-        {tab === "ai" && (
-          <div className="flex flex-col gap-6">
-            <ProvidersTab state={state} actions={actions} />
-            <EmbeddingProvidersSection state={state} actions={actions} />
-          </div>
-        )}
+        {tab === "modelProviders" && <ModelProvidersTab state={state} actions={actions} />}
         {tab === "artefactFile" && <ArtefactFileTab state={state} actions={actions} />}
         {tab === "about" && <AboutTab />}
       </div>
