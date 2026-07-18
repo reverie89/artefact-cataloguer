@@ -8,7 +8,7 @@
 
 import { useCallback, useRef, useState } from "react";
 
-import { ConfirmDialog, type ConfirmDeleteOptions } from "./ConfirmDialog";
+import { ConfirmDialog, type ConfirmDeleteOptions } from "@/components/common/ConfirmDialog";
 
 interface PendingRequest extends ConfirmDeleteOptions {
   resolve: (ok: boolean) => void;

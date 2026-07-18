@@ -4,6 +4,7 @@ The app's visual language is **shadcn/ui (new-york style) + Tailwind CSS v4 + Ra
 
 - **Tokens:** `src/styles/globals.css` (indigo OKLCH, light `:root` + dark `.dark`)
 - **Primitives:** `src/components/ui/*` (shadcn-generated)
+- **Common composites:** `src/components/common/*` (generic, domain-free composites like `ConfirmDialog`, `ImageLightbox`)
 - **Form wrappers:** `src/components/settings/FormControls.tsx` (`Field`, `FieldInput`, `FieldTextarea`, `FieldSelect`, `Segmented`)
 - **Entry:** `src/main.tsx` imports `globals.css` once
 
@@ -65,7 +66,7 @@ The single home for labeled form fields. **Reuse these wherever a form appears**
 
 (See `AGENTS.md` → Frontend Guidelines → Inline styles.) Inline `style={{}}` is allowed **only** for values computed at runtime:
 
-1. dnd-kit drag `transform`/`transition`/`opacity` (FieldsTab, ArtefactFileTab sortable rows).
+1. dnd-kit drag `transform`/`transition`/`opacity` (CataloguingFieldsTab, ArtefactFileTab sortable rows).
 2. Data-driven widths/percentages (e.g. confidence-bar fill `width: ai.pct`).
 3. App root `zoom: state.zoom`.
 4. Data-driven status-dot `background` (the `_ST` hex strings in `app/defaults.ts` — a runtime value that cannot reference a Tailwind class from JS).
@@ -86,6 +87,7 @@ Records where similar designs were evaluated during the shadcn migration and the
 | **Settings tab strip** | **Standardized** on shadcn `Tabs` | Replaces the hand-rolled `.ui-tabs`; gains keyboard nav. |
 | **Overlays** (ConfirmDialog, LogsViewer, PromptPreviewSheet) | **Standardized** on shadcn `Dialog`/`Sheet` (Radix) | Gains correct focus-trap, scroll-lock, Esc, and backdrop dismiss for free; one overlay vocabulary. |
 | **Image lightbox** (ResultRow thumbnail → full-screen zoom) | **Standardized** on shadcn `Dialog` (overlay) + a custom `useImageZoom` hook + inline `transform` (no zoom library) | Overlay reuses the vocabulary (focus-trap/Esc/backdrop) via `Dialog`. Zoom/pan is owned as plain React state (`{scale, tx, ty}`) and applied via a single inline `transform` (the sanctioned runtime-computed exception, §4 #1 — dnd-kit precedent). A zoom library was tried and reverted: its reactive scale, centering lifecycle, and smoothing were all unreliable; owning the transform state directly is simpler and correct (KISS). Surround is `bg-background` (theme-aware); the floating toolbar is `bg-popover`. |
+| **Component directory taxonomy** (`ui/` vs `common/` vs `main/` vs `settings/`) | **Standardized** on a four-tier split; `ui/` is shadcn-generated primitives **only** | The deciding question for any new component is "is this a shadcn primitive?" — not "is it reusable?". `ui/` is reserved for `npx shadcn add` output (stock or `cva`-extended), so the "is this vendor-owned?" signal stays clean. Hand-written composites that *wrap* shadcn primitives live elsewhere by domain coupling: `common/` for generic domain-free composites (`ConfirmDialog`, `ImageLightbox` — no `AppState` imports), `main/` for main-screen feature components, `settings/` for settings-screen components + `FormControls.tsx`. `ImageLightbox` lives in `common/` even though it has one consumer (`ResultRow`) — the rule is coupling, not current reuse count (YAGNI applies to *creating* abstractions, not to *placing* existing ones). Generic React hooks live in `src/hooks/`, never `components/`. |
 | **ConfirmDialog = Dialog, not AlertDialog** | **Edge case — keep Dialog** | The original contract allowed backdrop-click dismissal; `AlertDialog` blocks that to force an explicit choice, which would change behavior. |
 | **Status dot colour** (`_ST` in defaults.ts) | **Edge case — hex string in JS** | The dot's `background` is a runtime inline style; a Tailwind class can't be referenced from a plain JS string. Concrete hex matching the semantic status colours. |
 | **Wordmark/titles** | **Standardized** to sans system stack | DM Serif Display removed per "only keep shadcn"; titles are now `font-semibold` sans. |

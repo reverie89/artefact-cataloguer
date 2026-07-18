@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
-import { clearLogs, useLogEvents, type LogStatus, type LogVerbose } from "../lib/logs";
+import { clearLogs, useLogEvents, type LogStatus, type LogVerbose } from "../../lib/logs";
 
 interface Props {
   open: boolean;
