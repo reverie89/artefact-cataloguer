@@ -1,10 +1,10 @@
 //! Cataloguing via the active AI provider, run from Rust so API keys never
 //! reach the renderer and CORS is a non-issue.
 //!
-//! `catalogue_artefact` catalogues one artefact in a **three-call XML pipeline**
-//! (Call 3 optional, user-toggleable):
+//! `catalogue_artefact` catalogues one artefact in a **three-step XML pipeline**
+//! (validation optional, user-toggleable):
 //!
-//!   - **Call 1 (vision, unified prompt)** — image + the artefact record as
+//!   - **Vision analysis (unified prompt)** — image + the artefact record as
 //!     `<artefact_file>` XML + the persona/output-format preamble. The model
 //!     replies in a fixed XML contract: one `<image_description>`, one
 //!     `<extraction field="…">` per controlled-vocab field (field-specific text
@@ -15,18 +15,18 @@
 //!     `net_count` candidates (default 20) are kept with their cosine scores.
 //!     This per-field embedding is the primary fix for the global-vector
 //!     mis-matches the previous single-description embedding produced.
-//!   - **Call 3 (validation, threaded from Call 1, optional)** — one batched
+//!   - **Validation (threaded from vision analysis, optional)** — one batched
 //!     call presenting each vocab field's extracted text plus its ≤`net_count`
 //!     candidate **terms** (no cosine, no thesaurus — pure strings). The vision
 //!     model picks up to `shortlist_count` (default 3) verbatim; if none fit it
 //!     returns an empty block and the field is left blank. Rust attaches each
-//!     pick's cosine as `similarity`. When Call 3 is disabled, the cosine
+//!     pick's cosine as `similarity`. When validation is disabled, the cosine
 //!     top-`shortlist_count` is used directly.
 //!
-//! Open-ended fields are filled directly from Call 1 (`similarity` absent);
-//! controlled-vocab fields carry cosine `similarity`. The XML format is used
-//! for both the request payload (the artefact record) and the response, so the
-//! model sees one consistent format.
+//! Open-ended fields are filled directly from vision analysis (`similarity`
+//! absent); controlled-vocab fields carry cosine `similarity`. The XML format is
+//! used for both the request payload (the artefact record) and the response, so
+//! the model sees one consistent format.
 //!
 //! Providers use the OpenAI/Anthropic/Gemini chat-completions API — multi-turn
 //! `messages`/`input` arrays, with the image inlined as a content block on the
@@ -144,7 +144,7 @@ fn redact_string_field(
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| should_redact(s))
-        .map(|s| replace(s));
+        .map(replace);
     if let Some(r) = replacement {
         map.insert(key.to_string(), Value::String(r));
     }
@@ -188,17 +188,19 @@ struct VerbosePayload {
     error: Option<String>,
 }
 
-/// One vision-pipeline stage, surfaced as a row in the Logs Viewer. `stage`
-/// drives the renderer-side label; `status` drives the dot colour (ok/busy/fail).
-/// `job_group` ties every stage of one vision call together so the renderer can
-/// resolve the earlier "busy" dots when a terminal stage lands.
+/// One cataloguing-pipeline stage, surfaced as a row in the Logs Viewer.
+/// `stage`/`label` drive the rendered label; `status` drives the dot colour
+/// (ok/busy/fail). `job_group` ties every stage of one call together so the
+/// renderer can resolve earlier "busy" dots when a terminal stage lands. The
+/// same `"ac-logs"` channel also carries embedding stages emitted from
+/// `embeddings.rs` (each with its own `job_group`).
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct VisionStageEvent {
+struct PipelineStageEvent {
     stage: &'static str,
-    /// Group id shared by every stage of one vision call (assigned before the
-    /// POST, before the platform job id is known). The renderer resolves prior
-    /// busy stages of the same group when a terminal stage arrives.
+    /// Group id shared by every stage of one call (assigned before the POST,
+    /// before the platform job id is known). The renderer resolves prior busy
+    /// stages of the same group when a terminal stage arrives.
     job_group: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
@@ -211,9 +213,9 @@ struct VisionStageEvent {
     verbose: Option<VerbosePayload>,
 }
 
-/// Emit a vision-stage event to the renderer. Best-effort: a logging failure
+/// Emit a pipeline-stage event to the renderer. Best-effort: a logging failure
 /// must never break a provider call, so errors are swallowed.
-fn log_stage(app: &AppHandle, event: VisionStageEvent) {
+fn log_stage(app: &AppHandle, event: PipelineStageEvent) {
     let _ = app.emit(LOG_STAGE_EVENT, event);
 }
 
@@ -297,11 +299,12 @@ pub struct Provider {
 }
 
 /// One catalogue field the AI must populate. For open-ended fields, the model
-/// answers directly in Call 1's `<open_field>` block. For controlled-vocab
-/// fields, the model emits a field-specific `<extraction>` in Call 1; that text
-/// is embedded and searched against `vocab_source_ids` to build a candidate
-/// net, then (optionally) Call 3 validates the net against the image. The vocab
-/// list itself is never sent to the LLM; `similarity` is grounded in cosine.
+/// answers directly in vision analysis's `<open_field>` block. For
+/// controlled-vocab fields, the model emits a field-specific `<extraction>` in
+/// vision analysis; that text is embedded and searched against
+/// `vocab_source_ids` to build a candidate net, then (optionally) validation
+/// validates the net against the image. The vocab list itself is never sent to
+/// the LLM; `similarity` is grounded in cosine.
 #[derive(Deserialize, Clone)]
 pub struct FieldSpec {
     pub name: String,
@@ -317,9 +320,9 @@ pub struct FieldSpec {
 
 /// The candidate net for one vocab field — produced by per-field embedding
 /// search against that field's own `<extraction>` text. Each candidate carries
-/// its cosine score so Call 3's picks can be stamped with grounded similarity.
-/// When Call 3 is disabled, the top `shortlist_count` candidates (by cosine)
-/// become the field's suggestions directly.
+/// its cosine score so validation's picks can be stamped with grounded
+/// similarity. When validation is disabled, the top `shortlist_count`
+/// candidates (by cosine) become the field's suggestions directly.
 pub(crate) struct ResolvedVocab {
     /// Index into the `fields: Vec<FieldSpec>` passed to the resolver — which
     /// field these candidates belong to.
@@ -348,19 +351,20 @@ pub struct ArtefactColumnSpec {
 /// A single artefact's source record (column → value) plus optional image path.
 #[derive(Deserialize, Clone)]
 pub struct ArtefactInput {
-    /// e.g. { "ID": "ACM-1021", "Title": "...", "Image": "<extracted path>" }
+    /// e.g. { "Object Name": "Bowl", "Material": "Bronze", "Image": "<extracted path>" }
     #[serde(default)]
     pub record: Value,
     /// Absolute path to the extracted image file, if any.
     #[serde(rename = "imagePath")]
     pub image_path: Option<String>,
-    /// The unified Call-1 prompt: persona + output-format preamble. The XML
-    /// field enumeration and the `<artefact_file>` record block are appended by
-    /// Rust at runtime, so this field holds only the user-editable prose.
+    /// The unified vision-analysis prompt: persona + output-format preamble.
+    /// The XML field enumeration and the `<artefact_file>` record block are
+    /// appended by Rust at runtime, so this field holds only the user-editable
+    /// prose.
     #[serde(rename = "visionSystemPrompt", default)]
     pub vision_system_prompt: String,
     /// The configured artefact-file columns with their optional per-column
-    /// prompts. Used to seed the per-column guidance block in Call 1.
+    /// prompts. Used to seed the per-column guidance block in vision analysis.
     #[serde(rename = "artefactColumns", default)]
     pub artefact_columns: Vec<ArtefactColumnSpec>,
     /// **Deprecated** (kept for `settings.json` serde back-compat; the frontend
@@ -438,30 +442,23 @@ pub(crate) fn http_client(timeout: Duration) -> Result<reqwest::Client, String> 
         .map_err(|e| e.to_string())
 }
 
-/// Filter out ID-like columns (accession numbers, identifiers) so internal
-/// bookkeeping values don't reach the model. Returns the kept (column, value)
-/// pairs as strings.
-fn visible_record_pairs(record: &Value) -> Vec<(String, String)> {
+/// Collect every (column, value) pair from the record as strings. The record
+/// only ever contains columns the user configured in the Artefact File tab
+/// (the parser is config-strict — see `lib/spreadsheet.ts`), so every column
+/// is meaningful and reaches the model verbatim. The Image column never arrives
+/// here: the parser excludes it from `record` (its bytes travel a separate
+/// fflate-extracted path into the image content block).
+fn record_pairs(record: &Value) -> Vec<(String, String)> {
     let Some(obj) = record.as_object() else {
         return Vec::new();
     };
     obj.iter()
-        .filter_map(|(k, v)| {
-            let lower = k.to_ascii_lowercase();
-            let id_related = lower.contains("accession")
-                || lower.contains("obj. number")
-                || lower.contains("object number")
-                || lower == "id"
-                || lower.ends_with(" id")
-                || lower.contains("identifier");
-            if id_related {
-                return None;
-            }
+        .map(|(k, v)| {
             let val = v
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| v.to_string());
-            Some((k.clone(), val))
+            (k.clone(), val)
         })
         .collect()
 }
@@ -471,8 +468,8 @@ fn visible_record_pairs(record: &Value) -> Vec<(String, String)> {
 /// must start with a letter or `_`), since spreadsheet headers can contain
 /// spaces and punctuation (e.g. "Curator's notes"). Collisions after sanitization
 /// are disambiguated with a numeric suffix so no column's value is silently lost.
-fn visible_record_xml(record: &Value) -> String {
-    let pairs = visible_record_pairs(record);
+fn record_xml(record: &Value) -> String {
+    let pairs = record_pairs(record);
     if pairs.is_empty() {
         return "<artefact_file></artefact_file>".to_string();
     }
@@ -531,15 +528,32 @@ fn xml_escape_text(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Compose the unified Call-1 prompt. Structure (joined by blank lines):
+/// Escape text for a double-quoted XML attribute value. Element-content
+/// escapes plus `"` and `'` (the XML spec requires quotes escaped inside
+/// attribute values; we only emit double-quoted attrs, but escape both for
+/// safety). Used wherever user-controlled text is interpolated into `attr="…"`
+/// — e.g. `<extraction field="{name}">` — so a name containing `"` can't break
+/// out of the attribute and corrupt the prompt's structure.
+fn xml_escape_attr(s: &str) -> String {
+    xml_escape_text(s)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Compose the unified vision-analysis prompt. Structure (joined by blank lines):
 ///   1. The user-editable persona + output-format preamble (the merged "System
 ///      Prompt" from ArtefactFileTab). This text *already* instructs the model
 ///      to read `<artefact_file>` and reply in XML.
 ///   2. Per-column guidance block (only non-empty prompts).
-///   3. The Rust-appended field enumeration: one `<extraction field="…">` per
-///      vocab field and one `<open_field field="…">` per open field, with each
-///      field's non-empty `prompt` injected inline. This cannot live in the
-///      editable text because it depends on the user's live field config.
+///   3. The Rust-appended field enumeration, led by one `<image_description>`
+///      block then one `<extraction field="…">` per vocab field and one
+///      `<open_field field="…">` per open field, with each field's non-empty
+///      `prompt` injected inline. This cannot live in the editable text because
+///      it depends on the user's live field config. The leading
+///      `<image_description>` line is repeated here (it also appears in the
+///      preamble's format template) because models treat this concrete, ordered
+///      list as the authoritative per-call spec and otherwise drop the tag —
+///      see `parse_unified_response`'s `<image_description> missing` warning.
 ///   4. The `<artefact_file>` record block.
 ///   5. A no-image note when applicable.
 fn build_unified_prompt(
@@ -569,7 +583,13 @@ fn build_unified_prompt(
         ));
     }
     // Rust-appended field enumeration (matches the preamble's XML schema).
-    let mut enum_lines = Vec::new();
+    // Lead with `<image_description>` so the model includes it; it is the only
+    // tag the preamble lists that the per-field loop below would otherwise omit,
+    // and models follow this concrete list over the preamble's template.
+    let mut enum_lines = vec![
+        "<image_description> a rich, evidence-based description of the artefact </image_description>"
+            .to_string(),
+    ];
     for f in fields {
         let prompt = f.prompt.trim();
         let guidance = if prompt.is_empty() {
@@ -580,22 +600,22 @@ fn build_unified_prompt(
         if f.field_type == "vocab" {
             enum_lines.push(format!(
                 "<extraction field=\"{}\">{}</extraction>",
-                f.name, guidance
+                xml_escape_attr(&f.name),
+                guidance
             ));
         } else {
             enum_lines.push(format!(
                 "<open_field field=\"{}\">{}</open_field>",
-                f.name, guidance
+                xml_escape_attr(&f.name),
+                guidance
             ));
         }
     }
-    if !enum_lines.is_empty() {
-        sections.push(format!(
-            "Provide one block per field, in this order, using the field names exactly:\n{}",
-            enum_lines.join("\n")
-        ));
-    }
-    sections.push(visible_record_xml(record));
+    sections.push(format!(
+        "Reply with one <image_description> block, then one block per field, in this order, using the field names exactly:\n{}",
+        enum_lines.join("\n")
+    ));
+    sections.push(record_xml(record));
     if !has_image {
         sections.push(
             "No image is attached for this artefact — base your description on the metadata above and note that it is lower-confidence as a result.".to_string(),
@@ -616,11 +636,12 @@ pub(crate) struct ImageData {
 }
 
 /// One turn of a multi-turn conversation sent to a chat-completions provider.
-/// The cataloguing pipeline threads Call 3 (vocab validation) onto Call 1
-/// (vision + extraction) so the model keeps the image and its own analysis in
-/// context while picking vocab candidates. An image attaches only to the turn
-/// that carries it (Call 1's user turn); Call 3's user turn is text-only but
-/// still sees the earlier image via the replayed Call-1 history.
+/// The cataloguing pipeline threads validation (vocab validation) onto vision
+/// analysis (vision + extraction) so the model keeps the image and its own
+/// analysis in context while picking vocab candidates. An image attaches only
+/// to the turn that carries it (vision analysis's user turn); validation's
+/// user turn is text-only but still sees the earlier image via the replayed
+/// vision-analysis history.
 #[derive(Clone)]
 pub(crate) struct Turn {
     pub role: TurnRole,
@@ -798,7 +819,7 @@ async fn do_completion(
     let job_group = next_call_group();
     log_stage(
         app,
-        VisionStageEvent {
+        PipelineStageEvent {
             stage: "postSent",
             job_group: job_group.clone(),
             status: "busy",
@@ -836,7 +857,7 @@ async fn do_completion(
             let message = format!("request failed: {e}");
             log_stage(
                 app,
-                VisionStageEvent {
+                PipelineStageEvent {
                     stage: "failed",
                     job_group: job_group.clone(),
                     status: "fail",
@@ -865,7 +886,7 @@ async fn do_completion(
     if !status.is_success() {
         log_stage(
             app,
-            VisionStageEvent {
+            PipelineStageEvent {
                 stage: "failed",
                 job_group: job_group.clone(),
                 status: "fail",
@@ -893,7 +914,7 @@ async fn do_completion(
         let msg = format!("bad JSON response: {e}");
         log_stage(
             app,
-            VisionStageEvent {
+            PipelineStageEvent {
                 stage: "done",
                 job_group: job_group.clone(),
                 status: "ok",
@@ -920,7 +941,7 @@ async fn do_completion(
         Err(e) => {
             log_stage(
                 app,
-                VisionStageEvent {
+                PipelineStageEvent {
                     stage: "done",
                     job_group: job_group.clone(),
                     status: "ok",
@@ -953,7 +974,7 @@ async fn do_completion(
 
     log_stage(
         app,
-        VisionStageEvent {
+        PipelineStageEvent {
             stage: "done",
             job_group: job_group.clone(),
             status: "ok",
@@ -997,15 +1018,12 @@ fn strip_code_fence(s: &str) -> &str {
     close_fence("```").trim_end()
 }
 
-/// The parsed result of Call 1's unified XML response: the artefact description
-/// plus per-field extraction/open-field text. Vocab fields' `extractions` are
-/// embedded to build the candidate net; open fields' `open_values` become the
-/// The parsed result of Call 1's unified XML response. Vocab fields'
+/// The parsed result of vision analysis's unified XML response. Vocab fields'
 /// `extractions` are embedded to build the candidate net; open fields'
 /// `open_values` become the field's suggestion directly (no similarity).
 /// Missing sections surface as warnings rather than errors. The
 /// `<image_description>` is parsed by `trim_for_validation` directly from the
-/// raw response when building Call 3's context, so it isn't carried here.
+/// raw response when building validation's context, so it isn't carried here.
 struct UnifiedParse {
     extractions: HashMap<String, String>,
     open_values: HashMap<String, String>,
@@ -1052,14 +1070,18 @@ fn tag_attr(tag_text: &str, attr: &str) -> Option<String> {
     }
 }
 
-/// Parse Call 1's XML response. Tolerant of a code fence or surrounding prose
-/// (the contract forbids them, but models add them anyway). For each vocab
-/// field, records its `<extraction>` text (empty string if absent — the resolver
-/// treats that as "no candidates"); for each open field, records its
-/// `<open_field>` text. Missing sections become warnings so a blank field in the
-/// UI is traceable. A missing `<image_description>` is warned on (a useful Call-1
-/// health signal) but its text isn't carried — Call 3's context is built by
-/// `trim_for_validation` straight from the raw response.
+/// Parse vision analysis's XML response. Tolerant of a code fence or
+/// surrounding prose (the contract forbids them, but models add them anyway).
+/// For each vocab field, records its `<extraction>` text (empty string if
+/// absent or empty — the resolver treats both as "no candidates"); for each
+/// open field, records its `<open_field>` text. Missing or empty sections
+/// become warnings so a blank field in the UI is traceable, with distinct
+/// wording: "missing" when the tag was never emitted (the model broke the
+/// format) versus "empty" when the tag was emitted but blank (the model
+/// correctly had nothing to say). A missing `<image_description>` is warned on
+/// (a useful vision-analysis health signal) but its text isn't carried —
+/// validation's context is built by `trim_for_validation` straight from the
+/// raw response.
 fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> UnifiedParse {
     let body = strip_code_fence(content);
     let mut extractions: HashMap<String, String> = HashMap::new();
@@ -1072,30 +1094,40 @@ fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> UnifiedParse {
 
     // Collect every <extraction field="…"> and <open_field field="…"> block,
     // then match by name to the requested fields. Models sometimes emit a field
-    // twice or vary casing, so we build a name→text map first.
+    // twice or vary casing, so we build a name→text map first. The map keys
+    // presence (absent key = tag missing) apart from emptiness (key present,
+    // empty value) so the warnings below can distinguish the two.
     let extraction_map = collect_named_blocks(body, "extraction");
     let open_map = collect_named_blocks(body, "open_field");
 
     for f in fields {
+        let key = f.name.to_ascii_lowercase();
         if f.field_type == "vocab" {
-            let text = extraction_map
-                .get(&f.name.to_ascii_lowercase())
-                .cloned()
-                .unwrap_or_default();
+            let text = extraction_map.get(&key).cloned().unwrap_or_default();
             if text.is_empty() {
                 warnings.push(format!(
-                    "{}: <extraction> missing or empty — no candidates will be searched",
-                    f.name
+                    "{}: <extraction> {} — no candidates will be searched",
+                    f.name,
+                    if extraction_map.contains_key(&key) {
+                        "empty"
+                    } else {
+                        "missing"
+                    }
                 ));
             }
             extractions.insert(f.name.clone(), text);
         } else {
-            let text = open_map
-                .get(&f.name.to_ascii_lowercase())
-                .cloned()
-                .unwrap_or_default();
+            let text = open_map.get(&key).cloned().unwrap_or_default();
             if text.is_empty() {
-                warnings.push(format!("{}: <open_field> missing or empty", f.name));
+                warnings.push(format!(
+                    "{}: <open_field> {}",
+                    f.name,
+                    if open_map.contains_key(&key) {
+                        "empty"
+                    } else {
+                        "missing"
+                    }
+                ));
             }
             open_values.insert(f.name.clone(), text);
         }
@@ -1107,8 +1139,26 @@ fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> UnifiedParse {
     }
 }
 
+/// True when the vision-analysis response contains none of the contract's XML
+/// tags — i.e. the model didn't attempt the output format at all. The classic
+/// cause is a wrong model behind a free/auto router (e.g. a moderation model
+/// replying "User Safety: safe") or a non-instruct model. Deliberately distinct
+/// from a partial-but-contract-shaped response (some tags present, some empty),
+/// which the per-field warnings in `parse_unified_response` already cover —
+/// this only fires when the response is structurally unrecognizable.
+fn looks_like_unrecognized_response(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    !lower.contains("<image_description")
+        && !lower.contains("<extraction")
+        && !lower.contains("<open_field")
+}
+
 /// Collect all `<tag field="Name">text</tag>` blocks into a lowercased-name →
-/// text map. Tolerates repeated tags (last wins) and attribute casing.
+/// text map. Tolerates repeated tags (last wins) and attribute casing. An empty
+/// tag like `<extraction field="Place"></extraction>` is recorded with the
+/// empty string as its value; an absent key means the tag was never emitted.
+/// Callers distinguish the two via `contains_key` so "missing" (model broke
+/// format) and "empty" (model correctly had nothing to say) warn differently.
 fn collect_named_blocks(body: &str, tag: &str) -> HashMap<String, String> {
     let lower = body.to_ascii_lowercase();
     let open = format!("<{tag}");
@@ -1136,7 +1186,7 @@ fn collect_named_blocks(body: &str, tag: &str) -> HashMap<String, String> {
     out
 }
 
-/// Parse Call 3's validation XML into field-name → list of picked term strings.
+/// Parse validation's XML response into field-name → list of picked term strings.
 /// Each pick's `term` is returned verbatim; the **caller** stamps it with its
 /// cosine from the net (the model does not report similarity). Terms not present
 /// in that field's candidate set (case-insensitive, trimmed) are dropped as
@@ -1225,11 +1275,12 @@ fn extract_picks(block: &str) -> Vec<String> {
     out
 }
 
-/// Compose the Call-3 validation prompt. For each vocab field: the field name,
-/// its extracted text (from Call 1), an optional per-field `prompt` (e.g. user
-/// preferences), and a list of its candidate **terms only** — no cosine, no
-/// thesaurus badge, to avoid biasing the model toward internal scores. Ends with
-/// the fixed XML reply contract. Pure; built once per catalogue call.
+/// Compose the validation prompt. For each vocab field: the field name,
+/// its extracted text (from vision analysis), an optional per-field `prompt`
+/// (e.g. user preferences), and a list of its candidate **terms only** — no
+/// cosine, no thesaurus badge, to avoid biasing the model toward internal
+/// scores. Ends with the fixed XML reply contract. Pure; built once per
+/// catalogue call.
 fn build_validation_prompt(
     shortlists: &[(usize, &FieldSpec, &str, &[NetCandidate])],
     shortlist_count: usize,
@@ -1279,17 +1330,19 @@ pub async fn cancel_catalogue(
 }
 
 /// Default candidate count the embedding search returns per vocab field before
-/// Call 3 validation (the "net"). User-configurable via `Settings.vocabNetCount`.
-/// Kept generous so Call 3 has a wide net to reject from; the previous single-
+/// validation (the "net"). User-configurable via `Settings.vocabNetCount`. Kept
+/// generous so validation has a wide net to reject from; the previous single-
 /// description embedding's small fixed count (10) was a root cause of poor
 /// matches — the right term was often outside the window.
 const DEFAULT_VOCAB_NET_COUNT: usize = 20;
-/// Default final picks per vocab field after Call 3 validation. User-configurable
-/// via `Settings.vocabShortlistCount`.
+/// Default final picks per vocab field after validation. User-configurable via
+/// `Settings.vocabShortlistCount`.
 const DEFAULT_VOCAB_SHORTLIST_COUNT: usize = 3;
-/// Whether Call 3 (vision validation) runs by default. User-configurable via
-/// `Settings.call3Enabled`.
-const DEFAULT_CALL3_ENABLED: bool = true;
+/// Whether validation runs by default. User-configurable via
+/// `Settings.validationEnabled`. Note the frontend default is `false`
+/// (`src/app/defaults.ts`); this constant is only the Rust fallback when the
+/// frontend omits the flag.
+const DEFAULT_VALIDATION_ENABLED: bool = true;
 
 /// Resolve every controlled-vocabulary field via per-field embedding search.
 ///
@@ -1299,20 +1352,24 @@ const DEFAULT_CALL3_ENABLED: bool = true;
 /// `<extraction>` text in one batched call and searches that field's LanceDB
 /// tables with it. Results across sources/modalities are fused by **max cosine
 /// similarity**, and the top `net_count` candidates are kept (with their cosine)
-/// as the net for Call 3 (or directly truncated to `shortlist_count` when Call 3
-/// is off). No thesaurus tiebreak — candidate ranking is the embedding's alone,
-/// and final selection is Call 3's.
+/// as the net for validation (or directly truncated to `shortlist_count` when
+/// validation is off). No thesaurus tiebreak — candidate ranking is the
+/// embedding's alone, and final selection is validation's.
 ///
-/// Best-effort: an embed/search failure leaves the affected field with an empty
-/// net — surfaced in the UI as "no match" — never a hard failure of the whole
-/// call. A field whose `<extraction>` was empty yields no candidates and warns.
+/// Best-effort on the *search* leg (a missing LanceDB table leaves the field
+/// with an empty net, surfaced as "no match"), but the two embedding calls are
+/// hard failures: a failed `embed_texts` aborts the whole row (no candidates
+/// possible), and — since embedding providers must be multimodal — a failed
+/// `embed_image_with_retry` also aborts the row rather than silently degrading
+/// to text-only. A field whose `<extraction>` was empty yields no candidates
+/// and warns.
 async fn resolve_vocab_fields(
     embedding_provider: &crate::embeddings::EmbeddingProvider,
     fields: &[FieldSpec],
     extractions: &HashMap<String, String>,
     image: Option<&ImageData>,
     net_count: usize,
-) -> Vec<ResolvedVocab> {
+) -> Result<Vec<ResolvedVocab>, String> {
     let mut out: Vec<ResolvedVocab> = Vec::new();
     // Collect the per-field extraction texts to embed in ONE batched call.
     // (i, field) for vocab fields whose extraction is non-empty.
@@ -1336,37 +1393,30 @@ async fn resolve_vocab_fields(
         })
         .collect();
     if to_embed.is_empty() {
-        return out;
+        return Ok(out);
     }
 
-    // One batched embedding of all field extractions.
+    // One batched embedding of all field extractions. A failure here means no
+    // vocab candidates are possible — propagate as a hard row failure.
     let texts: Vec<String> = to_embed.iter().map(|(_, _, t)| t.clone()).collect();
-    let text_vectors = match crate::embeddings::embed_texts(embedding_provider, &texts).await {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => {
-            eprintln!(
-                "[artefact] per-field extraction embedding returned no vectors, skipping vocab"
-            );
-            return out;
-        }
-        Err(e) => {
-            eprintln!("[artefact] per-field extraction embedding failed, skipping vocab: {e}");
-            return out;
-        }
-    };
+    let text_vectors = crate::embeddings::embed_texts(embedding_provider, &texts)
+        .await
+        .map_err(|e| format!("per-field extraction embedding failed: {e}"))?;
+    if text_vectors.is_empty() {
+        return Err("per-field extraction embedding returned no vectors".to_string());
+    }
 
-    // Image embedding is optional/best-effort (only when the provider is
-    // declared multimodal); any failure just drops this signal — fields resolve
-    // text-only.
-    let image_vector = if embedding_provider.supports_image_input {
-        match image {
-            Some(img) => crate::embeddings::embed_image(embedding_provider, img)
+    // Image embedding is mandatory when an image is present (providers are
+    // multimodal). A network error is retried once inside the helper; any
+    // remaining failure hard-fails this row so the user sees the problem
+    // instead of silently getting text-only retrieval.
+    let image_vector = match image {
+        Some(img) => Some(
+            crate::embeddings::embed_image_with_retry(embedding_provider, img)
                 .await
-                .ok(),
-            None => None,
-        }
-    } else {
-        None
+                .map_err(|e| format!("image embedding failed: {}", e.message()))?,
+        ),
+        None => None,
     };
 
     for ((i, field, _text), text_vector) in to_embed.iter().zip(text_vectors.iter()) {
@@ -1388,8 +1438,9 @@ async fn resolve_vocab_fields(
             }
         }
         let mut ranked: Vec<NetCandidate> = fused.into_values().collect();
-        // Sort by cosine desc (stable on equal). No thesaurus tiebreak — Call 3
-        // owns final selection, and the user's per-field prompt guides it.
+        // Sort by cosine desc (stable on equal). No thesaurus tiebreak —
+        // validation owns final selection, and the user's per-field prompt
+        // guides it.
         ranked.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -1401,7 +1452,7 @@ async fn resolve_vocab_fields(
             candidates: ranked,
         });
     }
-    out
+    Ok(out)
 }
 
 /// Fold one ranked candidate list into the running max-cosine map, keeping each
@@ -1427,6 +1478,7 @@ fn fuse_by_max_cosine(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn catalogue_artefact(
     app: AppHandle,
     cancel_registry: State<'_, CancelRegistry>,
@@ -1435,23 +1487,24 @@ pub async fn catalogue_artefact(
     fields: Vec<FieldSpec>,
     artefact: ArtefactInput,
     embedding_provider: Option<crate::embeddings::EmbeddingProvider>,
-    // Candidates the embedding search returns per vocab field before Call 3
+    // Candidates the embedding search returns per vocab field before
     // validation. Frontend sends `netCount`; Tauri maps camelCase → snake_case.
     // An `Option<T>` command param is optional by default (absent → `None`),
     // so no `#[serde(default)]` is needed (that attribute is only valid on
     // struct fields, not function parameters).
     net_count: Option<usize>,
-    // Final picks per vocab field after Call 3 validation (or cosine top-N
-    // when Call 3 is off). Frontend sends `shortlistCount`.
+    // Final picks per vocab field after validation (or cosine top-N when
+    // validation is off). Frontend sends `shortlistCount`.
     shortlist_count: Option<usize>,
-    // Whether Call 3 (vision validation) runs. Frontend sends `call3Enabled`.
-    call3_enabled: Option<bool>,
+    // Whether validation runs. Frontend sends `validationEnabled`; Tauri maps
+    // camelCase → snake_case for command params (see `net_count` above).
+    validation_enabled: Option<bool>,
 ) -> Result<CatalogueResult, String> {
     let net_count = net_count.unwrap_or(DEFAULT_VOCAB_NET_COUNT).max(1);
     let shortlist_count = shortlist_count
         .unwrap_or(DEFAULT_VOCAB_SHORTLIST_COUNT)
         .clamp(1, net_count);
-    let call3_enabled = call3_enabled.unwrap_or(DEFAULT_CALL3_ENABLED);
+    let validation_enabled = validation_enabled.unwrap_or(DEFAULT_VALIDATION_ENABLED);
 
     // Read the image once (if present); both transports consume the same bytes.
     // The renderer is untrusted, so the absolute image path is validated to lie
@@ -1494,27 +1547,27 @@ pub async fn catalogue_artefact(
         }
     }
     let _guard = CancelGuard {
-        registry: &*cancel_registry,
+        registry: &cancel_registry,
         job_id: job_id.clone(),
     };
 
     // The whole per-row pipeline races the cancel signal as one unit, so
-    // Stop/Cancel works the same whether a row is mid-Call-1, mid-embed, or
-    // mid-Call-3. Dropping the future on cancel aborts its in-flight reqwest
-    // request (the client closes the connection on drop).
+    // Stop/Cancel works the same whether a row is mid-vision-analysis,
+    // mid-embed, or mid-validation. Dropping the future on cancel aborts its
+    // in-flight reqwest request (the client closes the connection on drop).
     //
     // Three steps feed one result:
-    //   - Call 1 (vision): XML description + per-vocab-field <extraction> +
+    //   - Vision analysis: XML description + per-vocab-field <extraction> +
     //     per-open-field <open_field>.
     //   - Embedding: each vocab field's extraction → candidate net (cosine).
-    //   - Call 3 (validation, optional, threaded): vision picks top-N from each
+    //   - Validation (optional, threaded): vision picks top-N from each
     //     field's net; when off, cosine top-N is used directly.
     let app_for_pipeline = app.clone();
     let pipeline = async move {
-        // --- Call 1: unified vision prompt (image attached here, once) ---
-        // Reused verbatim as the first turn of the Call-3 thread so the model
-        // keeps the image, the persona, and the <artefact_file> record in
-        // context while validating candidates.
+        // --- Vision analysis: unified prompt (image attached here, once) ---
+        // Reused verbatim as the first turn of the validation thread so the
+        // model keeps the image, the persona, and the <artefact_file> record
+        // in context while validating candidates.
         let unified_prompt = build_unified_prompt(
             &artefact.vision_system_prompt,
             &artefact.artefact_columns,
@@ -1532,9 +1585,27 @@ pub async fn catalogue_artefact(
 
         let parsed = parse_unified_response(&content1, &fields);
 
+        // Fail loudly when vision analysis ignored the contract entirely. A 200
+        // with no <image_description>/<extraction>/<open_field> is the signature
+        // of a wrong model (free-router landing on a moderation model like
+        // "User Safety: safe", or a non-instruct model). Surfacing it as a hard,
+        // named error beats silent empty fields + vague per-field warnings, and
+        // lets the renderer's fail-fast path stop the run instead of dragging
+        // every remaining row through it.
+        if looks_like_unrecognized_response(&content1) {
+            return Err(format!(
+                "Vision analysis returned an unrecognized response (no XML tags). \
+                 The configured model {:?} may not be vision- or instruction-capable — \
+                 check the active provider's model (avoid free/auto routers and \
+                 moderation models). Response was: {:?}",
+                provider.model,
+                content1.chars().take(200).collect::<String>()
+            ));
+        }
+
         // --- Embedding: per-field extraction → candidate net ---
         // Only when there's at least one vocab field with a usable source AND an
-        // embedding provider. Otherwise Call 3 is pointless and is skipped.
+        // embedding provider. Otherwise validation is pointless and is skipped.
         let has_vocab = fields
             .iter()
             .any(|f| f.field_type == "vocab" && !f.vocab_source_ids.is_empty());
@@ -1548,7 +1619,7 @@ pub async fn catalogue_artefact(
                         image.as_ref(),
                         net_count,
                     )
-                    .await
+                    .await?
                 }
                 None => Vec::new(),
             }
@@ -1556,16 +1627,17 @@ pub async fn catalogue_artefact(
             Vec::new()
         };
 
-        // --- Call 3: validation (optional), threaded & trimmed from Call 1 ---
-        // The assistant turn replays a TRIMMED Call-1 answer: image_description
-        // + extractions only. The <open_field> answers are irrelevant to vocab
-        // validation and would only add tokens. The image is re-sent via the
-        // replayed Call-1 user turn because vision-grounded disambiguation is
-        // Call 3's purpose; this is the bulk of the token cost and is a
-        // deliberate, one-line-reversible decision.
+        // --- Validation (optional), threaded & trimmed from vision analysis ---
+        // The assistant turn replays a TRIMMED vision-analysis answer:
+        // image_description + extractions only. The <open_field> answers are
+        // irrelevant to vocab validation and would only add tokens. The image
+        // is re-sent via the replayed vision-analysis user turn because
+        // vision-grounded disambiguation is validation's purpose; this is the
+        // bulk of the token cost and is a deliberate, one-line-reversible
+        // decision.
         let mut vocab_suggestions: HashMap<String, Vec<Suggestion>> = HashMap::new();
         let mut vocab_warnings: Vec<String> = Vec::new();
-        if call3_enabled && has_vocab && !resolved_vocab.is_empty() {
+        if validation_enabled && has_vocab && !resolved_vocab.is_empty() {
             // Build the per-field shortlist references for the prompt.
             let shortlist_refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> = resolved_vocab
                 .iter()
@@ -1599,7 +1671,7 @@ pub async fn catalogue_artefact(
                         image: None,
                     },
                 ];
-                let (content3, _call3_group) =
+                let (validation_content, _validation_group) =
                     do_completion(&app_for_pipeline, &provider, "Vocab Validation", &turns3)
                         .await?;
 
@@ -1613,7 +1685,7 @@ pub async fn catalogue_artefact(
                     );
                 }
                 let (picks_by_field, mut pick_warnings) =
-                    parse_validation_response(&content3, &field_candidates);
+                    parse_validation_response(&validation_content, &field_candidates);
                 vocab_warnings.append(&mut pick_warnings);
 
                 // Stamp each pick with its cosine from the net, truncate to the
@@ -1625,7 +1697,7 @@ pub async fn catalogue_artefact(
                                 c.term
                                     .trim()
                                     .eq_ignore_ascii_case(term.trim())
-                                    .then(|| c.score)
+                                    .then_some(c.score)
                             })
                         } else {
                             None
@@ -1668,7 +1740,7 @@ pub async fn catalogue_artefact(
                 }
             }
         } else if has_vocab {
-            // Call 3 disabled: use cosine top-N from each net directly.
+            // Validation disabled: use cosine top-N from each net directly.
             for rv in &resolved_vocab {
                 if let Some(field) = fields.get(rv.field_index) {
                     let sugs: Vec<Suggestion> = rv
@@ -1721,7 +1793,7 @@ pub async fn catalogue_artefact(
     if !warnings.is_empty() {
         log_stage(
             &app,
-            VisionStageEvent {
+            PipelineStageEvent {
                 stage: "done",
                 job_group: String::new(),
                 status: "ok",
@@ -1745,10 +1817,11 @@ pub async fn catalogue_artefact(
     Ok(result)
 }
 
-/// Trim Call 1's XML answer down to just the parts Call 3 needs: the
-/// `<image_description>` and every `<extraction>` block. `<open_field>` answers
-/// are dropped (irrelevant to vocab validation). Falls back to the full answer
-/// if parsing yields nothing, so Call 3 always has *some* assistant context.
+/// Trim vision analysis's XML answer down to just the parts validation needs:
+/// the `<image_description>` and every `<extraction>` block. `<open_field>`
+/// answers are dropped (irrelevant to vocab validation). Falls back to the full
+/// answer if parsing yields nothing, so validation always has *some* assistant
+/// context.
 fn trim_for_validation(content1: &str) -> String {
     let body = strip_code_fence(content1);
     let mut out = Vec::new();
@@ -1780,11 +1853,11 @@ fn trim_for_validation(content1: &str) -> String {
     }
 }
 
-/// Assemble the unified Call-1 prompt exactly as `catalogue_artefact` would send
-/// it as its first user turn, without making any network call. Used by the
-/// Artefact File tab's prompt preview. The row's source values are produced at
-/// parse time, so the record is shown as a placeholder; the image attaches as a
-/// separate content block in real runs.
+/// Assemble the unified vision-analysis prompt exactly as `catalogue_artefact`
+/// would send it as its first user turn, without making any network call. Used
+/// by the Artefact File tab's prompt preview. The row's source values are
+/// produced at parse time, so the record is shown as a placeholder; the image
+/// attaches as a separate content block in real runs.
 #[tauri::command]
 pub fn build_vision_prompt_preview(
     columns: Vec<ArtefactColumnSpec>,
@@ -2015,6 +2088,90 @@ mod tests {
     }
 
     #[test]
+    fn parse_unified_warns_empty_distinct_from_missing_extraction() {
+        // Material's tag is present but blank (the model correctly had nothing
+        // to say); Place's tag is absent entirely (the model broke format).
+        // Both record "" in `extractions`, but the warning wording differs.
+        let content = r#"<image_description>A bangle.</image_description>
+<extraction field="Material"></extraction>"#;
+        let fields = vec![vocab_field("Material"), vocab_field("Place")];
+        let parsed = parse_unified_response(content, &fields);
+        assert_eq!(parsed.extractions.get("Material").unwrap(), "");
+        assert_eq!(parsed.extractions.get("Place").unwrap(), "");
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("Material: <extraction> empty") && !w.contains("missing")));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("Place: <extraction> missing") && !w.contains("empty")));
+    }
+
+    #[test]
+    fn parse_unified_warns_empty_distinct_from_missing_open_field() {
+        // Same distinction for the <open_field> path.
+        let content = r#"<image_description>A bangle.</image_description>
+<open_field field="Physical Description"></open_field>"#;
+        let fields = vec![
+            open_field("Physical Description"),
+            open_field("Date/Period"),
+        ];
+        let parsed = parse_unified_response(content, &fields);
+        assert_eq!(parsed.open_values.get("Physical Description").unwrap(), "");
+        assert_eq!(parsed.open_values.get("Date/Period").unwrap(), "");
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("Physical Description: <open_field> empty")
+                && !w.contains("missing")));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("Date/Period: <open_field> missing") && !w.contains("empty")));
+    }
+
+    #[test]
+    fn parse_unified_populated_field_emits_no_warning() {
+        // A populated field produces no warning; only the absent/empty ones do.
+        let content = r#"<image_description>A bangle.</image_description>
+<extraction field="Material">ceramic</extraction>
+<open_field field="Date/Period">19th century</open_field>"#;
+        let fields = vec![vocab_field("Material"), open_field("Date/Period")];
+        let parsed = parse_unified_response(content, &fields);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn unrecognized_response_false_for_full_contract() {
+        let content = r#"<image_description>A bronze bangle.</image_description>
+<extraction field="Material">bronze</extraction>
+<open_field field="Date/Period">14th century</open_field>"#;
+        assert!(!looks_like_unrecognized_response(content));
+    }
+
+    #[test]
+    fn unrecognized_response_true_for_safety_model_output() {
+        // The reported case: a moderation model replying with its native
+        // verdict instead of the XML contract.
+        assert!(looks_like_unrecognized_response("User Safety: safe"));
+    }
+
+    #[test]
+    fn unrecognized_response_true_for_empty_content() {
+        assert!(looks_like_unrecognized_response(""));
+    }
+
+    #[test]
+    fn unrecognized_response_false_for_partial_but_shaped() {
+        // Only one tag family present — partial, but still contract-shaped.
+        // These must NOT be flagged here; the per-field warnings in
+        // parse_unified_response already cover them.
+        let content = r#"<extraction field="Material">bronze</extraction>"#;
+        assert!(!looks_like_unrecognized_response(content));
+    }
+
+    #[test]
     fn parse_unified_handles_multiline_values_with_special_chars() {
         // Newlines, quotes, ampersands in an extraction value — the tag-walker
         // reads raw inner text between the tags, so these pass through as-is.
@@ -2147,6 +2304,25 @@ Line two with "quotes" & ampersand</extraction>"#;
     }
 
     #[test]
+    fn unified_prompt_enumeration_leads_with_image_description() {
+        // The concrete field enumeration — the list the model actually follows —
+        // must lead with <image_description>, otherwise the tag is dropped from
+        // every response. It must appear before the first per-field tag.
+        let fields = vec![vocab_field("Material"), open_field("Date/Period")];
+        let prompt = build_unified_prompt("", &[], &fields, &json!({}), true);
+        let desc = prompt
+            .find("<image_description>")
+            .expect("enumeration must include <image_description>");
+        let first_field = prompt
+            .find("<extraction field=\"Material\">")
+            .expect("field enumeration present");
+        assert!(
+            desc < first_field,
+            "<image_description> must precede the first per-field tag"
+        );
+    }
+
+    #[test]
     fn unified_prompt_field_enumeration_preserves_config_order() {
         let fields = vec![
             vocab_field("Material"),
@@ -2161,19 +2337,68 @@ Line two with "quotes" & ampersand</extraction>"#;
     }
 
     #[test]
-    fn visible_record_xml_sanitizes_column_names() {
+    fn xml_escape_attr_escapes_quotes_and_metacharacters() {
+        // Element-content escapes (`& < >`) plus the two quote types an
+        // attribute value requires. Normal text passes through untouched.
+        assert_eq!(xml_escape_attr("normal"), "normal");
+        assert_eq!(xml_escape_attr("a & b"), "a &amp; b");
+        assert_eq!(xml_escape_attr("a < b > c"), "a &lt; b &gt; c");
+        assert_eq!(xml_escape_attr(r#"say "hi""#), "say &quot;hi&quot;");
+        assert_eq!(xml_escape_attr("it's"), "it&apos;s");
+    }
+
+    #[test]
+    fn field_name_with_double_quote_cannot_break_out_of_attribute() {
+        // A field name containing `"` must be escaped so it can't terminate
+        // the `field="…"` attribute and inject a spurious tag into the
+        // enumeration (prompt-structure corruption).
+        let fields = vec![vocab_field(r#"Material"/>evil"#)];
+        let prompt = build_unified_prompt("", &[], &fields, &json!({}), true);
+        // The `"` in the name is escaped to &quot; inside the attribute.
+        assert!(
+            prompt.contains(r#"<extraction field="Material&quot;/&gt;evil">"#),
+            "field name should be attribute-escaped, got: {prompt}"
+        );
+        // No early self-close + injected tag — the break-out sequence `"/>`
+        // from the raw name must NOT appear verbatim.
+        assert!(
+            !prompt.contains(r#"Material"/>"#),
+            "raw double-quote break-out leaked into prompt: {prompt}"
+        );
+        // Exactly one <extraction> line (no injected second tag).
+        assert_eq!(
+            prompt.matches("<extraction ").count(),
+            1,
+            "expected exactly one extraction tag, got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn open_field_name_with_double_quote_cannot_break_out_of_attribute() {
+        // Same guard for the <open_field> path.
+        let fields = vec![open_field(r#"Date"/>x"#)];
+        let prompt = build_unified_prompt("", &[], &fields, &json!({}), true);
+        assert!(prompt.contains(r#"<open_field field="Date&quot;/&gt;x">"#));
+        assert!(!prompt.contains(r#"Date"/>"#));
+        assert_eq!(prompt.matches("<open_field ").count(), 1);
+    }
+
+    #[test]
+    fn record_xml_sanitizes_column_names() {
         // Column names with spaces/punctuation/apostrophes → valid XML tags.
         let record = json!({
             "Object Name": "Bowl",
             "Curator's notes": "rare",
             "Date/Period": "Tang",
-            "ID": "should-be-stripped"
+            "ID": "ID-VAL"
         });
-        let xml = visible_record_xml(&record);
+        let xml = record_xml(&record);
         assert!(xml.contains("<artefact_file>"));
-        // ID-like column filtered out.
-        assert!(!xml.contains("should-be-stripped"));
-        // Sanitized tags contain the values.
+        // Every configured column reaches the model verbatim — including
+        // ID-named columns (the old name-based filter was removed because the
+        // parser is config-strict and silently dropping a user-configured
+        // column was a bug).
+        assert!(xml.contains(">ID-VAL<"));
         assert!(xml.contains(">Bowl<"));
         assert!(xml.contains(">rare<"));
         assert!(xml.contains(">Tang<"));
@@ -2188,18 +2413,18 @@ Line two with "quotes" & ampersand</extraction>"#;
     }
 
     #[test]
-    fn visible_record_xml_dedupes_collision() {
+    fn record_xml_dedupes_collision() {
         // "A-B" and "A B" both sanitize toward "A_B" — the second gets a suffix
         // so neither value is lost.
         let record = json!({ "A-B": "first", "A B": "second" });
-        let xml = visible_record_xml(&record);
+        let xml = record_xml(&record);
         assert!(xml.contains(">first<"));
         assert!(xml.contains(">second<"));
     }
 
     #[test]
     fn build_validation_prompt_lists_pure_terms_no_scores() {
-        let fields = vec![vocab_field("Material")];
+        let fields = [vocab_field("Material")];
         let candidates = vec![
             NetCandidate {
                 term: "bronze".to_string(),
@@ -2227,7 +2452,7 @@ Line two with "quotes" & ampersand</extraction>"#;
 
     #[test]
     fn build_validation_prompt_injects_field_guidance() {
-        let fields = vec![FieldSpec {
+        let fields = [FieldSpec {
             name: "Obj./Work type".to_string(),
             field_type: "vocab".to_string(),
             prompt: "Prefer the broadest applicable type.".to_string(),

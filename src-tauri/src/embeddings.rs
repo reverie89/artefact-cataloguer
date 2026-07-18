@@ -94,10 +94,14 @@ pub struct EmbeddingProvider {
     pub model: String,
     #[serde(rename = "apiFormat", default)]
     pub api_format: EmbeddingApiFormat,
-    /// User-declared capability, checked before attempting the M5 image-
-    /// embedding call (see `ai::retrieve_shortlists`). A hint, not a
-    /// guarantee — a rejected image call still falls back to text-only.
+    /// User-declared capability hint: whether this provider's embedding model
+    /// accepts image input. A hint, not a guarantee — a rejected image call
+    /// still surfaces as a normal `Err` so the caller can fall back to
+    /// text-only for that row. Deserialized from settings and documented as the
+    /// precondition on [`embed_image`]; the caller-side gating check that
+    /// consumes it hasn't landed yet, hence `allow(dead_code)`.
     #[serde(rename = "supportsImageInput", default)]
+    #[allow(dead_code)]
     pub supports_image_input: bool,
 }
 
@@ -220,12 +224,12 @@ pub(crate) async fn embed_texts(
 /// fall back to text-only retrieval for that row.
 ///
 /// Reuses the same base64 image encoding used for chat completions
-/// (`ai::build_completion_body`), but targets the embeddings endpoint: an
-/// `image_url` content part for OpenAI-shaped providers, an `inline_data`
-/// part for Gemini-shaped ones — the same content-block shapes those APIs use
-/// for chat images, since most OpenAI-compatible multimodal-embedding servers
-/// (self-hosted CLIP-style servers, etc.) accept the identical shape on
-/// `/embeddings`.
+/// (`ai::build_completion_body`), but targets the embeddings endpoint. The
+/// input shape differs from chat's `messages[].content`: OpenAI-compatible
+/// multimodal-embedding endpoints expect each `input` element to be a
+/// message-object with a `content` array (the same wrapper chat uses, but
+/// nested under `input`, not `messages`); Gemini uses its native
+/// `batchEmbedContents` `requests[].content.parts[].inline_data` shape.
 pub(crate) async fn embed_image(
     provider: &EmbeddingProvider,
     image: &ImageData,
@@ -237,9 +241,15 @@ pub(crate) async fn embed_image(
         EmbeddingApiFormat::OpenAi => {
             let url = base.clone();
             let data_url = format!("data:{};base64,{}", image.mime, b64);
+            // OpenAI-compatible multimodal-embeddings input: each `input`
+            // element is a message-object whose `content` array holds the
+            // `image_url` part (the same `content: [...]` shape chat user
+            // messages use in ai.rs). A bare `{type,image_url}` element is
+            // rejected by gateways that validate against the OpenAI union
+            // schema — the `content` wrapper is required.
             let body = serde_json::json!({
                 "model": provider.model,
-                "input": [{ "type": "image_url", "image_url": { "url": data_url } }]
+                "input": [{ "content": [{ "type": "image_url", "image_url": { "url": data_url } }] }]
             });
             let resp = client
                 .post(&url)
@@ -309,6 +319,80 @@ pub(crate) async fn embed_image(
                 .map(|f| f as f32)
                 .collect())
         }
+    }
+}
+
+/// A retriable image-embed attempt: `embed_image` returns a plain `String`
+/// error (no retry semantics), so callers that want a single best-effort retry
+/// on transient failures use this wrapper instead. The returned error records
+/// whether a retry happened, so the user-facing message can surface "failed
+/// after retry" rather than masking the retry.
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum ImageEmbedError {
+    /// All attempts failed. `retries` is how many retries were attempted
+    /// before giving up (0 = failed on the first try, 1 = retried once then
+    /// failed again). `message` is the final failure's error string.
+    Failed { message: String, retries: u32 },
+}
+
+impl std::fmt::Display for ImageEmbedError {
+    /// User-facing message for the pipeline log/row error. Delegates to
+    /// [`message`](Self::message) so `Display`, logging, and the explicit
+    /// `.message()` call site all agree on the wording.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl ImageEmbedError {
+    /// User-facing message for the pipeline log/row error.
+    pub fn message(&self) -> String {
+        match self {
+            ImageEmbedError::Failed {
+                message,
+                retries: 0,
+            } => message.clone(),
+            ImageEmbedError::Failed {
+                message,
+                retries: _,
+            } => {
+                format!("{message} (after retry)")
+            }
+        }
+    }
+}
+
+/// True if an `embed_image` error string looks like a transient/network
+/// failure worth one retry: a request or response-read failure, or any HTTP
+/// 5xx. Parse errors, 4xx, and "missing embedding" are deterministic and
+/// won't succeed on retry, so they are not retried.
+fn is_transient_embed_error(err: &str) -> bool {
+    err.contains("request failed") || err.contains("response read failed") || err.contains("HTTP 5")
+}
+
+/// Embed one image with a single retry on a transient failure. Used by the
+/// multimodal vocab pipeline (`ai::resolve_vocab_fields`), where an image
+/// embed hard-fails the row rather than silently degrading to text-only
+/// retrieval — the one retry absorbs a flaky-network blip before surfacing
+/// the failure.
+pub(crate) async fn embed_image_with_retry(
+    provider: &EmbeddingProvider,
+    image: &ImageData,
+) -> Result<Vec<f32>, ImageEmbedError> {
+    let first = embed_image(provider, image).await;
+    match first {
+        Ok(v) => Ok(v),
+        Err(e) if is_transient_embed_error(&e) => match embed_image(provider, image).await {
+            Ok(v) => Ok(v),
+            Err(final_err) => Err(ImageEmbedError::Failed {
+                message: final_err,
+                retries: 1,
+            }),
+        },
+        Err(e) => Err(ImageEmbedError::Failed {
+            message: e,
+            retries: 0,
+        }),
     }
 }
 
@@ -531,6 +615,21 @@ struct SyncProgressEvent {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Per-file breakdown of the source-wide `rows_done`/`rows_total`, keyed by
+    /// filename. `total` is how many rows of that file actually need a fresh
+    /// embed this pass (post-reuse-diff — not the raw parse count); `done` is
+    /// how many of those have been embedded so far. Absent on a source with one
+    /// file (no extra information beyond the source-wide totals).
+    #[serde(rename = "fileProgress", skip_serializing_if = "Option::is_none")]
+    file_progress: Option<HashMap<String, FileProgress>>,
+}
+
+#[derive(Serialize, Clone)]
+struct FileProgress {
+    #[serde(rename = "rowsDone")]
+    rows_done: usize,
+    #[serde(rename = "rowsTotal")]
+    rows_total: usize,
 }
 
 /// Result of `diff_rows`: the deduped rows to sync, plus two per-file display
@@ -707,7 +806,37 @@ async fn run_sync(
     }
 
     let total = to_embed.len();
-    let emit = |done: usize, status: &'static str, error: Option<String>| {
+    // Per-file breakdown of `to_embed`: how many rows of each staged file need
+    // a fresh embed this pass (post-reuse-diff — not the raw parse count).
+    // Zero-fill from `diffed.found` so a file with nothing to embed still
+    // appears as 0/0 rather than dropping out of the per-file view mid-sync.
+    let to_embed_by_file: HashMap<String, usize> = {
+        let mut m: HashMap<String, usize> = diffed.found.keys().map(|f| (f.clone(), 0)).collect();
+        for row in &to_embed {
+            *m.entry(row.source_file.clone()).or_insert(0) += 1;
+        }
+        m
+    };
+    let mut done_by_file: HashMap<String, usize> =
+        to_embed_by_file.keys().map(|f| (f.clone(), 0)).collect();
+    let emit = |done: usize,
+                status: &'static str,
+                error: Option<String>,
+                done_by_file: &HashMap<String, usize>| {
+        let file_progress = Some(
+            to_embed_by_file
+                .iter()
+                .map(|(f, &t)| {
+                    (
+                        f.clone(),
+                        FileProgress {
+                            rows_done: *done_by_file.get(f).unwrap_or(&0),
+                            rows_total: t,
+                        },
+                    )
+                })
+                .collect(),
+        );
         let _ = app.emit(
             SYNC_EVENT,
             SyncProgressEvent {
@@ -716,10 +845,11 @@ async fn run_sync(
                 rows_total: total,
                 status,
                 error,
+                file_progress,
             },
         );
     };
-    emit(0, "syncing", None);
+    emit(0, "syncing", None, &done_by_file);
 
     let mut table: Option<LanceDbTable> = None;
     let mut dimensions: u32 = 0;
@@ -727,14 +857,19 @@ async fn run_sync(
 
     for chunk in to_embed.chunks(EMBED_BATCH_SIZE) {
         if cancel_flag.load(Ordering::SeqCst) {
-            emit(embedded, "error", Some("cancelled".to_string()));
+            emit(
+                embedded,
+                "error",
+                Some("cancelled".to_string()),
+                &done_by_file,
+            );
             return Err("__ac_vocab_sync_cancelled__".to_string());
         }
         let texts: Vec<String> = chunk.iter().map(|r| r.embed_text.clone()).collect();
         let vectors = match embed_texts(provider, &texts).await {
             Ok(v) => v,
             Err(e) => {
-                emit(embedded, "error", Some(e.clone()));
+                emit(embedded, "error", Some(e.clone()), &done_by_file);
                 return Err(e);
             }
         };
@@ -742,7 +877,7 @@ async fn run_sync(
             dimensions = vectors.first().map(|v| v.len()).unwrap_or(0) as u32;
             if dimensions == 0 {
                 let e = "embedding call returned no vector".to_string();
-                emit(embedded, "error", Some(e.clone()));
+                emit(embedded, "error", Some(e.clone()), &done_by_file);
                 return Err(e);
             }
         }
@@ -791,7 +926,10 @@ async fn run_sync(
         });
 
         embedded += chunk.len();
-        emit(embedded, "syncing", None);
+        for r in chunk {
+            *done_by_file.entry(r.source_file.clone()).or_insert(0) += 1;
+        }
+        emit(embedded, "syncing", None, &done_by_file);
     }
 
     // Delete rows whose content is gone, and prune per removed rows even if
@@ -837,30 +975,29 @@ async fn run_sync(
 
     // Dimensions weren't learned this pass if every row was reused — read them
     // back from the table's schema so the caller can still record them.
-    if dimensions == 0 {
-        if db
+    if dimensions == 0
+        && db
             .table_names()
             .execute()
             .await
             .map_err(|e| e.to_string())?
             .contains(&name)
-        {
-            let t = db
-                .open_table(&name)
-                .execute()
-                .await
-                .map_err(|e| e.to_string())?;
-            if let Ok(schema) = t.schema().await {
-                if let Ok(f) = schema.field_with_name("vector") {
-                    if let DataType::FixedSizeList(_, w) = f.data_type() {
-                        dimensions = *w as u32;
-                    }
+    {
+        let t = db
+            .open_table(&name)
+            .execute()
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Ok(schema) = t.schema().await {
+            if let Ok(f) = schema.field_with_name("vector") {
+                if let DataType::FixedSizeList(_, w) = f.data_type() {
+                    dimensions = *w as u32;
                 }
             }
         }
     }
 
-    emit(embedded, "done", None);
+    emit(embedded, "done", None, &done_by_file);
     Ok(SyncResult {
         rows_embedded: embedded,
         rows_reused: reused,

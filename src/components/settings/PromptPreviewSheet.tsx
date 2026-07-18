@@ -1,6 +1,7 @@
 // Right-side slide-out sheet previewing the exact prompt message sent for each
 // parsing job, including all hardcoded framing. Shared by the Cataloguing
-// Fields tab (Call 2 prompt) and the Artefact File tab (Call 1 vision prompt).
+// Fields tab (validation prompt) and the Artefact File tab (vision-analysis
+// prompt).
 //
 // Built on the shadcn Sheet (Radix), which handles focus trapping, scroll
 // locking, Esc, and backdrop dismiss. The text is assembled by the same Rust

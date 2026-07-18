@@ -2,17 +2,17 @@
 //!
 //! Three concerns, all file paths resolved relative to the running binary
 //! (the exe's directory) so settings and temp images live beside the app:
-//!   * `state`    — load/save the single settings.json beside the exe
-//!   * `images`   — write extracted spreadsheet images to <exedir>/tmp/...,
-//!                  wiping that subtree on startup and on app quit
-//!   * `ai`       — three-step XML cataloguing pipeline (Call 1 vision +
-//!                  extraction → embedding search → optional Call 3 vocab
-//!                  validation); keys never touch the renderer, so there is
-//!                  no CORS
+//!   * `state` — load/save the single settings.json beside the exe
+//!   * `images` — write extracted spreadsheet images to <exedir>/tmp/...,
+//!     wiping that subtree on startup and on app quit
+//!   * `ai` — three-step XML cataloguing pipeline (Call 1 vision +
+//!     extraction → embedding search → optional Call 3 vocab validation);
+//!     keys never touch the renderer, so there is no CORS
 
 mod ai;
 mod embeddings;
 mod images;
+mod secrets;
 mod settings;
 mod vocab_files;
 

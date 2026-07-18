@@ -24,12 +24,19 @@ export interface StagedVocabFile {
 /** Progress/outcome of one `sync_vocab_source` run, emitted on the
  *  "ac-vocab-sync" event once per completed batch — mirrors the
  *  VisionStageEvent bridge in App.tsx for the existing "ac-logs" stream. */
+export interface VocabFileProgress {
+  rowsDone: number;
+  rowsTotal: number;
+}
 export interface VocabSyncEvent {
   sourceId: string;
   rowsDone: number;
   rowsTotal: number;
   status: "syncing" | "done" | "error";
   error?: string;
+  /** Per-file breakdown of `rowsDone`/`rowsTotal`, keyed by filename. Absent
+   *  on a single-file source (no extra information beyond the source totals). */
+  fileProgress?: Record<string, VocabFileProgress>;
 }
 
 /** Final tally returned when `sync_vocab_source` resolves. */
