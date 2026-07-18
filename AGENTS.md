@@ -36,6 +36,14 @@ Any plan that changes visible layout or a user flow must include an ASCII wirefr
 
 Use box-drawing / plain-text mockups that render in the terminal and diff cleanly (no binary images, no external mockup links). Pure refactors of existing markup with no visible change, and token-only or copy-only tweaks, are exempt.
 
+### Pipeline Diagram
+
+The end-to-end catalogue pipeline is documented as a mermaid diagram under the "Cataloguing pipeline" heading in `README.md`. It is the single source of truth for the pipeline's shape.
+
+Any plan that changes the pipeline — adding/removing/reordering a stage, flipping a step between optional and required, changing a gate condition, renaming a settings key that appears in the diagram, or altering what reaches the model — MUST include an update to that mermaid block as an explicit plan step. The plan should show the corrected mermaid source so the change is reviewable in totality, not reconstructed after implementation.
+
+Pure refactors with no pipeline-shape change (renaming an internal function, adjusting an HTTP timeout, tightening error messages) are exempt.
+
 ## Frontend Guidelines
 
 - Use React function components and hooks consistent with the existing codebase.
@@ -62,7 +70,7 @@ The app's visual language is **shadcn/ui (new-york style) + Tailwind CSS v4 + Ra
 
 Apply the engineering principles to visual decisions:
 
-- **DRY**: every control lives once as a shadcn primitive in `src/components/ui/` and is composed, never rebuilt. A labeled form field is `FieldInput`/`FieldTextarea`/`FieldSelect`/`Field` in `components/settings/FormControls.tsx` — reuse these wherever a form appears (Providers, Artefact File, Fields tabs) so the form UI is identical wherever it's reused. Do not hand-roll `<label><input/></label>` markup inline.
+- **DRY**: every control lives once as a shadcn primitive in `src/components/ui/` and is composed, never rebuilt. A labeled form field is `FieldInput`/`FieldTextarea`/`FieldSelect`/`Field` in `components/settings/FormControls.tsx` — reuse these wherever a form appears (Providers, Artefact File, Fields tabs) so the form UI is identical wherever it's reused. Do not hand-roll `<label><input/></label>` markup inline. Component placement follows a four-tier taxonomy by domain coupling: `ui/` = shadcn-generated primitives only (stock or `cva`-extended); `common/` = generic, domain-free composites that wrap primitives (`ConfirmDialog`, `ImageLightbox` — no `AppState`/domain imports); `main/` = main-screen feature components; `settings/` = settings-screen components + `FormControls.tsx`. Generic React hooks live in `src/hooks/`, never `components/`.
 - **KISS**: the stack is Tailwind utility classes + shadcn primitives, loaded once in `main.tsx` via `globals.css`. Use one control standard — the shadcn `Button` sizes (`sm`/`default`/`lg`/`icon`) — instead of overriding heights per use. Do not add a second component library, CSS-in-JS, or a hand-written CSS layer.
 - **SOLID**: each shadcn primitive and its variants express one intent — `Button` variants (`default`/`secondary`/`outline`/`ghost`/`destructive`/`link`), `Badge` variants (`default`/`secondary`/`destructive`/`outline`). Do not overload a component with an unrelated job; pick the right primitive or variant.
 - **YAGNI**: add a new shadcn primitive (`npx shadcn@latest add <name>`) only when it is genuinely reused, not for a single one-off. Do not introduce icon libraries beyond `lucide-react` or font families beyond the system stack.
