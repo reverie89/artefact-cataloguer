@@ -15,6 +15,7 @@ npm-debug.log*
 *.swp
 *.swo
 *.claude
+*.zcode
 
 # OS
 .DS_Store
