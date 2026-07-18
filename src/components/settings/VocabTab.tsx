@@ -64,7 +64,7 @@ export function VocabTab({ state, actions }: Props) {
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
         Manage the vocabulary sources fields can draw terms from. A source can hold multiple files; its terms are embedded
-        into a local index (configure the embedding model in Settings → AI Provider) so cataloguing sends a short, relevant
+        into a local index (configure the embedding model in Settings → Model Providers) so cataloguing sends a short, relevant
         shortlist instead of the whole source. Click a row to rename, add files, or sync.
       </div>
 
@@ -86,17 +86,17 @@ export function VocabTab({ state, actions }: Props) {
             value={String(settings.vocabShortlistCount)}
             onChange={(e) => actions.setVocabShortlistCount(Number(e.target.value))}
             type="number"
-            desc="Final picks per field after Call 3 (≤ net count)."
+            desc="Final picks per field after validation (≤ net count)."
           />
         </div>
         <Field
-          label="Call 3 (AI validation)"
+          label="Validation"
           desc="Validate the net candidates with the vision model using the image. Turn off to use cosine top-N directly (faster, less accurate)."
           className="px-4"
         >
           <Segmented
-            value={settings.call3Enabled ? "on" : "off"}
-            onChange={(v) => actions.setCall3Enabled(v === "on")}
+            value={settings.validationEnabled ? "on" : "off"}
+            onChange={(v) => actions.setValidationEnabled(v === "on")}
             options={[
               { value: "on", label: "On" },
               { value: "off", label: "Off" },
@@ -116,7 +116,7 @@ export function VocabTab({ state, actions }: Props) {
             variant="outline"
             size="sm"
             disabled={anySyncing || !settings.activeEmbeddingProvider || !live.vocabSources.some((v) => v.files.length > 0)}
-            title={!settings.activeEmbeddingProvider ? "Add and activate an embedding provider in Settings → AI Provider first" : undefined}
+            title={!settings.activeEmbeddingProvider ? "Add and activate an embedding provider in Settings → Model Providers first" : undefined}
             className="text-muted-foreground"
           >
             Sync all
@@ -181,7 +181,7 @@ interface SortableVocabRowProps {
   dirty: boolean;
   cardStatus: SaveState;
   cardError?: string;
-  syncProgress?: { rowsDone: number; rowsTotal: number };
+  syncProgress?: { rowsDone: number; rowsTotal: number; fileProgress?: Record<string, { rowsDone: number; rowsTotal: number }> };
   liveFields: { id: string; name: string; vocabSources?: string[] }[];
   hasEmbeddingProvider: boolean;
   actions: AppActions;
@@ -272,34 +272,51 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
                 </div>
               ) : (
                 <div className="flex flex-col gap-1.5 p-1.5" onClick={(e) => e.stopPropagation()}>
-                  {vs.files.map((f) => (
-                    <div key={f.filename} className="bg-card flex items-center gap-2 rounded border px-2.5 py-1.5 text-[13px]">
-                      <span className="min-w-0 flex-1 truncate">{f.filename}</span>
-                      <span className="text-muted-foreground shrink-0">
-                        {fmtBytes(f.sizeBytes)}
-                        {fmtRowCounts(f, vs.embedding.status)}
-                        {" "}· added {f.addedDate}
-                      </span>
-                      <Button
-                        onClick={() => void actions.downloadVocabFile(vs.id, f.filename)}
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground size-6 shrink-0"
-                        title="Download"
-                      >
-                        <Download className="size-3" />
-                      </Button>
-                      <Button
-                        onClick={() => void actions.removeFileFromSource(vs.id, f.filename)}
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground hover:text-destructive size-6 shrink-0"
-                        title="Remove"
-                      >
-                        <X className="size-3" />
-                      </Button>
-                    </div>
-                  ))}
+                  {vs.files.map((f) => {
+                    const fp = syncing ? syncProgress?.fileProgress?.[f.filename] : undefined;
+                    return (
+                      <div key={f.filename} className="bg-card flex items-center gap-2 rounded border px-2.5 py-1.5 text-[13px]">
+                        <span className="min-w-0 flex-1 truncate">{f.filename}</span>
+                        {fp ? (
+                          <div className="flex w-[220px] shrink-0 flex-col gap-1">
+                            <div className="bg-muted h-1 w-full overflow-hidden rounded-full">
+                              <div
+                                className="bg-primary h-full transition-all"
+                                style={{ width: fp.rowsTotal ? `${Math.round((fp.rowsDone / fp.rowsTotal) * 100)}%` : "100%" }}
+                              />
+                            </div>
+                            <div className="text-muted-foreground text-[11px]">
+                              {fmtBytes(f.sizeBytes)}{fmtFileProgress(fp)}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground shrink-0">
+                            {fmtBytes(f.sizeBytes)}
+                            {fmtRowCounts(f, vs.embedding.status)}
+                            {" "}· added {f.addedDate}
+                          </span>
+                        )}
+                        <Button
+                          onClick={() => void actions.downloadVocabFile(vs.id, f.filename)}
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground size-6 shrink-0"
+                          title="Download"
+                        >
+                          <Download className="size-3" />
+                        </Button>
+                        <Button
+                          onClick={() => void actions.removeFileFromSource(vs.id, f.filename)}
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground hover:text-destructive size-6 shrink-0"
+                          title="Remove"
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </div>
+                    );
+                  })}
                   <Button onClick={() => fileInputRef.current?.click()} variant="outline" size="sm" className="text-muted-foreground w-fit border-dashed">
                     <Plus className="size-3" /><span>Add file(s) to this source</span>
                   </Button>
@@ -403,7 +420,7 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
                 variant="secondary"
                 size="sm"
                 disabled={!vs.files.length || !hasEmbeddingProvider}
-                title={!hasEmbeddingProvider ? "Add and activate an embedding provider in Settings → AI Provider first" : !vs.files.length ? "Add at least one file first" : undefined}
+                title={!hasEmbeddingProvider ? "Add and activate an embedding provider in Settings → Model Providers first" : !vs.files.length ? "Add at least one file first" : undefined}
               >
                 Sync now
               </Button>
@@ -474,4 +491,14 @@ function fmtRowCounts(f: VocabSourceFile, embeddingStatus: VocabEmbeddingStatus[
   if (f.rowCountLast === undefined) return "";
   if (embeddingStatus === "never" || f.rowCountSyncedLast === undefined) return ` · ${f.rowCountLast} found`;
   return ` · ${f.rowCountLast} found / ${f.rowCountSyncedLast} synced`;
+}
+
+/** Live per-file sync text shown in place of `fmtRowCounts` while a sync is in
+ *  flight. `rowsTotal` is how many of the file's rows need a fresh embed this
+ *  pass (post-reuse-diff), so 0 means the file was fully reused and needs no
+ *  new embeddings. */
+function fmtFileProgress(p: { rowsDone: number; rowsTotal: number }): string {
+  if (p.rowsTotal === 0) return " · no new rows";
+  const pct = Math.round((p.rowsDone / p.rowsTotal) * 100);
+  return ` · Embedding ${p.rowsDone}/${p.rowsTotal} · ${pct}%`;
 }
