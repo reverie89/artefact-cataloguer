@@ -10,7 +10,7 @@ import { fieldsDiffer } from "../../app/drafts";
 import { buildPromptPreview } from "../../lib/ai";
 import type { Settings } from "../../app/types";
 import { CardActions } from "./CardActions";
-import { Field, FieldInput, FieldTextarea } from "./FormControls";
+import { Field, FieldInput, FieldTextarea, Segmented } from "./FormControls";
 import { PromptPreviewSheet } from "./PromptPreviewSheet";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -40,7 +40,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
     (state.artefactDraft.visionSystemPromptInstruction ?? "") !== (settings.visionSystemPromptInstruction ?? "");
 
   // Local UI state for the Vision Analysis Prompt Preview sheet — mirrors
-  // FieldsTab's previewOpen. Transient tab affordance, not reducer state.
+  // CataloguingFieldsTab's previewOpen. Transient tab affordance, not reducer state.
   const [previewOpen, setPreviewOpen] = useState(false);
   // Effective settings (persisted merged with the in-progress draft) so the
   // preview reflects exactly what would be sent if the user saved now. Memoized
@@ -78,7 +78,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
   }, [live.artefactFields]);
 
   // Require a small drag threshold so a normal click on a row still toggles the
-  // editor instead of starting a drag. Mirrors FieldsTab's reorder wiring.
+  // editor instead of starting a drag. Mirrors CataloguingFieldsTab's reorder wiring.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const onDragEnd = useCallback(
@@ -96,7 +96,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
 
   return (
     <div className="flex flex-col gap-2.5">
-      {/* File-format + per-column behaviour explanation — reads like FieldsTab's Part-1 context card. */}
+      {/* File-format + per-column behaviour explanation — reads like CataloguingFieldsTab's Part-1 context card. */}
       <Card className="gap-0 py-0">
         <div className="flex flex-col gap-2 px-4 py-3.5">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -111,15 +111,16 @@ export function ArtefactFileTab({ state, actions }: Props) {
         </div>
       </Card>
 
-      {/* Unified System Prompt (Call 1). Persona + output-format preamble in one
-          Override-gated field — disabled by default since its preamble tells the
-          model how to format responses (editing it can break parsing). The
-          dynamic per-field XML enumeration and the <artefact_file> record block
-          are appended by Rust at runtime (visible in the Preview). */}
+      {/* Unified System Prompt (vision analysis). Persona + output-format
+          preamble in one Override-gated field — disabled by default since its
+          preamble tells the model how to format responses (editing it can
+          break parsing). The dynamic per-field XML enumeration and the
+          <artefact_file> record block are appended by Rust at runtime
+          (visible in the Preview). */}
       <Card className="gap-2 py-3.5">
         <Field
           label="System Prompt"
-          desc="Persona + output format for Call 1. The image and per-column guidance below attach alongside; the artefact-file record is included. Edit with care."
+          desc="Persona + output format for vision analysis. The image and per-column guidance below attach alongside; the artefact-file record is included. Edit with care."
           action={
             <>
               <Button onClick={() => setPreviewOpen(true)} variant="secondary" size="sm" className="shrink-0">
@@ -180,7 +181,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
               const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
                 { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
                 { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
-                ["id", "name", "description", "prompt"],
+                ["id", "name", "description", "prompt", "includeInExport"],
               ));
               return (
                 <ArtefactColumnRow
@@ -211,7 +212,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
         build={buildVisionPreview}
         description={
           <>
-            The exact message sent to your AI provider as the unified Call 1 of each parsing job,
+            The exact message sent to your AI provider as the unified vision-analysis step of each parsing job,
             including the persona, output-format preamble, and the Rust-appended per-field XML
             enumeration. The artefact row&apos;s source values are produced at parse time, so the
             <span className="px-1 font-mono">&lt;artefact_file&gt;</span>
@@ -225,9 +226,9 @@ export function ArtefactFileTab({ state, actions }: Props) {
 }
 
 /** A single artefact-column row. Clicking anywhere on the row toggles the
- *  editor (mirrors FieldsTab's SortableFieldRow). */
+ *  editor (mirrors CataloguingFieldsTab's SortableFieldRow). */
 interface ArtefactColumnRowProps {
-  field: { id: string; name: string; description: string; prompt: string };
+  field: { id: string; name: string; description: string; prompt: string; includeInExport: boolean };
   expanded: boolean;
   /** Whether this column has unsaved content edits. */
   dirty: boolean;
@@ -293,6 +294,23 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             rows={2}
             className="resize-y leading-relaxed"
           />
+          {/* Export inclusion — draft-buffered like the fields above (the
+              Segmented emits "true"/"false" strings; updateAF coerces to a
+              boolean on the draft). An image column's bytes are embedded per
+              row when this is on; other columns write their record value. */}
+          <Field
+            label="Include in Export"
+            desc="Add this column as a leading column in the exported spreadsheet, before the catalogue fields. Image columns embed their bytes."
+          >
+            <Segmented
+              value={af.includeInExport ? "true" : "false"}
+              onChange={(v) => actions.updateAF(af.id, "includeInExport", v)}
+              options={[
+                { value: "true", label: "Yes" },
+                { value: "false", label: "No" },
+              ]}
+            />
+          </Field>
           {/* Per-card actions: Delete/Discard/Save target only this column.
               Delete buffers into the draft (flushed by the Apply banner). */}
           <CardActions
