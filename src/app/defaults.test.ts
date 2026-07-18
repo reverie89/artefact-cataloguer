@@ -10,10 +10,11 @@ import { _DEF, _DEF_AF, _DEF_FIELDS, _DEF_VOCAB } from "./defaults";
  * they don't belong in the repo).
  */
 describe("synced seed data", () => {
-  it("seeds 9 artefact columns, each with an empty prompt", () => {
+  it("seeds 9 artefact columns, each with an empty prompt and export on", () => {
     expect(_DEF_AF).toHaveLength(9);
     for (const col of _DEF_AF) {
       expect(col.prompt).toBe("");
+      expect(col.includeInExport).toBe(true);
       expect(typeof col.name).toBe("string");
       expect(col.name.length).toBeGreaterThan(0);
     }
@@ -72,7 +73,7 @@ describe("synced seed data", () => {
     expect(d.visionSystemPromptInstruction).toContain("<artefact_file>");
     expect(d.vocabNetCount).toBe(20);
     expect(d.vocabShortlistCount).toBe(3);
-    expect(d.call3Enabled).toBe(true);
+    expect(d.validationEnabled).toBe(false);
     expect(d.providers).toEqual([]);
     expect(d.embeddingProviders).toEqual([]);
     expect(d.activeProvider).toBeNull();

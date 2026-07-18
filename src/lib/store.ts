@@ -110,23 +110,33 @@ export async function loadState(): Promise<LoadedState> {
  *  catalogue arrays from `_DEF()` when absent (normal first-run path).
  *
  *  Pre-XML-pipeline keys (`systemPromptInstruction`, `systemPromptContractOverride`
- *  — the old Call-2 prompt and JSON contract) are dropped here: the JSON contract
- *  is fundamentally replaced by the fixed XML contract built in Rust, so its old
- *  value cannot carry over. The persona now lives in `visionSystemPromptInstruction`. */
+ *  — the old Call-2 prompt and JSON contract) and the renamed `call3Enabled`
+ *  setting (now `validationEnabled`) are dropped here: the JSON contract is
+ *  fundamentally replaced by the fixed XML contract built in Rust, and the
+ *  rename is breaking by design. Their old values cannot carry over. The
+ *  persona now lives in `visionSystemPromptInstruction`. */
 export function withDefaultSettings(settings: Settings): Settings {
   const def = _DEF();
   return {
     visionSystemPromptInstruction: settings.visionSystemPromptInstruction ?? _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION,
     vocabNetCount: settings.vocabNetCount ?? def.vocabNetCount,
     vocabShortlistCount: settings.vocabShortlistCount ?? def.vocabShortlistCount,
-    call3Enabled: settings.call3Enabled ?? def.call3Enabled,
+    validationEnabled: settings.validationEnabled ?? def.validationEnabled,
     activeProvider: settings.activeProvider ?? settings.providers?.[0]?.id ?? null,
     fields: settings.fields ?? def.fields,
     vocabSources: settings.vocabSources ?? def.vocabSources,
     providers: settings.providers ?? [],
     embeddingProviders: settings.embeddingProviders ?? [],
     activeEmbeddingProvider: settings.activeEmbeddingProvider ?? settings.embeddingProviders?.[0]?.id ?? null,
-    artefactFields: settings.artefactFields ?? def.artefactFields,
+    artefactFields: (settings.artefactFields ?? def.artefactFields).map((f) => ({
+      ...f,
+      description: f.description ?? "",
+      prompt: f.prompt ?? "",
+      // Coalesce for in-memory construction paths that omit the flag — the
+      // schema already defaults persisted loads to true, but a freshly-built
+      // ArtefactField (e.g. in tests) may not set it.
+      includeInExport: f.includeInExport ?? true,
+    })),
   };
 }
 

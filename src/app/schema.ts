@@ -78,7 +78,6 @@ const EmbeddingProviderSchema = z.object({
   model: z.string(),
   modelOptions: z.array(z.string()).optional(),
   apiFormat: embeddingApiFormat.optional(),
-  supportsImageInput: z.boolean().optional(),
   dimensions: z.number().optional(),
   connStatus: z.enum(["ok", "err", "untested"]).optional(),
 });
@@ -90,6 +89,9 @@ const ArtefactFieldSchema = z.object({
   // `.default("")` so settings.json written before this field existed load
   // cleanly — an absent key reads as "no per-column vision guidance".
   prompt: z.string().default(""),
+  // `.default(true)` so settings written before this field existed load with
+  // every column exporting (the opt-out default) — no separate migration step.
+  includeInExport: z.boolean().default(true),
 });
 
 /**
@@ -100,7 +102,7 @@ export const SettingsSchema = z.object({
   visionSystemPromptInstruction: z.string(),
   vocabNetCount: z.number(),
   vocabShortlistCount: z.number(),
-  call3Enabled: z.boolean(),
+  validationEnabled: z.boolean(),
   fields: z.array(CatalogueFieldSchema),
   vocabSources: z.array(VocabSourceSchema),
   providers: z.array(ProviderSchema),
@@ -130,7 +132,7 @@ export const PersistedSettingsSchema = SettingsSchema.partial({
   visionSystemPromptInstruction: true,
   vocabNetCount: true,
   vocabShortlistCount: true,
-  call3Enabled: true,
+  validationEnabled: true,
   activeProvider: true,
   activeEmbeddingProvider: true,
 })

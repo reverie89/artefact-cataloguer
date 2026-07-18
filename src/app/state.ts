@@ -37,7 +37,7 @@ export type FieldDraft = {
   fields: CatalogueField[];
 };
 
-/** In-memory draft of the whole AI Provider tab — a snapshot of providers +
+/** In-memory draft of the whole Model Providers tab — a snapshot of providers +
  *  the active selection that edits accumulate against until Save. `null` means
  *  "no pending edits; render settings". Mirrors FieldDraft. */
 export type ProviderDraft = {
@@ -62,7 +62,6 @@ export type EmbeddingProviderDraftEntry = {
   apiKey: string;
   model: string;
   apiFormat: EmbeddingApiFormat;
-  supportsImageInput: boolean;
   modelOptions: string[];
   dimensions: number | null;
   connStatus: "ok" | "err" | "untested";
@@ -88,7 +87,7 @@ export type ArtefactDraft = {
 export type EditableCatalogueFieldKey = "name" | "type" | "prompt";
 
 /** Editable keys of an existing artefact-column row. */
-export type EditableArtefactFieldKey = "name" | "description" | "prompt";
+export type EditableArtefactFieldKey = "name" | "description" | "prompt" | "includeInExport";
 
 export interface AppState {
   darkMode: boolean;
@@ -111,10 +110,22 @@ export interface AppState {
   fieldDropdownSearch: Record<string, string>;
   resultsFilter: string;
   resultsSearch: string;
+  /** Which artefact-file column ids the results search matches against. New
+   *  columns default to included; the user can deselect any in the Results
+   *  column picker. Kept as ids (not names) so a column rename doesn't drop it
+   *  from the search scope. */
+  searchColsAf: string[];
+  /** Which catalogue-field ids the results search matches against — mirrors
+   *  `searchColsAf` for the FieldsTab columns. */
+  searchColsCat: string[];
   validationErrors: { message: string }[];
   aiResults: AiResults;
   /** Fatal catalogue error that aborted the run, if any. */
   parseError: string | null;
+  /** Transient warning surfaced when export can't proceed (e.g. no artefact
+   *  columns selected for export). Rendered beside `parseError` in the upload
+   *  panel; dismissed by the user or cleared on a successful export. */
+  exportWarning: string | null;
 
   // Settings
   settings: Settings;
@@ -140,8 +151,10 @@ export interface AppState {
   vocabCardError: Record<string, string>;
   /** Live progress for an in-flight `sync_vocab_source` run, keyed by source
    *  id — transient (not persisted); the source's `embedding` status in
-   *  settings is what survives a restart. Absent = no sync in flight. */
-  vocabSyncProgress: Record<string, { rowsDone: number; rowsTotal: number }>;
+   *  settings is what survives a restart. Absent = no sync in flight.
+   *  `fileProgress` carries the per-file breakdown of the source totals
+   *  (keyed by filename) when the source has more than one file. */
+  vocabSyncProgress: Record<string, { rowsDone: number; rowsTotal: number; fileProgress?: Record<string, { rowsDone: number; rowsTotal: number }> }>;
   /** Full term list fetched from a synced source's LanceDB table, keyed by
    *  source id — transient (not persisted), populated on demand by
    *  `ensureVocabTermsLoaded` and consumed by `vterms` (app/styles.ts) to
@@ -169,8 +182,9 @@ export interface AppState {
   provCardError: Record<string, string>;
   showProvKey: boolean;
 
-  // Embedding Providers section (AI tab) — mirrors the providers draft block
-  // above exactly, one field at a time, for the separate embedding-model list.
+  // Embedding Providers section (Model Providers tab) — mirrors the providers
+  // draft block above exactly, one field at a time, for the separate
+  // embedding-model list.
   embProviderDraft: EmbeddingProviderDraft | null;
   embProviderExpanded: Record<string, boolean>;
   embProvStatus: Record<string, { test: "testing" | "ok" | "err" | null }>;
@@ -237,9 +251,14 @@ export const initialState: AppState = {
   fieldDropdownSearch: {},
   resultsFilter: "all",
   resultsSearch: "",
+  // Empty at init; seeded from the loaded settings' column ids by the loader
+  // (every column searchable by default — see the SET_SETTINGS case).
+  searchColsAf: [],
+  searchColsCat: [],
   validationErrors: [],
   aiResults: {},
   parseError: null,
+  exportWarning: null,
 
   settings: _DEF(),
   settingsFieldExpanded: {},
@@ -302,6 +321,11 @@ export type Action =
   | { type: "TOGGLE_ROW"; uid: string }
   | { type: "SET_FILTER"; filter: string }
   | { type: "SET_SEARCH"; search: string }
+  | { type: "TOGGLE_SEARCH_COL_AF"; id: string }
+  | { type: "TOGGLE_SEARCH_COL_CAT"; id: string }
+  | { type: "SET_SEARCH_COLS_AF"; ids: string[] }
+  | { type: "SET_SEARCH_COLS_CAT"; ids: string[] }
+  | { type: "SET_EXPORT_WARNING"; message: string | null }
   | { type: "SET_FIELD_SEARCH"; key: string; value: string }
   | { type: "OPEN_DD"; key: string }
   | { type: "CLOSE_ALL_DD" }
@@ -324,7 +348,7 @@ export type Action =
   | { type: "CLEAR_VOCAB_DRAFT" }
   | { type: "SET_VOCAB_CARD_STATUS"; id: string; status: SaveState }
   | { type: "SET_VOCAB_CARD_ERROR"; id: string; error: string | null }
-  | { type: "SET_VOCAB_SYNC_PROGRESS"; id: string; rowsDone: number; rowsTotal: number }
+  | { type: "SET_VOCAB_SYNC_PROGRESS"; id: string; rowsDone: number; rowsTotal: number; fileProgress?: Record<string, { rowsDone: number; rowsTotal: number }> }
   | { type: "CLEAR_VOCAB_SYNC_PROGRESS"; id: string }
   | { type: "SET_VOCAB_TERMS_LOADING"; id: string }
   | { type: "SET_VOCAB_TERMS"; id: string; terms: VocabTermEntry[] }
@@ -471,6 +495,30 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, resultsFilter: action.filter };
     case "SET_SEARCH":
       return { ...state, resultsSearch: action.search };
+    case "TOGGLE_SEARCH_COL_AF": {
+      // Per-item toggle in the column picker. Symmetric with SET_SEARCH_COLS_*
+      // (Clear/All): an empty scope is a legal state — when the user searches
+      // it, the results list shows a discoverable empty-state hint rather than
+      // every row.
+      const has = state.searchColsAf.includes(action.id);
+      const next = has
+        ? state.searchColsAf.filter((id) => id !== action.id)
+        : [...state.searchColsAf, action.id];
+      return { ...state, searchColsAf: next };
+    }
+    case "TOGGLE_SEARCH_COL_CAT": {
+      const has = state.searchColsCat.includes(action.id);
+      const next = has
+        ? state.searchColsCat.filter((id) => id !== action.id)
+        : [...state.searchColsCat, action.id];
+      return { ...state, searchColsCat: next };
+    }
+    case "SET_SEARCH_COLS_AF":
+      return { ...state, searchColsAf: action.ids };
+    case "SET_SEARCH_COLS_CAT":
+      return { ...state, searchColsCat: action.ids };
+    case "SET_EXPORT_WARNING":
+      return { ...state, exportWarning: action.message };
     case "SET_FIELD_SEARCH":
       return { ...state, fieldDropdownSearch: { ...state.fieldDropdownSearch, [action.key]: action.value } };
     case "OPEN_DD":
@@ -514,8 +562,24 @@ export function reducer(state: AppState, action: Action): AppState {
         },
       };
 
-    case "SET_SETTINGS":
-      return { ...state, settings: action.settings };
+    case "SET_SETTINGS": {
+      // Reconcile the search column scope with the loaded column ids: keep
+      // selection for columns that still exist, and add any new columns
+      // (default-on, so a freshly-added column is searchable immediately).
+      // The reconcile runs on every SET_SETTINGS, which covers both the
+      // initial load and subsequent column add/remove/rename operations.
+      const afIds = action.settings.artefactFields.map((f) => f.id);
+      const catIds = action.settings.fields.map((f) => f.id);
+      const searchColsAf = [
+        ...state.searchColsAf.filter((id) => afIds.includes(id)),
+        ...afIds.filter((id) => !state.searchColsAf.includes(id)),
+      ];
+      const searchColsCat = [
+        ...state.searchColsCat.filter((id) => catIds.includes(id)),
+        ...catIds.filter((id) => !state.searchColsCat.includes(id)),
+      ];
+      return { ...state, settings: action.settings, searchColsAf, searchColsCat };
+    }
     case "PATCH_SETTINGS":
       return { ...state, settings: action.patch(state.settings) };
     case "TOGGLE_SF": {
@@ -552,7 +616,7 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, vocabCardError };
     }
     case "SET_VOCAB_SYNC_PROGRESS":
-      return { ...state, vocabSyncProgress: { ...state.vocabSyncProgress, [action.id]: { rowsDone: action.rowsDone, rowsTotal: action.rowsTotal } } };
+      return { ...state, vocabSyncProgress: { ...state.vocabSyncProgress, [action.id]: { rowsDone: action.rowsDone, rowsTotal: action.rowsTotal, fileProgress: action.fileProgress } } };
     case "CLEAR_VOCAB_SYNC_PROGRESS": {
       if (!state.vocabSyncProgress[action.id]) return state;
       const vocabSyncProgress = { ...state.vocabSyncProgress };
@@ -702,7 +766,7 @@ function fieldDraftFromSettings(s: Settings): FieldDraft {
   };
 }
 
-/** Snapshot of the editable AI Provider tab from persisted settings — the
+/** Snapshot of the editable Model Providers tab from persisted settings — the
  *  baseline a providers draft is seeded from and compared against for dirty
  *  checks. Mirrors fieldDraftFromSettings. */
 export function providerDraftFromSettings(s: Settings): ProviderDraft {
@@ -752,7 +816,6 @@ export function embeddingProviderDraftFromSettings(s: Settings): EmbeddingProvid
       apiKey: p.apiKey,
       model: p.model,
       apiFormat: p.apiFormat ?? "openai",
-      supportsImageInput: p.supportsImageInput ?? false,
       modelOptions: [...(p.modelOptions ?? [])],
       dimensions: p.dimensions ?? null,
       connStatus: p.connStatus ?? "untested",
