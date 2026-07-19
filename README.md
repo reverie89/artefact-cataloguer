@@ -166,6 +166,63 @@ src-tauri/src/
 - **Image extraction** unpacks the `.xlsx` zip (`fflate`), maps `xl/drawings` anchors → `xl/media` files → data rows, then hands bytes to Rust to write beside the binary and serve via the asset protocol.
 - **AI calls** run in Rust (`reqwest`, `rustls-tls`) against the configured provider's API (`openai`, `anthropic`, or `gemini`).
 
+---
+
+#### System overview
+
+The renderer is untrusted — CSP forces all model egress through the Rust backend, so API keys never leave the trusted process and CORS is a non-issue:
+
+```mermaid
+flowchart LR
+    subgraph UI["React renderer (src/) — untrusted"]
+        direction TB
+        UICOMP["Components + reducer state<br/>(app/ · components/ · hooks/)"]
+        BRIDGE["Rust bridge — lib/<br/>store · ai · images · vocab"]
+        UICOMP <--> BRIDGE
+    end
+
+    BRIDGE <-->|"Tauri invoke(cmd) + listen(event)"| GATE
+
+    subgraph RUST["Rust backend (src-tauri/src/) — trusted"]
+        direction TB
+        GATE["Command & event layer<br/>(lib.rs invoke_handler)"]
+        AI["ai.rs — 3-step pipeline<br/>reqwest · rustls-tls"]
+        EMB["embeddings.rs — LanceDB vector store"]
+        VOCAB["vocab_files.rs — calamine parse + staging"]
+        IMAGES["images.rs — scratch bytes + asset protocol"]
+        SETTINGS["settings.rs / secrets.rs<br/>settings.json + keychain scrub"]
+        GATE <--> AI
+        GATE <--> EMB
+        GATE <--> VOCAB
+        GATE <--> IMAGES
+        GATE <--> SETTINGS
+        AI -->|"search_similar"| EMB
+    end
+
+    subgraph FS["Beside the binary (exe_dir)"]
+        direction TB
+        SETTINGS_JSON["settings.json — no API keys"]
+        VOCAB_DB[("vocab_db/vocab_&lt;sourceId&gt;<br/>LanceDB — embedded, no server")]
+        VOCAB_FILES["vocab_files/&lt;sourceId&gt;<br/>(persists across restarts)"]
+        TMP["tmp/…<br/>(wiped on start + quit)"]
+    end
+
+    subgraph EXT["External systems"]
+        direction TB
+        KEYCHAIN["OS keychain<br/>chat::* · embedding::*"]
+        VISION["Chat / Vision provider<br/>openai · anthropic · gemini"]
+        EMBV["Embedding provider (multimodal)<br/>openai · gemini"]
+    end
+
+    SETTINGS --- SETTINGS_JSON
+    EMB --- VOCAB_DB
+    VOCAB --- VOCAB_FILES
+    IMAGES --- TMP
+    SETTINGS <--> KEYCHAIN
+    AI ==>|"model egress — only outbound path"| VISION
+    EMB ==>|"embed_texts + embed_image"| EMBV
+```
+
 #### Cataloguing pipeline
 
 Each artefact row is catalogued through a **three-step pipeline** using XML for both the request payload and the response, so the model sees one consistent format:
