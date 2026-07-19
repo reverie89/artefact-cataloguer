@@ -96,6 +96,11 @@ requires a real uploaded spreadsheet and a live, active provider — there is no
   ```sh
   rustup target add aarch64-pc-windows-msvc x86_64-pc-windows-msvc
   ```
+- **`protoc`** (Protocol Buffers compiler) — required at build time by the
+  `lancedb`/`lance` dependency chain. On x64 Windows install via
+  [a release](https://github.com/protocolbuffers/protobuf/releases) or
+  `choco install protoc`; on arm64 Windows the x64 binary runs under Windows
+  11's default emulation, and `scripts/build-windows.ps1` auto-downloads it.
 
 ---
 

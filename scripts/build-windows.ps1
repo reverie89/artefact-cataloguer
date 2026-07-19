@@ -5,6 +5,8 @@
 #   - Rust toolchain (rustup) with both targets installed:
 #       rustup target add aarch64-pc-windows-msvc x86_64-pc-windows-msvc
 #   - Windows SDK (for the MSVC linker).
+#   - protoc (the build auto-downloads the x64 binary to %LOCALAPPDATA%\protoc
+#     if not on PATH; on arm64 machines it runs under Windows 11 x64 emulation).
 #
 # Output:
 #   src-tauri/target/<triple>/release/bundle/nsis/
@@ -31,6 +33,32 @@ function Ensure-Target($triple) {
         if ($LASTEXITCODE -ne 0) { throw "rustup target add $triple failed" }
     }
 }
+
+# lance's prost-build shells out to protoc at compile time. Download the x64
+# binary on demand (arm64 runs it under Windows 11's default x64 emulation).
+function Ensure-Protoc {
+    $existing = Get-Command protoc.exe -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "==> protoc already on PATH ($($existing.Source))" -ForegroundColor DarkGray
+        return
+    }
+    $installDir = Join-Path $env:LOCALAPPDATA "protoc"
+    $bin = Join-Path $installDir "bin\protoc.exe"
+    if (-not (Test-Path $bin)) {
+        $version = "30.2"
+        $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip"
+        Write-Host "==> Downloading protoc $version (x64; emulated on arm64)" -ForegroundColor Yellow
+        $zip = Join-Path $env:TEMP "protoc-$version.zip"
+        Invoke-WebRequest -Uri $url -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath $installDir -Force
+        Remove-Item $zip
+    }
+    $env:PATH = "$installDir\bin;$env:PATH"
+    $env:PROTOC = $bin
+    & $bin --version | Out-Host
+}
+
+Ensure-Protoc
 
 function Build($triple, $label) {
     Write-Host "==> Building $label ($triple)" -ForegroundColor Cyan

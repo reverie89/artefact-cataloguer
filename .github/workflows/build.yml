@@ -53,6 +53,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install protoc (x64; emulated on arm64 via Prism)
+        # lance-encoding/lance-file/lance-index/lance-table use prost-build,
+        # which shells out to `protoc` at compile time. The Windows runners
+        # don't ship it. One x64 binary covers both matrix runners: native on
+        # windows-latest, and under Windows 11's default x64 emulation on
+        # windows-11-arm. There is no official win-aarch64 protoc build.
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROTOC_VERSION=30.2
+          curl -fL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-win64.zip" \
+            -o "$RUNNER_TEMP/protoc.zip"
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc.exe" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/protoc/bin/protoc.exe" --version
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
