@@ -150,14 +150,47 @@ export function saveState(settings: Settings, darkMode: boolean, zoom: number): 
   return invoke<void>("save_state", { bundle });
 }
 
-/** Debounced saver used after settings mutations. */
-export function makeDebouncedSaver(getState: () => { settings: Settings; darkMode: boolean; zoom: number }, ms = 300) {
-  let t: ReturnType<typeof setTimeout> | null = null;
-  return () => {
-    if (t) clearTimeout(t);
-    t = setTimeout(() => {
-      const { settings, darkMode, zoom } = getState();
-      void saveState(settings, darkMode, zoom);
-    }, ms);
+/** Saver handed to useActions after settings mutations. `schedule()` coalesces
+ *  high-frequency edits (typing, toggles); `flush()` persists immediately for
+ *  structural ops whose Rust-side disk effects already landed — and lets the
+ *  action await the write so per-card save status isn't a lie. Both read
+ *  `getState()` at call time, so saves always carry the reducer's latest
+ *  settings rather than some render's snapshot. */
+export interface DebouncedSaver {
+  schedule(): void;
+  /** Persist now, resolving with the write's outcome (rejects on failure).
+   *  Safe while another save is in flight — writes are serialized in issue
+   *  order, so later-issued bundles never land before earlier ones. */
+  flush(): Promise<void>;
+}
+
+export function makeDebouncedSaver(getState: () => { settings: Settings; darkMode: boolean; zoom: number }, ms = 300): DebouncedSaver {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Settled both ways so one failed save never poisons the chain.
+  let tail: Promise<unknown> = Promise.resolve();
+  const saveNow = (): Promise<void> => {
+    const { settings, darkMode, zoom } = getState();
+    const p = tail.then(
+      () => saveState(settings, darkMode, zoom),
+      () => saveState(settings, darkMode, zoom)
+    );
+    tail = p.catch(() => undefined);
+    return p;
+  };
+  return {
+    schedule() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        saveNow().catch((e) => console.error("[artefact] scheduled save failed:", e));
+      }, ms);
+    },
+    flush() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      return saveNow();
+    },
   };
 }

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { initialState, reducer } from "./app/state";
-import { loadState, makeDebouncedSaver } from "./lib/store";
+import { loadState, makeDebouncedSaver, type DebouncedSaver } from "./lib/store";
 import { useActions } from "./app/actions";
 import { TopBar } from "./components/main/TopBar";
 import { MainScreen } from "./components/main/MainScreen";
@@ -43,18 +43,25 @@ const VISION_STAGE_LABEL: Record<string, string> = {
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  // Keep a ref so the debounced saver always reads the latest bundle.
+  // Keep a ref so the saver always reads the latest bundle.
   const stateRef = useRef(state);
-  const saveRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  const save = useCallback(() => {
-    saveRef.current ??= makeDebouncedSaver(() => stateRef.current);
-    saveRef.current();
+  // Stable saver facade over one lazily-created debounced saver: routine edits
+  // coalesce via schedule(), structural vocab ops await flush(). Both read the
+  // freshest bundle through `stateRef` rather than any render's snapshot.
+  const saverRef = useRef<DebouncedSaver | null>(null);
+  const scheduleSave = useCallback(() => {
+    (saverRef.current ??= makeDebouncedSaver(() => stateRef.current)).schedule();
   }, []);
+  const flushSave = useCallback((): Promise<void> => {
+    const saver = (saverRef.current ??= makeDebouncedSaver(() => stateRef.current));
+    return saver.flush();
+  }, []);
+  const persist = useMemo(() => ({ schedule: scheduleSave, flush: flushSave }), [scheduleSave, flushSave]);
 
   // Load persisted state beside the binary on first mount.
   useEffect(() => {
@@ -105,7 +112,7 @@ export default function App() {
   }, [state.darkMode]);
 
   const { confirmDelete, dialog } = useConfirmDelete();
-  const actions = useActions(state, dispatch, save, confirmDelete);
+  const actions = useActions(state, dispatch, persist, confirmDelete);
 
   // Hold off the first meaningful paint until the persisted state has been
   // hydrated from disk. `loaded` is flipped by the INIT reducer once loadState()
