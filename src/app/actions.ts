@@ -17,10 +17,12 @@ import { parseArtefactFile } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
 import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
 import * as vocabLib from "../lib/vocab";
+import type { StagedVocabFile } from "../lib/vocab";
 import { pushLog } from "../lib/logs";
-import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, stripBuiltinLegacyVocabFields } from "../lib/store";
+import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, stripBuiltinLegacyVocabFields, type DebouncedSaver } from "../lib/store";
 import { PersistedSettingsSchema } from "./schema";
 import type { ConfirmDeleteOptions } from "../components/common/ConfirmDialog";
+import { emptyEmbedding, markStaleIfSynced, newVocabSource, sourceWithAddedFiles, sourceWithRemovedFile, updateVocabSource, withoutVocabSource, withReorderedVocabSources } from "./vocabSettings";
 
 export interface AppActions {
   // theme/nav/zoom
@@ -254,7 +256,9 @@ export interface AppActions {
 }
 
 type Dispatch = (action: Action) => void;
-type Persist = () => void;
+/** Debounced schedule for routine edits; flush() awaits the disk write —
+ *  structural vocab ops use it so per-card save status reflects reality. */
+type Persist = DebouncedSaver;
 type ConfirmDelete = (opts: ConfirmDeleteOptions) => Promise<boolean>;
 type ParsedStore = Record<string, { rows: ArtefactRow[]; imageRowIndices: number[]; sheetRowToDataRow: number[]; discardedColumns: Record<string, string>; file: File }>;
 type AppWindow = Window & { __acFi?: HTMLInputElement; __acParsed?: ParsedStore };
@@ -362,11 +366,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // next one.
   const parseControl = useRef({ paused: false, cancelled: false });
 
-  // Helper: dispatch a settings patch then persist.
+  // Helper: dispatch a settings patch then schedule persistence.
   const patch = useCallback(
     (fn: (s: Settings) => Settings) => {
       dispatch({ type: "PATCH_SETTINGS", patch: fn });
-      persist();
+      persist.schedule();
     },
     [dispatch, persist]
   );
@@ -433,7 +437,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // --- theme / nav / zoom ---
   const toggleDark = useCallback(() => {
     dispatch({ type: "SET_DARK", darkMode: !state.darkMode });
-    persist();
+    persist.schedule();
   }, [state.darkMode, dispatch, persist]);
 
   /** Discard the whole-tab draft for the given settings tab (mirrors each tab's
@@ -484,12 +488,12 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const zoomIn = useCallback(() => {
     const z = Math.min(1.5, +(state.zoom + 0.05).toFixed(2));
     dispatch({ type: "SET_ZOOM", zoom: z });
-    persist();
+    persist.schedule();
   }, [state.zoom, dispatch, persist]);
   const zoomOut = useCallback(() => {
     const z = Math.max(0.7, +(state.zoom - 0.05).toFixed(2));
     dispatch({ type: "SET_ZOOM", zoom: z });
-    persist();
+    persist.schedule();
   }, [state.zoom, dispatch, persist]);
   const toggleLogs = useCallback(() => dispatch({ type: "SET_LOGS_OPEN", open: !state.logsOpen }), [state.logsOpen, dispatch]);
   const setLogsOpen = useCallback((open: boolean) => dispatch({ type: "SET_LOGS_OPEN", open }), [dispatch]);
@@ -1123,82 +1127,67 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // them in a draft would let Discard desync the UI from what's already on
   // disk. Only the Display Name is draft-buffered per card (unchanged from
   // before). Reorders and deletes also persist immediately.
+  //
+  // Every mutation below applies its change through a functional PATCH_SETTINGS
+  // updater (patch/updateVocabSource) so it composes onto the reducer's
+  // *current* settings. Several of these interleave slow awaits (file staging,
+  // confirm dialogs, flush IPC); rebuilding whole-settings snapshots from the
+  // render-time closure after those awaits clobbered any write that committed
+  // meanwhile — browsed files silently vanished from the card once collapsed.
   const startAddVocabSource = useCallback(() => {
     const id = gid();
-    patchVocabDraft((d) => ({
-      ...d,
-      vocabSources: [...d.vocabSources, {
-        id, name: "", files: [], fields: [],
-        ingestionField: null, labelField: null, badgeField: null,
-        embedding: { status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null },
-      }],
-    }));
+    patchVocabDraft((d) => ({ ...d, vocabSources: [...d.vocabSources, newVocabSource(id)] }));
     // Also seed persisted settings immediately (structural add, like startAddField
     // does for its own draft) so the source exists on disk for the very first
     // addFilesToSource call, which needs a real sourceId to stage files under.
-    patch((s) => ({
-      ...s,
-      vocabSources: [...s.vocabSources, {
-        id, name: "", files: [], fields: [],
-        ingestionField: null, labelField: null, badgeField: null,
-        embedding: { status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null },
-      }],
-    }));
+    patch((s) => ({ ...s, vocabSources: [...s.vocabSources, newVocabSource(id)] }));
     dispatch({ type: "TOGGLE_VOCAB", id });
   }, [patchVocabDraft, patch, dispatch]);
 
   const addFilesToSource = useCallback(async (sourceId: string, list: FileList | File[]) => {
+    // Existence pre-check against this render's settings is for fast-fail only
+    // (sources are created synchronously and removed via confirm-gated deletes,
+    // so this can't false-positive); the merge itself runs reducer-current.
+    if (!state.settings.vocabSources.some((v) => v.id === sourceId)) {
+      dispatch({ type: "SET_VOCAB_CARD_ERROR", id: sourceId, error: "This vocabulary source no longer exists." });
+      dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "err" });
+      return;
+    }
     const ok = Array.from(list).filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
     if (!ok.length) return;
     dispatch({ type: "SET_VOCAB_CARD_ERROR", id: sourceId, error: null });
     dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "saving" });
     try {
-      const staged = [];
-      for (const f of ok) {
-        const bytes = new Uint8Array(await f.arrayBuffer());
-        staged.push(await vocabLib.stageVocabFile(sourceId, f.name, bytes));
+      const staged: StagedVocabFile[] = [];
+      try {
+        for (const f of ok) {
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          staged.push(await vocabLib.stageVocabFile(sourceId, f.name, bytes));
+        }
+      } catch (stageErr) {
+        // Roll back whatever already staged so disk never holds half a batch.
+        await Promise.allSettled(staged.map((f) => vocabLib.removeVocabFile(sourceId, f.filename)));
+        throw stageErr;
       }
-      const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-      if (!source) return;
-      const files = [...source.files, ...staged.map((s) => ({ id: s.id, filename: s.filename, addedDate: s.addedDate, sizeBytes: s.sizeBytes, rowCountLast: s.rowCount }))];
-      const existingNames = new Set(source.fields.map((f) => f.name));
-      const newFieldNames = new Set(staged.flatMap((s) => s.detectedFields));
-      const fields = [
-        ...source.fields,
-        ...[...newFieldNames].filter((n) => !existingNames.has(n)).map((name) => ({ name, includeForAI: true })),
-      ];
-      // Re-embedding is only meaningful once real content has changed; a
-      // source that was synced now has fresher content than its index reflects.
-      const embedding = source.embedding.status === "synced"
-        ? { ...source.embedding, status: "stale" as const }
-        : source.embedding;
-      const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, files, fields, embedding } : v));
-      const newSettings: Settings = { ...state.settings, vocabSources };
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => updateVocabSource(s, sourceId, (v) => sourceWithAddedFiles(v, staged)));
+      await persist.flush();
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "ok" });
     } catch (e) {
       console.error("[artefact] addFilesToSource failed:", e);
       dispatch({ type: "SET_VOCAB_CARD_ERROR", id: sourceId, error: (e as Error)?.message || String(e) });
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id: sourceId, status: "err" });
     }
-  }, [state.settings, state.darkMode, state.zoom, dispatch]);
+  }, [state.settings, patch, persist, dispatch]);
 
   const removeFileFromSource = useCallback(async (sourceId: string, filename: string) => {
-    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-    if (!source) return;
-    await vocabLib.removeVocabFile(sourceId, filename);
-    const files = source.files.filter((f) => f.filename !== filename);
-    const embedding = source.embedding.status === "synced"
-      ? { ...source.embedding, status: "stale" as const }
-      : source.embedding;
-    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, files, embedding } : v));
-    const newSettings: Settings = { ...state.settings, vocabSources };
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
-    } catch { console.error("[artefact] removeFileFromSource: save failed"); }
-  }, [state.settings, state.darkMode, state.zoom, dispatch]);
+      await vocabLib.removeVocabFile(sourceId, filename);
+      patch((s) => updateVocabSource(s, sourceId, (v) => sourceWithRemovedFile(v, filename)));
+      await persist.flush();
+    } catch {
+      console.error("[artefact] removeFileFromSource failed");
+    }
+  }, [patch, persist]);
 
   const downloadVocabFile = useCallback(async (sourceId: string, filename: string) => {
     const bytes = await vocabLib.downloadVocabFile(sourceId, filename);
@@ -1215,45 +1204,45 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, []);
 
   const toggleSourceFieldAI = useCallback((sourceId: string, fieldName: string) => {
-    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-    if (!source) return;
-    const fields = source.fields.map((f) => (f.name === fieldName ? { ...f, includeForAI: !f.includeForAI } : f));
     // Toggling includeForAI changes embed_text, so a synced index is now stale
     // regardless of whether the underlying file content changed (see M2 diff-
     // key nuance: the fields-config version is part of the effective row hash).
-    const embedding = source.embedding.status === "synced" ? { ...source.embedding, status: "stale" as const } : source.embedding;
-    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, fields, embedding } : v));
-    void patch(() => ({ ...state.settings, vocabSources }));
-  }, [state.settings, patch]);
+    patch((s) =>
+      updateVocabSource(s, sourceId, (v) => ({
+        ...v,
+        fields: v.fields.map((f) => (f.name === fieldName ? { ...f, includeForAI: !f.includeForAI } : f)),
+        embedding: markStaleIfSynced(v.embedding),
+      }))
+    );
+  }, [patch]);
 
   const setVocabIngestionField = useCallback((sourceId: string, fieldName: string | null) => {
-    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-    if (!source) return;
     // Changing which column supplies the term changes every row's identity,
     // so a synced index is stale regardless of whether file bytes changed —
     // mirrors toggleSourceFieldAI's stale-marking above.
-    const embedding = source.embedding.status === "synced" ? { ...source.embedding, status: "stale" as const } : source.embedding;
-    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, ingestionField: fieldName, embedding } : v));
-    void patch(() => ({ ...state.settings, vocabSources }));
-  }, [state.settings, patch]);
+    patch((s) => updateVocabSource(s, sourceId, (v) => ({ ...v, ingestionField: fieldName, embedding: markStaleIfSynced(v.embedding) })));
+  }, [patch]);
 
   const setVocabLabelField = useCallback((sourceId: string, fieldName: string | null) => {
-    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-    if (!source) return;
     // Purely cosmetic — never marks the source stale. A column can only be
     // Label or Badge, not both, so picking it as Label clears it from Badge.
-    const badgeField = fieldName && source.badgeField === fieldName ? null : source.badgeField;
-    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, labelField: fieldName, badgeField } : v));
-    void patch(() => ({ ...state.settings, vocabSources }));
-  }, [state.settings, patch]);
+    patch((s) =>
+      updateVocabSource(s, sourceId, (v) => {
+        const badgeField = fieldName && v.badgeField === fieldName ? null : v.badgeField;
+        return { ...v, labelField: fieldName, badgeField };
+      })
+    );
+  }, [patch]);
 
   const setVocabBadgeField = useCallback((sourceId: string, fieldName: string | null) => {
-    const source = state.settings.vocabSources.find((v) => v.id === sourceId);
-    if (!source) return;
-    const labelField = fieldName && source.labelField === fieldName ? null : source.labelField;
-    const vocabSources = state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, badgeField: fieldName, labelField } : v));
-    void patch(() => ({ ...state.settings, vocabSources }));
-  }, [state.settings, patch]);
+    // Mirror of setVocabLabelField's exclusivity rule.
+    patch((s) =>
+      updateVocabSource(s, sourceId, (v) => {
+        const labelField = fieldName && v.labelField === fieldName ? null : v.labelField;
+        return { ...v, badgeField: fieldName, labelField };
+      })
+    );
+  }, [patch]);
 
   const ensureVocabTermsLoaded = useCallback(async (sourceId: string) => {
     if (state.vocabTermCache[sourceId] || state.vocabTermCacheLoading[sourceId]) return;
@@ -1357,14 +1346,16 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     });
     if (!ok) return;
     await vocabLib.flushVocabSource(sourceId);
-    const embedding = { status: "never" as const, providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
-    const newSettings: Settings = { ...state.settings, vocabSources: state.settings.vocabSources.map((v) => (v.id === sourceId ? { ...v, embedding } : v)) };
+    // The dialog/IPC awaits can outlast other writes (e.g. an Add-files
+    // landing meanwhile) — reset via reducer-current settings, not a snapshot.
+    patch((s) => updateVocabSource(s, sourceId, (v) => ({ ...v, embedding: emptyEmbedding() })));
+    dispatch({ type: "CLEAR_VOCAB_TERMS", id: sourceId });
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      dispatch({ type: "CLEAR_VOCAB_TERMS", id: sourceId });
-    } catch { console.error("[artefact] flushVocabSource: save failed"); }
-  }, [state.settings, state.darkMode, state.zoom, dispatch, confirmDelete]);
+      await persist.flush();
+    } catch {
+      console.error("[artefact] flushVocabSource: save failed");
+    }
+  }, [state.settings, patch, persist, dispatch, confirmDelete]);
 
   const flushAllVocab = useCallback(async () => {
     const ok = await confirmDelete({
@@ -1374,14 +1365,14 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     });
     if (!ok) return;
     await vocabLib.flushAllVocab();
-    const embedding = { status: "never" as const, providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
-    const newSettings: Settings = { ...state.settings, vocabSources: state.settings.vocabSources.map((v) => ({ ...v, embedding })) };
+    patch((s) => ({ ...s, vocabSources: s.vocabSources.map((v) => ({ ...v, embedding: emptyEmbedding() })) }));
+    dispatch({ type: "CLEAR_ALL_VOCAB_TERMS" });
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      dispatch({ type: "CLEAR_ALL_VOCAB_TERMS" });
-    } catch { console.error("[artefact] flushAllVocab: save failed"); }
-  }, [state.settings, state.darkMode, state.zoom, dispatch, confirmDelete]);
+      await persist.flush();
+    } catch {
+      console.error("[artefact] flushAllVocab: save failed");
+    }
+  }, [patch, persist, dispatch, confirmDelete]);
 
   const removeVocabSource = useCallback(async (id: string) => {
     const live = state.vocabDraft ?? vocabDraftFromSettings(state.settings);
@@ -1394,36 +1385,33 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     try {
       await vocabLib.deleteVocabSourceFiles(id);
     } catch { /* best-effort — settings removal below still proceeds */ }
-    // Remove from persisted settings, pruning dangling vocabSource references.
-    const remaining = state.settings.vocabSources.filter((v) => v.id !== id);
-    const fields = state.settings.fields.map((f) => ({ ...f, vocabSources: f.vocabSources.filter((sid) => sid !== id) }));
-    const newSettings: Settings = { ...state.settings, vocabSources: remaining, fields };
+    // Prune source + dangling field references through reducer-current
+    // settings — the confirm await can outlast concurrent writes.
+    patch((s) => withoutVocabSource(s, id));
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      await persist.flush();
       // Mirror into drafts so any pending edits stay consistent.
       if (state.vocabDraft) {
         patchVocabDraft((d) => ({ ...d, vocabSources: d.vocabSources.filter((v) => v.id !== id) }));
       }
       dispatch({ type: "PATCH_FIELD_DRAFT", patch: (d) => ({ ...d, fields: d.fields.map((f) => ({ ...f, vocabSources: f.vocabSources.filter((sid) => sid !== id) })) }) });
       dispatch({ type: "CLEAR_VOCAB_TERMS", id });
-    } catch { console.error("[artefact] removeVocabSource: save failed"); }
-  }, [state.vocabDraft, state.settings, state.darkMode, state.zoom, patchVocabDraft, dispatch, confirmDelete]);
+    } catch {
+      console.error("[artefact] removeVocabSource: save failed");
+    }
+  }, [state.vocabDraft, state.settings, patch, persist, patchVocabDraft, dispatch, confirmDelete]);
   const toggleVocab = useCallback((id: string) => dispatch({ type: "TOGGLE_VOCAB", id }), [dispatch]);
   const updateVocabName = useCallback((id: string, name: string) => {
     patchVocabDraft((d) => ({ ...d, vocabSources: d.vocabSources.map((v) => (v.id === id ? { ...v, name } : v)) }));
   }, [patchVocabDraft]);
   const reorderVocab = useCallback(async (ids: string[]) => {
     // Only reorder persisted rows; skip any draft-only ids (new unsaved sources).
-    const savedSources = state.settings.vocabSources;
-    const savedById = new Map(savedSources.map((v) => [v.id, v] as const));
-    const reorderedSavedIds = ids.filter((id) => savedById.has(id));
-    if (reorderedSavedIds.length !== savedSources.length) return;
-    const reorderedSaved = reorderedSavedIds.map((id) => savedById.get(id)!);
-    const newSettings: Settings = { ...state.settings, vocabSources: reorderedSaved };
+    const savedIds = state.settings.vocabSources.map((v) => v.id);
+    const reorderedSavedIds = ids.filter((id) => savedIds.includes(id));
+    if (reorderedSavedIds.length !== savedIds.length) return;
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => withReorderedVocabSources(s, ids));
+      await persist.flush();
       // Mirror reorder into draft using draft values, preserving pending renames.
       patchVocabDraft((d) => {
         const draftById = new Map(d.vocabSources.map((v) => [v.id, v] as const));
@@ -1431,7 +1419,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         return reorderedDraft.length === d.vocabSources.length ? { ...d, vocabSources: reorderedDraft } : d;
       });
     } catch { console.error("[artefact] reorderVocab: save failed"); }
-  }, [state.settings, state.darkMode, state.zoom, patchVocabDraft, dispatch]);
+  }, [state.settings.vocabSources, patch, persist, patchVocabDraft]);
 
   // --- per-card save/discard (vocab inline editor) ---
   // A single source's rename is committed/reverted in isolation; every other
@@ -1445,21 +1433,21 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "saving" });
     // Upsert: replace if the source already persists, else append (a freshly
     // added source isn't in settings yet — startAddVocabSource seeds it
-    // immediately, but this stays defensive for that invariant).
-    const persisted = state.settings.vocabSources.some((v) => v.id === id);
-    const vocabSources = persisted
-      ? state.settings.vocabSources.map((v) => (v.id === id ? { ...v, name: card.name } : v))
-      : [...state.settings.vocabSources, card];
-    const newSettings: Settings = { ...state.settings, vocabSources };
+    // immediately, but this stays defensive for that invariant). Applied via a
+    // functional updater so it can't clobber files added mid-await.
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) =>
+        s.vocabSources.some((v) => v.id === id)
+          ? updateVocabSource(s, id, (v) => ({ ...v, name: card.name }))
+          : { ...s, vocabSources: [...s.vocabSources, card] }
+      );
+      await persist.flush();
       dispatch({ type: "PATCH_VOCAB_DRAFT", patch: (d) => ({ ...d, vocabSources: d.vocabSources.map((v) => (v.id === id ? { ...v, name: card.name } : v)) }) });
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "ok" });
     } catch {
       dispatch({ type: "SET_VOCAB_CARD_STATUS", id, status: "err" });
     }
-  }, [state.vocabDraft, state.settings, state.darkMode, state.zoom, dispatch]);
+  }, [state.vocabDraft, patch, persist, dispatch]);
 
   const discardVocabCard = useCallback((id: string) => {
     const draft = state.vocabDraft;
