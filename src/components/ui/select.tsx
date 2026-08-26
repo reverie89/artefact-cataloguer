@@ -53,7 +53,10 @@ function SelectTrigger({
 function SelectContent({
   className,
   children,
-  position = "item-aligned",
+  // "popper" over shadcn's default "item-aligned": item-aligned mis-sizes the
+  // popup when it opens with no selected value (e.g. the Model dropdown right
+  // after Test Connection clears the model). Popper ignores selection state.
+  position = "popper",
   align = "center",
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
