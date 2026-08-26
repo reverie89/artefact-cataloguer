@@ -745,28 +745,52 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
 
 /// Pull the model's text answer out of a chat-completions response, by API
 /// family. Pure: takes the parsed JSON, returns the content string or an error.
+///
+/// Reasoning output can share the response with the answer — as leading
+/// `thinking` blocks (Anthropic) or sibling fields beside the content
+/// (OpenAI) — so each arm gathers only the answer text, in order.
 fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String> {
-    // OpenAI: choices[0].message.content. Anthropic: content[0].text.
     let content = match fmt {
-        // OpenRouter (and some other providers) may return content as a parts array
-        // [{type:"text",text:"..."}] rather than a plain string, so try both.
+        // Content is a plain string or a parts array
+        // [{type:"text",text:"..."}].
         ApiFormat::OpenAi => {
             let c = &v["choices"][0]["message"]["content"];
-            c.as_str()
-                .map(str::to_string)
-                .or_else(|| {
-                    c.as_array()?
-                        .iter()
-                        .filter_map(|p| p.get("text").and_then(Value::as_str))
-                        .next()
-                        .map(str::to_string)
-                })
+            let mut parts: Vec<&str> = Vec::new();
+            if let Some(s) = c.as_str() {
+                parts.push(s);
+            } else if let Some(arr) = c.as_array() {
+                parts.extend(
+                    arr.iter()
+                        .filter_map(|p| p.get("text").and_then(Value::as_str)),
+                );
+            }
+            (!parts.is_empty())
+                .then(|| parts.concat())
                 .ok_or_else(|| "response missing choices[0].message.content".to_string())?
         }
-        ApiFormat::Anthropic => v["content"][0]["text"]
-            .as_str()
-            .ok_or_else(|| "response missing content[0].text".to_string())?
-            .to_string(),
+        // `content` holds typed blocks; reasoning models put a "thinking"
+        // block ahead of the answer's "text" block(s).
+        ApiFormat::Anthropic => {
+            let mut text = String::new();
+            let mut types: Vec<&str> = Vec::new();
+            if let Some(blocks) = v["content"].as_array() {
+                for b in blocks {
+                    let ty = b["type"].as_str().unwrap_or("unknown");
+                    types.push(ty);
+                    if ty == "text" {
+                        text.push_str(b["text"].as_str().unwrap_or(""));
+                    }
+                }
+            }
+            let got = if types.is_empty() {
+                "no content array".to_string()
+            } else {
+                format!("got {}", types.join(", "))
+            };
+            (!text.is_empty())
+                .then_some(text)
+                .ok_or_else(|| format!("response content has no text ({got})"))?
+        }
         // Gemini Interactions API: prefer the top-level convenience field, then
         // the current `steps` array, then the legacy `outputs` array (pre the
         // 2026-06 schema sunset). The final entry holds the complete answer.
@@ -964,8 +988,9 @@ async fn do_completion(
         }
     };
 
-    // Surface the selected model for OpenRouter free-router debugging (the free
-    // router picks a model dynamically; the response `model` field reveals which).
+    // Surface which model actually answered — routed endpoints may resolve
+    // the requested model to something else, and the response `model` field
+    // reveals it.
     let selected_model = v["model"].as_str().map(str::to_string);
     let detail = match &selected_model {
         Some(m) => format!("HTTP {} ({}ms) via {}", status.as_u16(), elapsed, m),
@@ -2001,6 +2026,105 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("<redacted base64"));
+    }
+
+    #[test]
+    fn parse_completion_anthropic_single_text_block() {
+        let v = json!({
+            "content": [{ "type": "text", "text": "<extraction field=\"Material\">bronze</extraction>" }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Anthropic, &v).unwrap(),
+            "<extraction field=\"Material\">bronze</extraction>"
+        );
+    }
+
+    #[test]
+    fn parse_completion_anthropic_skips_leading_thinking_block() {
+        // Reasoning models answer their Anthropic endpoint with a
+        // "thinking" block before the text, which broke content[0].text.
+        let v = json!({
+            "content": [
+                { "type": "thinking", "thinking": "The user wants…", "signature": "abc" },
+                { "type": "text", "text": "final answer" }
+            ]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Anthropic, &v).unwrap(),
+            "final answer"
+        );
+    }
+
+    #[test]
+    fn parse_completion_anthropic_concatenates_text_blocks_in_order() {
+        let v = json!({
+            "content": [
+                { "type": "text", "text": "part one " },
+                { "type": "thinking", "thinking": "side quest" },
+                { "type": "text", "text": "part two" }
+            ]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Anthropic, &v).unwrap(),
+            "part one part two"
+        );
+    }
+
+    #[test]
+    fn parse_completion_anthropic_error_names_observed_block_types() {
+        let v = json!({
+            "content": [
+                { "type": "tool_use", "id": "t1", "name": "f", "input": {} }
+            ]
+        });
+        let err = parse_completion_content(ApiFormat::Anthropic, &v).unwrap_err();
+        assert!(
+            err.contains("tool_use"),
+            "error should name block types, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_completion_openai_accepts_plain_string_content() {
+        let v = json!({
+            "choices": [{ "message": { "content": "plain string answer" } }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::OpenAi, &v).unwrap(),
+            "plain string answer"
+        );
+    }
+
+    #[test]
+    fn parse_completion_openai_joins_parts_array_in_order() {
+        // Parts-array content shape; non-text parts must be skipped.
+        let v = json!({
+            "choices": [{ "message": { "content": [
+                { "type": "text", "text": "part one " },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+                { "type": "text", "text": "part two" }
+            ] } }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::OpenAi, &v).unwrap(),
+            "part one part two"
+        );
+    }
+
+    #[test]
+    fn parse_completion_openai_ignores_reasoning_fields() {
+        // Reasoning models carry chain-of-thought beside
+        // `message.content`; only `content` is the answer.
+        let v = json!({
+            "choices": [{ "message": {
+                "reasoning_content": "step by step…",
+                "content": "the actual answer"
+            } }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::OpenAi, &v).unwrap(),
+            "the actual answer"
+        );
     }
 
     fn open_field(name: &str) -> FieldSpec {
