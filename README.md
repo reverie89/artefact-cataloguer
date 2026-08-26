@@ -115,6 +115,7 @@ requires a real uploaded spreadsheet and a live, active provider — there is no
 | `npm run test:watch` | vitest in watch mode |
 | `npm run lint` | eslint (`eslint .`) |
 | `npm run build:win-all` | NSIS installers — arm64 + x86_64 |
+| `npm run build:linux` | AppImage installer — host arch |
 | `cargo test` *(from `src-tauri/`)* | Rust unit tests |
 
 ---
@@ -135,6 +136,14 @@ per-target `tauri build` scripts the wrapper invokes. Output:
 
 ```
 src-tauri/target/<triple>/release/bundle/nsis/Artefact Cataloguer_*-setup.exe
+```
+
+On Linux, `npm run build:linux` produces an AppImage instead (its
+`--bundles appimage` flag overrides the config's NSIS default, which only
+applies on Windows):
+
+```
+src-tauri/target/release/bundle/appimage/Artefact Cataloguer_*_amd64.AppImage
 ```
 
 ---
