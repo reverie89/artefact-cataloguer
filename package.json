@@ -21,7 +21,8 @@
     "tauri:dev": "tauri dev",
     "build:win-arm64": "tauri build --target aarch64-pc-windows-msvc",
     "build:win-x64": "tauri build --target x86_64-pc-windows-msvc",
-    "build:win-all": "npm run build:win-arm64 && npm run build:win-x64"
+    "build:win-all": "npm run build:win-arm64 && npm run build:win-x64",
+    "build:linux": "tauri build --bundles appimage"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
