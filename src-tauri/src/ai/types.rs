@@ -25,6 +25,20 @@ pub enum ApiFormat {
     Gemini,
 }
 
+/// How hard a thinking-capable model should reason before answering. Each API
+/// family maps this onto its native effort knob in `build_completion_body`.
+/// `Serialize` (lowercase, via the per-variant renames) is what lands in the
+/// request JSON for the level-based formats.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThinkingEffort {
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+}
+
 impl ApiFormat {
     /// Header(s) to attach for this key + format. OpenAI uses one; Anthropic
     /// additionally pins the API version.
@@ -74,6 +88,10 @@ pub struct Provider {
     /// Optional; older providers without the field default to OpenAI format.
     #[serde(rename = "apiFormat", default)]
     pub api_format: ApiFormat,
+    /// Reasoning effort for thinking-capable models; `None` (and any provider
+    /// saved before this field existed) sends no thinking fields.
+    #[serde(rename = "thinking", default)]
+    pub thinking: Option<ThinkingEffort>,
 }
 
 /// One catalogue field the AI must populate. For open-ended fields, the model

@@ -5,7 +5,7 @@
 import { _DEF, _DEF_AF } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
 import type { VocabTermEntry } from "../lib/vocab";
-import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, ParseStatus, Screen, Settings, SettingsTab, VocabSource } from "./types";
+import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, ParseStatus, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
 
 /** One editable provider row in the unified providers draft. Mirrors a
  *  persisted Provider, plus the model list discovered by a successful Test
@@ -25,6 +25,10 @@ export type ProviderDraftEntry = {
    *  Persists on Save (alongside modelOptions), so the Status column survives a
    *  restart. The live "testing" state lives in the separate `provStatus` map. */
   connStatus: "ok" | "err" | "untested";
+  /** Reasoning effort for thinking-capable models. `null` = off (send no
+   *  thinking fields); made concrete here so the Segmented control always has a
+   *  value, mirroring how apiFormat/connStatus are defaulted. */
+  thinking: ThinkingEffort | null;
 };
 
 /** In-memory draft of the editable parts of the Cataloguing Fields tab. Unlike
@@ -783,6 +787,7 @@ export function providerDraftFromSettings(s: Settings): ProviderDraft {
       apiFormat: p.apiFormat ?? "openai",
       modelOptions: [...(p.modelOptions ?? [])],
       connStatus: p.connStatus ?? "untested",
+      thinking: p.thinking ?? null,
     })),
   };
 }

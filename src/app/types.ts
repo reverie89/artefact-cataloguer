@@ -5,6 +5,10 @@ export type FieldType = "open" | "vocab";
 /** Which API family a provider speaks — drives auth scheme and endpoint paths. */
 export type ApiFormat = "openai" | "anthropic" | "gemini";
 
+/** How hard a thinking-capable model should reason before answering. Each API
+ *  family maps this onto its native effort knob; see `build_completion_body`. */
+export type ThinkingEffort = "low" | "medium" | "high";
+
 /** A configurable column the artefact spreadsheet must provide. Every
  *  configured column must be present when the file is parsed (even if some
  *  cells are empty), and its values are always sent to the AI in the
@@ -106,6 +110,9 @@ export interface Provider {
   modelOptions?: string[];
   /** Optional; providers saved before this field existed default to OpenAI format. */
   apiFormat?: ApiFormat;
+  /** Reasoning effort for thinking-capable models. Optional/off (undefined)
+   *  sends no thinking fields — the provider's default behaviour. */
+  thinking?: ThinkingEffort;
   /** Last persisted connection-test outcome for this provider. Optional;
    *  providers saved before this field existed default to "untested" on load.
    *  The "testing" state is inherently transient and never persisted. */

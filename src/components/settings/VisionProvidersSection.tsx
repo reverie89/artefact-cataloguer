@@ -4,10 +4,10 @@ import type { AppActions } from "../../app/actions";
 import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
 import type { SaveState } from "./SaveActions.types";
-import type { ApiFormat, Provider } from "../../app/types";
+import type { ApiFormat, Provider, ThinkingEffort } from "../../app/types";
 import { providerEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
-import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
+import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
 import { StatusIndicator } from "./SaveActions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,6 +19,15 @@ interface Props {
   state: AppState;
   actions: AppActions;
 }
+
+/** The Thinking Segmented options: "off" plus every effort level. `"off"` maps
+ *  to `null` (no thinking fields sent) at the action boundary. */
+const THINKING_OPTIONS: { value: "off" | ThinkingEffort; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
 
 /** True when a single draft entry differs from its persisted provider — drives
  *  the per-row "unsaved" badge. Mirrors isProvidersDirty but per row. */
@@ -34,8 +43,9 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
       apiFormat: (p.apiFormat ?? "openai") as ApiFormat,
       modelOptions: p.modelOptions ?? [],
       connStatus: p.connStatus ?? "untested",
+      thinking: p.thinking ?? null,
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus", "thinking"],
   );
 }
 
@@ -257,6 +267,20 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
               <FieldSelectOption key={m} value={m}>{m}</FieldSelectOption>
             ))}
           </FieldSelect>
+
+          <Field
+            label="Thinking"
+            desc="Ask reasoning-capable models to think before answering. Off sends nothing — the provider's default applies, and some models (e.g. GLM-5.3) always think."
+          >
+            <Segmented
+              options={THINKING_OPTIONS}
+              value={entry.thinking ?? "off"}
+              onChange={(v) => {
+                const picked = THINKING_OPTIONS.find((o) => o.value === v)?.value;
+                actions.setProvThinking(id, !picked || picked === "off" ? null : picked);
+              }}
+            />
+          </Field>
 
           {/* Per-row actions: Delete/Discard/Save target only this provider.
               Delete persists immediately (after its confirm); Discard/Save
