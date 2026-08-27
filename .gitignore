@@ -29,3 +29,7 @@ src-tauri/gen
 
 # TypeScript
 *.tsbuildinfo
+
+# App-local runtime files: the app writes its settings.json next to the
+# running binary, so launching a dev build from the repo root lands it here.
+/settings.json
