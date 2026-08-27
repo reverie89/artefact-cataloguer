@@ -7,7 +7,7 @@
 
 **Artefact Cataloguer** is a Tauri 2 desktop app for AI-assisted museum cataloguing — upload an artefact spreadsheet, extract embedded images, run each row through an OpenAI-compatible model for ranked catalogue-field suggestions, review, and export `.xlsx`.
 
-![Artefact Cataloguer demo](./demo.gif)
+[https://github.com/user-attachments/assets/44502a21-e041-45db-b2d7-03c0ce6a39e3](https://github.com/user-attachments/assets/44502a21-e041-45db-b2d7-03c0ce6a39e3)
 
 ---
 
@@ -101,6 +101,15 @@ requires a real uploaded spreadsheet and a live, active provider — there is no
   [a release](https://github.com/protocolbuffers/protobuf/releases) or
   `choco install protoc`; on arm64 Windows the x64 binary runs under Windows
   11's default emulation, and `scripts/build-windows.ps1` auto-downloads it.
+- **Linux build deps** (for `npm run build:linux`) — Tauri's webview and the
+  AppImage bundling tools, on Debian/Ubuntu:
+  ```sh
+  sudo apt-get install libwebkit2gtk-4.1-dev librsvg2-dev patchelf libfuse2
+  ```
+  `protoc` (above) is required here too — the lance protos use proto3
+  `optional` fields, so it must be ≥ 3.15; older distro packages (Ubuntu
+  22.04's `protobuf-compiler` is 3.12) fail. Use a current build from the
+  [releases page](https://github.com/protocolbuffers/protobuf/releases).
 
 ---
 

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-27
+
+### Added
+
+- Per-provider "thinking effort" control for vision/chat model providers — low/medium/high reasoning budgets per provider entry.
+- Linux AppImage packaging script for release builds.
+- Linux AppImage and `.deb` packages (x64 and arm64) built by the tag-driven release workflow and attached to the GitHub release alongside the Windows installers.
+
+### Changed
+
+- GitHub releases now carry release notes extracted verbatim from the version's `CHANGELOG.md` section, instead of a static download line.
+
+### Fixed
+
+- Anthropic vision responses containing thinking blocks are parsed correctly instead of failing.
+- Vocabulary-source edits (rename, field mapping, re-sync) now persist reliably via functional settings updates.
+- Select dropdowns default to popper positioning so long option lists are no longer clipped inside settings panels.
+- Embedded images appear in exported `.xlsx` files again (filesystem read permission was missing).
+
 ## [1.1.0] - 2026-07-19
 
 ### Added
@@ -42,3 +61,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [1.0.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.0.0
 [1.1.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.1.0
+[1.2.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.0
