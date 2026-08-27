@@ -84,7 +84,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Artefact Cataloguer ${{ github.ref_name }}'
-          releaseBody: 'Download the installer for your architecture below.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} ${{ matrix.bundles }}
@@ -111,7 +110,36 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Extract release notes from CHANGELOG.md
+        # Pulls the `## [<version>]` section body for the tag being released
+        # (e.g. v1.1.0 → 1.1.0) verbatim, including the `### Added/Changed/…`
+        # subsections. The section header line and trailing link references are
+        # dropped — the release name already carries the version.
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { found=1; next }
+            /^## / && found { exit }
+            /^\[[0-9]/ && found { exit }
+            found { print }
+          ' CHANGELOG.md > "$NOTES"
+          if [ ! -s "$NOTES" ]; then
+            echo "::error::No CHANGELOG.md section found for version $VERSION (looked for '## [$VERSION]')"
+            exit 1
+          fi
+          echo "Extracted release notes for $VERSION:"
+          cat "$NOTES"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo ${{ github.repository }} --draft=false
+        run: |
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo ${{ github.repository }} \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --draft=false
