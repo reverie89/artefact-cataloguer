@@ -3,10 +3,33 @@
 // can surface them — there is no demo fallback.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogueField, EmbeddingProvider, Provider, Settings } from "../app/types";
+import type { CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
 
 interface RawCatalogueResult {
   fieldResults: Record<string, { value: string; similarity?: number }[]>;
+}
+
+/** The provider payload the Rust commands accept — mirrors
+ *  `src_tauri::ai::types::Provider` (camelCase serde renames there). */
+interface RustProvider {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: string;
+  /** `null` = off: Rust sends no thinking fields. */
+  thinking: ThinkingEffort | null;
+}
+
+function toRustProvider(provider: Provider): RustProvider {
+  return {
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    model: provider.model,
+    apiFormat: provider.apiFormat ?? "openai",
+    thinking: provider.thinking ?? null,
+  };
 }
 
 /**
@@ -21,14 +44,6 @@ export const CANCEL_ERROR = "__ac_cancelled__";
 interface RawConnectionTest {
   ok: string;
   models: string[];
-}
-
-interface RustProvider {
-  name: string;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  apiFormat: string;
 }
 
 interface RustField {
@@ -169,13 +184,6 @@ export async function catalogueArtefact(
   settings: Settings,
   cancelKey: string
 ): Promise<Record<string, { value: string; similarity?: number }[]>> {
-  const rustProvider: RustProvider = {
-    name: provider.name,
-    baseUrl: provider.baseUrl,
-    apiKey: provider.apiKey,
-    model: provider.model,
-    apiFormat: provider.apiFormat ?? "openai",
-  };
   const rustFields: RustField[] = fields.map((f) => ({
     name: f.name,
     type: f.type,
@@ -197,7 +205,7 @@ export async function catalogueArtefact(
   };
   const embProvider = activeEmbeddingProvider(settings);
   const res = await invoke<RawCatalogueResult>("catalogue_artefact", {
-    provider: rustProvider,
+    provider: toRustProvider(provider),
     fields: rustFields,
     artefact: rustArtefact,
     jobId: cancelKey,
@@ -250,13 +258,7 @@ export async function buildPromptPreview(settings: Settings): Promise<string> {
 /** Ping the provider (GET /models) to validate URL + key and fetch the model list. */
 export async function testConnection(provider: Provider): Promise<RawConnectionTest> {
   const res = await invoke<RawConnectionTest>("test_connection", {
-    provider: {
-      name: provider.name,
-      baseUrl: provider.baseUrl,
-      apiKey: provider.apiKey,
-      model: provider.model,
-      apiFormat: provider.apiFormat ?? "openai",
-    },
+    provider: toRustProvider(provider),
   });
   return res;
 }

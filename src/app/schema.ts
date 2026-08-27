@@ -10,6 +10,7 @@ import { z } from "zod";
 const fieldType = z.enum(["open", "vocab"]);
 const apiFormat = z.enum(["openai", "anthropic", "gemini"]);
 const embeddingApiFormat = z.enum(["openai", "gemini"]);
+const thinkingEffort = z.enum(["low", "medium", "high"]);
 
 const CatalogueFieldSchema = z.object({
   id: z.string(),
@@ -67,6 +68,7 @@ const ProviderSchema = z.object({
   model: z.string(),
   modelOptions: z.array(z.string()).optional(),
   apiFormat: apiFormat.optional(),
+  thinking: thinkingEffort.optional(),
   connStatus: z.enum(["ok", "err", "untested"]).optional(),
 });
 

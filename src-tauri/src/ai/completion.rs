@@ -19,7 +19,7 @@ use super::logging::{
     log_headers, log_stage, next_call_group, redact_body, PipelineStageEvent, VerbosePayload,
 };
 use super::transport::{http_client, trim_trailing_slash, TIMEOUT_SECS};
-use super::types::{ApiFormat, Provider};
+use super::types::{ApiFormat, Provider, ThinkingEffort};
 
 /// Inlined image attached to a single multimodal prompt: raw bytes + mime type.
 /// When `Some`, `do_completion` embeds the image as a content block alongside
@@ -88,11 +88,15 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
                     _ => json!({ "role": t.role.as_str(), "content": t.text }),
                 })
                 .collect();
-            json!({
+            let mut body = json!({
                 "model": provider.model,
                 "messages": messages,
                 "temperature": 0.2
-            })
+            });
+            if let Some(effort) = provider.thinking {
+                body["reasoning_effort"] = json!(effort);
+            }
+            body
         }
         // Anthropic requires `max_tokens`.
         ApiFormat::Anthropic => {
@@ -112,11 +116,28 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
                     _ => json!({ "role": t.role.as_str(), "content": t.text }),
                 })
                 .collect();
-            json!({
+            let mut body = json!({
                 "model": provider.model,
                 "max_tokens": 4096,
                 "messages": messages
-            })
+            });
+            if let Some(effort) = provider.thinking {
+                // Anthropic takes a token budget rather than a level; it must
+                // stay below `max_tokens`. Thinking and the answer share that
+                // cap, and endpoints vary in how strictly they honour the
+                // budget (z.ai GLM thinks well past it), so the cap must cover
+                // a full catalogue answer PLUS thinking. 32000 stays within the
+                // output limit of every thinking-capable Claude model
+                // (opus-4/4.1 cap at 32k).
+                let budget_tokens = match effort {
+                    ThinkingEffort::Low => 2048,
+                    ThinkingEffort::Medium => 8192,
+                    ThinkingEffort::High => 12288,
+                };
+                body["max_tokens"] = json!(32000);
+                body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget_tokens });
+            }
+            body
         }
         // Gemini Interactions API: the whole request is one `input` array of
         // steps (multi-turn), text preceding any image per Gemini's guidance.
@@ -131,26 +152,40 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
                     input.push(json!({ "type": "text", "text": t.text }));
                 }
             }
-            json!({
+            let mut body = json!({
                 "model": provider.model,
                 "input": input,
                 "generation_config": { "temperature": 0.2 }
-            })
+            });
+            if let Some(effort) = provider.thinking {
+                body["generation_config"]["thinking_level"] = json!(effort);
+            }
+            body
         }
     }
 }
+
+/// Error returned when the model stopped because it exhausted its output
+/// budget. Surfed explicitly (instead of parsing the partial text and letting
+/// the XML contract complain about "missing" blocks) because the real cause —
+/// and its fix — is the output budget, not the response format.
+const TRUNCATED_ERR: &str = "response hit max_tokens before finishing — if this model thinks by default (e.g. GLM-5.3), set Thinking to Low or higher to raise the output budget";
 
 /// Pull the model's text answer out of a chat-completions response, by API
 /// family. Pure: takes the parsed JSON, returns the content string or an error.
 ///
 /// Reasoning output can share the response with the answer — as leading
 /// `thinking` blocks (Anthropic) or sibling fields beside the content
-/// (OpenAI) — so each arm gathers only the answer text, in order.
+/// (OpenAI) — so each arm gathers only the answer text, in order. A
+/// max-tokens stop is an error, not partial content.
 fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String> {
     let content = match fmt {
         // Content is a plain string or a parts array
         // [{type:"text",text:"..."}].
         ApiFormat::OpenAi => {
+            if v["choices"][0]["finish_reason"].as_str() == Some("length") {
+                return Err(TRUNCATED_ERR.to_string());
+            }
             let c = &v["choices"][0]["message"]["content"];
             let mut parts: Vec<&str> = Vec::new();
             if let Some(s) = c.as_str() {
@@ -168,6 +203,9 @@ fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String>
         // `content` holds typed blocks; reasoning models put a "thinking"
         // block ahead of the answer's "text" block(s).
         ApiFormat::Anthropic => {
+            if v["stop_reason"].as_str() == Some("max_tokens") {
+                return Err(TRUNCATED_ERR.to_string());
+            }
             let mut text = String::new();
             let mut types: Vec<&str> = Vec::new();
             if let Some(blocks) = v["content"].as_array() {
@@ -205,19 +243,24 @@ fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String>
 /// Read the text out of the last entry of a Gemini Interactions `steps`/`outputs`
 /// array. Each entry carries a `content` array of parts whose `text` holds the
 /// model's answer; the final entry is the complete response. Scans from the end
-/// so a trailing metadata entry without text is skipped.
+/// so a trailing metadata entry without text is skipped. Entries with
+/// `type: "thought"` hold reasoning summaries, never the answer, and are
+/// skipped so thinking output can't leak into extraction.
 fn gemini_entries_text(arr: Option<&Value>) -> Option<&str> {
     let arr = arr?.as_array()?;
-    arr.iter().rev().find_map(|entry| {
-        entry
-            .get("content")
-            .and_then(Value::as_array)
-            .and_then(|parts| {
-                parts
-                    .iter()
-                    .find_map(|p| p.get("text").and_then(Value::as_str))
-            })
-    })
+    arr.iter()
+        .rev()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) != Some("thought"))
+        .find_map(|entry| {
+            entry
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|parts| {
+                    parts
+                        .iter()
+                        .find_map(|p| p.get("text").and_then(Value::as_str))
+                })
+        })
 }
 
 pub(crate) async fn do_completion(
@@ -532,7 +575,14 @@ mod tests {
             api_key: "k".to_string(),
             model: "m".to_string(),
             api_format: format,
+            thinking: None,
         }
+    }
+
+    fn provider_with_thinking(format: ApiFormat, thinking: ThinkingEffort) -> Provider {
+        let mut p = provider_with(format);
+        p.thinking = Some(thinking);
+        p
     }
 
     #[test]
@@ -602,5 +652,111 @@ mod tests {
         assert_eq!(input[0]["type"], "text");
         assert_eq!(input[1]["type"], "image");
         assert_eq!(input[2]["type"], "text");
+    }
+
+    #[test]
+    fn openai_body_adds_reasoning_effort_only_when_thinking() {
+        let off = build_completion_body(&provider_with(ApiFormat::OpenAi), &[]);
+        assert!(off.get("reasoning_effort").is_none());
+
+        let on = build_completion_body(
+            &provider_with_thinking(ApiFormat::OpenAi, ThinkingEffort::High),
+            &[],
+        );
+        assert_eq!(on["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_body_adds_thinking_budget_below_max_tokens_only_when_thinking() {
+        let off = build_completion_body(&provider_with(ApiFormat::Anthropic), &[]);
+        assert_eq!(off["max_tokens"], 4096);
+        assert!(off.get("thinking").is_none());
+
+        let on = build_completion_body(
+            &provider_with_thinking(ApiFormat::Anthropic, ThinkingEffort::Medium),
+            &[],
+        );
+        assert_eq!(on["thinking"]["type"], "enabled");
+        let max_tokens = on["max_tokens"].as_u64().unwrap();
+        assert_eq!(max_tokens, 32000);
+        let budget = on["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert!(budget < max_tokens, "budget must stay below max_tokens");
+    }
+
+    #[test]
+    fn gemini_body_adds_thinking_level_only_when_thinking() {
+        let off = build_completion_body(&provider_with(ApiFormat::Gemini), &[]);
+        assert!(off["generation_config"].get("thinking_level").is_none());
+
+        let on = build_completion_body(
+            &provider_with_thinking(ApiFormat::Gemini, ThinkingEffort::Low),
+            &[],
+        );
+        assert_eq!(on["generation_config"]["thinking_level"], "low");
+    }
+
+    #[test]
+    fn provider_json_without_thinking_deserializes_with_none() {
+        // Providers persisted before the field existed (and test_connection
+        // payloads) carry no `thinking` key.
+        let p: Provider = serde_json::from_value(json!({
+            "name": "p", "baseUrl": "https://example.test", "apiKey": "k",
+            "model": "m", "apiFormat": "anthropic"
+        }))
+        .unwrap();
+        assert_eq!(p.thinking, None);
+
+        let p: Provider = serde_json::from_value(json!({
+            "name": "p", "baseUrl": "https://example.test", "apiKey": "k",
+            "model": "m", "apiFormat": "anthropic", "thinking": "high"
+        }))
+        .unwrap();
+        assert_eq!(p.thinking, Some(ThinkingEffort::High));
+    }
+
+    #[test]
+    fn parse_completion_gemini_skips_thought_steps() {
+        // With thinking enabled the Interactions API can interleave
+        // `type: "thought"` steps carrying reasoning summaries; the answer
+        // lives in the model_output step.
+        let v = json!({
+            "steps": [
+                { "type": "thought", "content": [{ "type": "text", "text": "let me reason…" }] },
+                { "type": "model_output", "content": [{ "type": "text", "text": "the answer" }] },
+                { "type": "thought", "content": [{ "type": "text", "text": "double-checking…" }] }
+            ]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Gemini, &v).unwrap(),
+            "the answer"
+        );
+    }
+
+    #[test]
+    fn parse_completion_surfaces_truncation_instead_of_partial_text() {
+        // A max_tokens stop must name the real cause, not surface as partial
+        // content whose "missing" XML blocks mislead downstream parsing.
+        let anthropic = json!({
+            "stop_reason": "max_tokens",
+            "content": [{ "type": "text", "text": "<image_description> partial…" }]
+        });
+        let err = parse_completion_content(ApiFormat::Anthropic, &anthropic).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+
+        let openai = json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "partial" } }]
+        });
+        let err = parse_completion_content(ApiFormat::OpenAi, &openai).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+
+        // A normal stop is unaffected by the truncation check.
+        let complete = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "the answer" }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Anthropic, &complete).unwrap(),
+            "the answer"
+        );
     }
 }

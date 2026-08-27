@@ -11,7 +11,7 @@ import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
 import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
-import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab } from "./types";
+import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort } from "./types";
 import { isTabDirty } from "./drafts";
 import { parseArtefactFile } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
@@ -195,6 +195,8 @@ export interface AppActions {
   setProvF(id: string, k: keyof Provider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>): void;
   setProvModel(id: string, model: string): void;
   setProvApiFormat(id: string, format: ApiFormat): void;
+  /** Set this provider's reasoning effort (`null` = off); persists on its card Save. */
+  setProvThinking(id: string, effort: ThinkingEffort | null): void;
   toggleProvKey(): void;
   testConn(id: string): Promise<void>;
   saveProviders(): Promise<void>;
@@ -1495,7 +1497,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchProvDraft((d) => ({
       ...d,
       // Append an empty standard entry; the user fills it in, then Test → pick model.
-      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested" }],
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null }],
     }));
     dispatch({ type: "TOGGLE_PROV", id });
   }, [patchProvDraft, dispatch]);
@@ -1536,6 +1538,16 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, model })));
+  }, [patchProvDraft, mapDraftEntry, dispatch]);
+
+  // Thinking effort is a request-body knob, not a transport change, so — like
+  // model edits — it must NOT clear the test status or model list. `null` = off
+  // (the Segmented control's "Off" pill; no thinking fields are sent).
+  const setProvThinking = useCallback((id: string, effort: ThinkingEffort | null) => {
+    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
+    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
+    patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, thinking: effort })));
   }, [patchProvDraft, mapDraftEntry, dispatch]);
 
   const toggleProvKey = useCallback(() => dispatch({ type: "SET_SHOW_PROV_KEY", show: !state.showProvKey }), [state.showProvKey, dispatch]);
@@ -1597,7 +1609,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "SET_PROV_SAVE_STATUS", status: "saving" });
     const newSettings: Settings = {
       ...state.settings,
-      providers: draft.providers.map((e) => ({ id: e.id, name: e.name, baseUrl: e.baseUrl, apiKey: e.apiKey, model: e.model, apiFormat: e.apiFormat, modelOptions: e.modelOptions, connStatus: e.connStatus })),
+      providers: draft.providers.map((e) => ({ id: e.id, name: e.name, baseUrl: e.baseUrl, apiKey: e.apiKey, model: e.model, apiFormat: e.apiFormat, modelOptions: e.modelOptions, connStatus: e.connStatus, thinking: e.thinking ?? undefined })),
       activeProvider: draft.activeProvider,
     };
     try {
@@ -1646,12 +1658,12 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       ? state.settings.providers.map((p) => (p.id === id ? {
           id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
           model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
-          connStatus: entry.connStatus,
+          connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
         } : p))
       : [...state.settings.providers, {
           id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
           model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
-          connStatus: entry.connStatus,
+          connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
         }];
     // "Set Active" now persists immediately (see setActiveProv), so
     // draft.activeProvider always mirrors state.settings.activeProvider — read
@@ -1684,7 +1696,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({
         type: "PATCH_PROVIDER_DRAFT",
         patch: mapDraftEntry(id, () => ({
-          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested",
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null,
         })),
       });
       return;
@@ -1700,6 +1712,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           model: saved.model, apiFormat: saved.apiFormat ?? "openai",
           modelOptions: [...(saved.modelOptions ?? [])],
           connStatus: saved.connStatus ?? "untested",
+          thinking: saved.thinking ?? null,
         } : e)),
       }),
     });
@@ -2132,7 +2145,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
-    startAddProv, setProvF, setProvModel, setProvApiFormat, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
+    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
     toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
     toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateVisionSystemPromptInstruction, saveVisionSystemPromptInstruction, discardVisionSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
