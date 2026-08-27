@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window. Scope is kept narrow: explicit dialog/fs permissions for user-initiated file open (catalogue import) and save (CSV/JSON export). User-chosen save paths are added to scope at runtime by the save() dialog, so no static blanket path is needed. The fs:scope allowlist covers only the extracted-image scratch dir read back over the asset protocol. No http/shell plugin — all outbound HTTP runs in Rust.",
+  "description": "Default capability for the main window. Scope is kept narrow: explicit dialog/fs permissions for user-initiated file open (catalogue import) and save (CSV/JSON export). User-chosen save paths are added to scope at runtime by the save() dialog, so no static blanket path is needed. The fs:scope allowlist covers only the extracted-image scratch dir — read back over the asset protocol for display and read_file-embedded into .xlsx exports. No http/shell plugin — all outbound HTTP runs in Rust.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -10,6 +10,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-read-text-file",
+    "fs:allow-read-file",
     "fs:allow-write-text-file",
     "fs:allow-write-file",
     {

@@ -957,10 +957,17 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           // image stays in its row (ExcelJS stretches it to the cell bounds).
           const cell = `${colLetter}${rowIdx + 2}`;
           ws.addImage(id, `${cell}:${cell}`);
-        } catch {
+        } catch (e) {
           // Missing/unreadable image — leave the cell empty rather than abort
-          // the whole export. Logged for diagnosis via the existing extract
-          // log path; no separate user-facing error here.
+          // the whole export; surface it so gaps are diagnosable in the Logs
+          // Viewer.
+          const message = String((e as Error)?.message || e);
+          pushLog({
+            status: "fail",
+            label: "Export image skipped",
+            detail: `Row ${rowIdx + 1}: ${message}`,
+            verbose: { error: message },
+          });
         }
       }));
     }
