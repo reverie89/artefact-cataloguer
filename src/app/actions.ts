@@ -15,6 +15,7 @@ import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, 
 import { isTabDirty } from "./drafts";
 import { parseArtefactFile } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
+import { columnWidthChars, fitWithin, imageDimensions, rowHeightPoints } from "../lib/imageMeta";
 import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
 import * as vocabLib from "../lib/vocab";
 import type { StagedVocabFile } from "../lib/vocab";
@@ -298,22 +299,17 @@ function rowLabel(row: ArtefactRow, index?: number): string {
   return index != null ? `Row ${index + 1}` : "row";
 }
 
-/** Convert a 0-based column index to an Excel column letter (0 → A, 26 → AA).
- *  Used to build the range string for image anchoring in xlsx export. */
-function colIndexToLetter(index: number): string {
-  let n = index;
-  let s = "";
-  do {
-    s = String.fromCharCode(65 + (n % 26)) + s;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return s;
-}
-
 /** The image role column name regex — kept here (and re-checked against export
  *  settings) so export doesn't have to import from spreadsheet.ts's
  *  parse-only `roleFieldNames`. Mirrors the parser's image-column match. */
 const IMAGE_COL_RE = /^images?$/;
+
+/** Breathing room around embedded images on the exported sheet. The px→chars
+ *  width formula is font-approximate, so an exact-fit column lets landscape
+ *  photos bleed into the next column; the row pad keeps photos off the
+ *  gridlines instead of flush against them. */
+const IMAGE_COL_PAD_CHARS = 3;
+const IMAGE_ROW_PAD_PT = 6;
 
 /** Pure composition of an export table from current state. Returns the headers
  *  and per-row values (strings only — image bytes are embedded separately by
@@ -357,6 +353,24 @@ export function composeExportTable(
       return [...afVals, ...fieldVals];
     });
   return { headers, rows, imageColName: imageCol ? imageCol.name : null };
+}
+
+/** Per-column xlsx widths (ExcelJS character units) for the composed table:
+ *  the longest of header vs cell text, padded, clamped to [MIN, MAX]. The cap
+ *  keeps long descriptions from stretching the sheet — they wrap instead
+ *  (wrap alignment is applied by `exportResults`). Exported for unit testing.
+ */
+export function computeColumnWidths(headers: string[], rows: string[][]): number[] {
+  const MIN = 10;
+  const MAX = 45;
+  return headers.map((h, i) => {
+    let longest = h.length;
+    for (const row of rows) {
+      const len = String(row[i] ?? "").length;
+      if (len > longest) longest = len;
+    }
+    return Math.min(MAX, Math.max(MIN, longest + 2));
+  });
 }
 
 export function useActions(state: AppState, dispatch: Dispatch, persist: Persist, confirmDelete: ConfirmDelete): AppActions {
@@ -934,31 +948,59 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       ws.addRow(Object.fromEntries(headers.map((h, i) => [h, safe[i]])));
     });
 
+    // Sheet geometry: size every column to its content and wrap data cells,
+    // so headers and values are fully readable. Widths are clamped
+    // (see computeColumnWidths); wrapped text grows rows via Excel's
+    // auto-height unless the row gets an explicit image height below.
+    computeColumnWidths(headers, rows).forEach((w, i) => {
+      ws.getColumn(i + 1).width = w;
+    });
+    for (let r = 2; r <= ws.rowCount; r++) {
+      ws.getRow(r).eachCell({ includeEmpty: true }, (cell) => {
+        cell.alignment = { wrapText: true, vertical: "top" };
+      });
+    }
+
     // Embed the actual image bytes for any toggled-on image column. The image
     // column carries no text (its bytes go to vision separately at parse), so
     // its cell above is empty; this anchors the extracted image to that cell.
     if (imageColName) {
       const colIdx = headers.indexOf(imageColName); // 0-based
-      const colLetter = colIndexToLetter(colIdx);
+      let maxImageWidth = 0;
       await Promise.all(doneRows.map(async (r, rowIdx) => {
-        if (!r.imagePath) return;
+        if (!r.imagePath) {
+          // No extracted image for this row (source sheet had none, or
+          // extraction failed at parse) — leave the cell empty but say so.
+          pushLog({
+            status: "fail",
+            label: "Export image skipped",
+            detail: `Row ${rowIdx + 1}: no extracted image for this row`,
+          });
+          return;
+        }
         try {
           // Image bytes live on disk beside the binary (written by
-          // extract_images at parse). Read them back and embed anchored to
-          // this row's image cell. ExcelJS accepts Uint8Array/ArrayBuffer at
-          // runtime for the buffer and a range string for the anchor — its
-          // bundled TS types lag the runtime (they want Buffer + Anchor
-          // instances), so we feed it the simpler shapes the docs document.
+          // extract_images at parse). Read them back and embed pinned to this
+          // row's image cell. ExcelJS accepts Uint8Array/ArrayBuffer at
+          // runtime for the buffer — its bundled TS types lag the runtime
+          // (they want Buffer), so we feed it the shape the docs document.
           const bytes = await readFile(r.imagePath);
           const lower = r.imagePath.toLowerCase();
           const extension: "png" | "jpeg" = lower.endsWith(".jpg") || lower.endsWith(".jpeg") ? "jpeg" : "png";
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const id = wb.addImage({ buffer: bytes as any, extension });
-          // Data rows start at sheet row 2 (row 1 is the header). Anchor each
-          // image to span its own cell with a one-cell range string, so the
-          // image stays in its row (ExcelJS stretches it to the cell bounds).
-          const cell = `${colLetter}${rowIdx + 2}`;
-          ws.addImage(id, `${cell}:${cell}`);
+          // One-cell anchor with explicit pixel extents: a range-string
+          // anchor ("B2:B2") stretches the image to the cell box — a ~19px
+          // sliver at default row height. `tl` is 0-based; data rows start at
+          // sheet row 2, hence rowIdx + 1.
+          const dims = imageDimensions(bytes);
+          const { width, height } = fitWithin(dims.width, dims.height);
+          ws.addImage(id, { tl: { col: colIdx, row: rowIdx + 1 }, ext: { width, height }, editAs: "oneCell" });
+          // Default ~20px rows would leave a 200px photo spilling over the
+          // rows below — give the row an explicit height fitting the photo
+          // (and the wrapped text beside it). Imageless rows keep auto-height.
+          ws.getRow(rowIdx + 2).height = rowHeightPoints(height) + IMAGE_ROW_PAD_PT;
+          if (width > maxImageWidth) maxImageWidth = width;
         } catch (e) {
           // Missing/unreadable image — leave the cell empty rather than abort
           // the whole export; surface it so gaps are diagnosable in the Logs
@@ -972,6 +1014,12 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           });
         }
       }));
+      // Photos sit in the Image column: widen it past its text width so a
+      // 200px image doesn't spill across the neighbouring columns.
+      if (maxImageWidth > 0) {
+        const col = ws.getColumn(colIdx + 1);
+        col.width = Math.max(col.width ?? 0, columnWidthChars(maxImageWidth) + IMAGE_COL_PAD_CHARS);
+      }
     }
 
     try {
