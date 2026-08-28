@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-28
+
+### Fixed
+
+- Embedded images in exported `.xlsx` files render at a visible size again — anchored with explicit pixel extents (fitted to 200px, aspect preserved) instead of stretching to a cell-height sliver; their rows and the image column are sized to fit.
+- Reading extracted image bytes from the app's scratch directory no longer fails the release build's filesystem scope ("forbidden path"), which could silently drop images from exports.
+- Rows whose source sheet had no extracted image are reported in the Logs panel during export instead of leaving an unexplained blank cell.
+
+### Changed
+
+- Exported columns are sized to their content (clamped, with wrapped text) instead of Excel's default widths.
+
 ## [1.2.0] - 2026-08-27
 
 ### Added
@@ -62,3 +74,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.0.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.0.0
 [1.1.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.1.0
 [1.2.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.0
+[1.2.1]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.1
