@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { composeExportTable, csvSafeCell } from "./actions";
+import { composeExportTable, computeColumnWidths, csvSafeCell } from "./actions";
 import { _DEF } from "./defaults";
 import type { AiResults, ArtefactRow, FieldSelection, Settings } from "./types";
 
@@ -42,6 +42,30 @@ describe("csvSafeCell", () => {
     expect(csvSafeCell("")).toBe("");
     expect(csvSafeCell("=")).toBe("'=");
     expect(csvSafeCell("a")).toBe("a");
+  });
+});
+
+describe("computeColumnWidths", () => {
+  it("widens a column to its longest cell, padded", () => {
+    const widths = computeColumnWidths(["Place"], [["Borobudur"], ["Prambanan"]]);
+    expect(widths).toEqual([11]); // "Prambanan" is 9 chars, +2 padding, min 10 not binding
+  });
+
+  it("clamps short columns to the minimum", () => {
+    expect(computeColumnWidths(["A", "Place"], [["x", "Java"]])).toEqual([10, 10]);
+  });
+
+  it("caps long values at the max so text wraps instead of stretching", () => {
+    const long = "x".repeat(300);
+    expect(computeColumnWidths(["Physical Description"], [[long]])).toEqual([45]);
+  });
+
+  it("sizes from the header when values are shorter", () => {
+    expect(computeColumnWidths(["Date/Period"], [["1900"]])).toEqual([13]); // 11-char header + 2 padding
+  });
+
+  it("handles empty tables", () => {
+    expect(computeColumnWidths(["A", "B"], [])).toEqual([10, 10]);
   });
 });
 

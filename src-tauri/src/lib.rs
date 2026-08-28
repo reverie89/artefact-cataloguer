@@ -20,6 +20,7 @@ mod vocab_files;
 // import so the trait is in scope when that code is compiled in.
 #[allow(unused_imports)]
 use tauri::Manager;
+use tauri_plugin_fs::FsExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -50,6 +51,15 @@ pub fn run() {
             let scratch = images::temp_app_dir();
             let _ = std::fs::create_dir_all(&scratch);
             let _ = app.asset_protocol_scope().allow_directory(&scratch, true);
+
+            // The export embeds images via fs read_file, whose static
+            // `$EXEDIR/tmp/**` scope rejects the same scratch paths the asset
+            // protocol accepts ("forbidden path"). Grant the resolved
+            // directory at runtime — the same mechanism the save dialog uses
+            // to admit user-chosen targets. `scratch` was just created, so
+            // canonicalize gives the shape the scope matcher compares against.
+            let resolved = std::fs::canonicalize(&scratch).unwrap_or(scratch);
+            let _ = app.fs_scope().allow_directory(&resolved, true);
 
             // In release builds `app` is otherwise unused.
             let _ = &app;
