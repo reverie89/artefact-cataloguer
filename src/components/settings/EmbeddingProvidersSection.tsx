@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi, XCircle } from "lucide-react";
+import { useRef } from "react";
+import { ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { embeddingProviderDraftFromSettings, type AppState, type EmbeddingProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
@@ -7,13 +7,15 @@ import type { EmbeddingApiFormat, EmbeddingProvider } from "../../app/types";
 import { embeddingProviderEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
 import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
+import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
+import { UnsavedBadge } from "./UnsavedBadge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
-import { StatusIndicator } from "./SaveActions";
+import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
@@ -22,7 +24,7 @@ interface Props {
 
 /** True when a single draft entry differs from its persisted embedding
  *  provider — drives the per-row "unsaved" badge. Mirrors entryDiffers in
- *  ProvidersTab.tsx. */
+ *  VisionProvidersSection.tsx. */
 function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: EmbeddingProvider): boolean {
   return fieldsDiffer(
     e,
@@ -51,16 +53,11 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
   const live = state.embProviderDraft ?? embeddingProviderDraftFromSettings(settings);
 
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const prevCountRef = useRef(live.providers.length);
-  useEffect(() => {
-    const grew = live.providers.length > prevCountRef.current;
-    prevCountRef.current = live.providers.length;
-    if (!grew) return;
-    const last = live.providers[live.providers.length - 1];
-    const node = last ? cardRefs.current[last.id] : null;
-    const t = setTimeout(() => node?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 30);
-    return () => clearTimeout(t);
-  }, [live.providers]);
+  useScrollNewRowIntoView(
+    live.providers.length,
+    cardRefs,
+    live.providers[live.providers.length - 1]?.id
+  );
 
   const GRID = "grid grid-cols-[1fr_1fr_120px_104px] gap-2.5 px-3.5";
 
@@ -126,7 +123,7 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
 interface RowProps {
   entry: EmbeddingProviderDraft["providers"][number];
   grid: string;
-  testStatus: "testing" | "ok" | "err" | null;
+  testStatus: TestStatus;
   showEmbProvKey: boolean;
   isActive: boolean;
   dirty: boolean;
@@ -160,7 +157,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
           ) : (
             <>
               <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
-              {dirty && <Badge variant="secondary" className="font-semibold text-amber-600 dark:text-amber-400">Unsaved</Badge>}
+              <UnsavedBadge dirty={dirty} />
             </>
           )}
         </div>
@@ -246,22 +243,4 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
       )}
     </div>
   );
-}
-
-function StatusBadge({ status }: { status: "testing" | "ok" | "err" | null }) {
-  if (status === "ok") return <Badge variant="default" className="w-fit gap-1 tracking-[0.04em]"><CheckCircle2 className="size-2.5" />Connected</Badge>;
-  if (status === "err") return <Badge variant="destructive" className="w-fit gap-1 tracking-[0.04em]"><XCircle className="size-2.5" />Failed</Badge>;
-  if (status === "testing") return <Badge variant="secondary" className="w-fit gap-1 tracking-[0.04em]"><Loader2 className="size-2.5 animate-spin" />Testing…</Badge>;
-  return <Badge variant="secondary" className="w-fit tracking-[0.04em]">Not tested</Badge>;
-}
-
-function ConnectionStatus({ status, dimensions }: { status: "testing" | "ok" | "err" | null; dimensions: number | null }) {
-  const message = status === "testing"
-    ? "Testing connection…"
-    : status === "ok"
-      ? `Connection successful${dimensions ? ` (dims: ${dimensions})` : ""}`
-      : status === "err"
-        ? "Failed — check URL and API key"
-        : "No status";
-  return <StatusIndicator state={status === "testing" ? "busy" : status} message={message} />;
 }

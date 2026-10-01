@@ -7,7 +7,7 @@ use arrow_array::{Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::{connect, Connection, DistanceType};
+use lancedb::{connect, Connection, DistanceType, Table};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +16,33 @@ use super::vocab_db_dir;
 
 pub(crate) fn table_name(source_id: &str) -> String {
     format!("vocab_{source_id}")
+}
+
+/// Whether a table with this name exists in the db.
+pub(crate) async fn table_exists(db: &Connection, name: &str) -> Result<bool, String> {
+    let names = db
+        .table_names()
+        .execute()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(names.iter().any(|n| n == name))
+}
+
+/// Open the named table if it exists, else `None` — the exists-check + open
+/// two-step every read/delete path in the vocab pipeline repeats.
+pub(crate) async fn open_table_if_exists(
+    db: &Connection,
+    name: &str,
+) -> Result<Option<Table>, String> {
+    if !table_exists(db, name).await? {
+        return Ok(None);
+    }
+    let table = db
+        .open_table(name)
+        .execute()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(table))
 }
 
 pub(crate) async fn connect_db() -> Result<Connection, String> {
@@ -48,20 +75,9 @@ pub(crate) async fn existing_hashes(
     db: &Connection,
     name: &str,
 ) -> Result<HashMap<String, String>, String> {
-    if !db
-        .table_names()
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?
-        .contains(&name.to_string())
-    {
+    let Some(table) = open_table_if_exists(db, name).await? else {
         return Ok(HashMap::new());
-    }
-    let table = db
-        .open_table(name)
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?;
+    };
     let batches: Vec<RecordBatch> = table
         .query()
         .select(lancedb::query::Select::Columns(vec![
@@ -102,13 +118,7 @@ pub(crate) fn sql_quote(s: &str) -> String {
 pub(crate) async fn flush_source(source_id: String) -> Result<(), String> {
     let db = connect_db().await?;
     let name = table_name(&source_id);
-    if db
-        .table_names()
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?
-        .contains(&name)
-    {
+    if table_exists(&db, &name).await? {
         db.drop_table(&name, &[]).await.map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -135,20 +145,9 @@ pub async fn search_similar(
 ) -> Result<Vec<CandidateTerm>, String> {
     let db = connect_db().await?;
     let name = table_name(source_id);
-    if !db
-        .table_names()
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?
-        .contains(&name)
-    {
+    let Some(table) = open_table_if_exists(&db, &name).await? else {
         return Ok(Vec::new());
-    }
-    let table = db
-        .open_table(&name)
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?;
+    };
     let batches: Vec<RecordBatch> = table
         .query()
         // Only `term` is consumed by the search path now (the per-field
@@ -213,20 +212,9 @@ pub struct VocabTermRow {
 pub(crate) async fn list_terms(source_id: String) -> Result<Vec<VocabTermRow>, String> {
     let db = connect_db().await?;
     let name = table_name(&source_id);
-    if !db
-        .table_names()
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?
-        .contains(&name)
-    {
+    let Some(table) = open_table_if_exists(&db, &name).await? else {
         return Ok(Vec::new());
-    }
-    let table = db
-        .open_table(&name)
-        .execute()
-        .await
-        .map_err(|e| e.to_string())?;
+    };
     let batches: Vec<RecordBatch> = table
         .query()
         .select(lancedb::query::Select::Columns(vec![

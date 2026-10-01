@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
-import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Eye, FileText, GripVertical, Plus } from "lucide-react";
 import type { AppActions } from "../../app/actions";
@@ -20,6 +19,8 @@ import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
+import { SortableList } from "./SortableList";
+import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
@@ -58,40 +59,12 @@ export function ArtefactFileTab({ state, actions }: Props) {
     [previewSettings]
   );
 
-  // Per-row DOM refs so a newly-added row can be scrolled into view. A ref
-  // tracks the previous column count so the scroll fires ONLY when the count
-  // grows (an Add), never on content edits, deletes, or reorders — which also
-  // change `live.artefactFields`. Mirrors ProvidersTab's add-scroll behaviour.
+  // Per-row DOM refs so a newly-added row can be scrolled into view.
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const prevCountRef = useRef(live.artefactFields.length);
-  useEffect(() => {
-    const grew = live.artefactFields.length > prevCountRef.current;
-    prevCountRef.current = live.artefactFields.length;
-    if (!grew) return;
-    // Add appends, so the new row is the last. Scroll it into view.
-    const last = live.artefactFields[live.artefactFields.length - 1];
-    const node = last ? rowRefs.current[last.id] : null;
-    // block:"nearest" avoids jumping when the row is already partly visible;
-    // a small timeout lets the expanded body measure before scrolling.
-    const t = setTimeout(() => node?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 30);
-    return () => clearTimeout(t);
-  }, [live.artefactFields]);
-
-  // Require a small drag threshold so a normal click on a row still toggles the
-  // editor instead of starting a drag. Mirrors CataloguingFieldsTab's reorder wiring.
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
-  const onDragEnd = useCallback(
-    (e: DragEndEvent) => {
-      const { active, over } = e;
-      if (!over || active.id === over.id) return;
-      const ids = live.artefactFields.map((f) => f.id);
-      const from = ids.indexOf(active.id as string);
-      const to = ids.indexOf(over.id as string);
-      if (from === -1 || to === -1) return;
-      void actions.reorderAF(arrayMove(ids, from, to));
-    },
-    [live.artefactFields, actions]
+  useScrollNewRowIntoView(
+    live.artefactFields.length,
+    rowRefs,
+    live.artefactFields[live.artefactFields.length - 1]?.id
   );
 
   return (
@@ -174,29 +147,30 @@ export function ArtefactFileTab({ state, actions }: Props) {
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Column Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Description</span>
         </div>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-          <SortableContext items={live.artefactFields.map((f) => f.id)} strategy={verticalListSortingStrategy}>
-            {live.artefactFields.map((af) => {
-              const saved = (settings.artefactFields || _DEF_AF).find((s) => s.id === af.id);
-              const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
-                { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
-                { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
-                ["id", "name", "description", "prompt", "includeInExport"],
-              ));
-              return (
-                <ArtefactColumnRow
-                  key={af.id}
-                  field={af}
-                  expanded={!!state.artefactFieldExpanded[af.id]}
-                  dirty={cardDirty}
-                  cardStatus={state.artefactCardSaveStatus[af.id] ?? null}
-                  cardRef={(node) => { rowRefs.current[af.id] = node; }}
-                  actions={actions}
-                />
-              );
-            })}
-          </SortableContext>
-        </DndContext>
+        <SortableList
+          items={live.artefactFields.map((f) => f.id)}
+          onReorder={(ids) => void actions.reorderAF(ids)}
+        >
+          {live.artefactFields.map((af) => {
+            const saved = (settings.artefactFields || _DEF_AF).find((s) => s.id === af.id);
+            const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
+              { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
+              { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
+              ["id", "name", "description", "prompt", "includeInExport"],
+            ));
+            return (
+              <ArtefactColumnRow
+                key={af.id}
+                field={af}
+                expanded={!!state.artefactFieldExpanded[af.id]}
+                dirty={cardDirty}
+                cardStatus={state.artefactCardSaveStatus[af.id] ?? null}
+                cardRef={(node) => { rowRefs.current[af.id] = node; }}
+                actions={actions}
+              />
+            );
+          })}
+        </SortableList>
         {live.artefactFields.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">No columns defined yet</div>
         )}

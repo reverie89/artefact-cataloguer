@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
-use crate::ai::{http_client, strip_models_prefix, trim_trailing_slash, ImageData};
+use crate::ai::{
+    fetch_advertised_models, http_client, response_text_checked, trim_trailing_slash, ImageData,
+};
 
 /// Max rows sent per `/embeddings` / `batchEmbedContents` request; the sync
 /// pipeline chunks rows into requests of this size.
@@ -77,14 +79,7 @@ pub(crate) async fn embed_texts(
                 .send()
                 .await
                 .map_err(|e| format!("embed request failed: {e}"))?;
-            let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("embed response read failed: {e}"))?;
-            if !status.is_success() {
-                return Err(format!("HTTP {}: {}", status.as_u16(), text));
-            }
+            let text = response_text_checked(resp, "embed response read failed").await?;
             let v: Value = serde_json::from_str(&text)
                 .map_err(|e| format!("embed response parse failed: {e}"))?;
             let data = v
@@ -127,14 +122,7 @@ pub(crate) async fn embed_texts(
                 .send()
                 .await
                 .map_err(|e| format!("embed request failed: {e}"))?;
-            let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("embed response read failed: {e}"))?;
-            if !status.is_success() {
-                return Err(format!("HTTP {}: {}", status.as_u16(), text));
-            }
+            let text = response_text_checked(resp, "embed response read failed").await?;
             let v: Value = serde_json::from_str(&text)
                 .map_err(|e| format!("embed response parse failed: {e}"))?;
             let embeddings = v
@@ -200,14 +188,7 @@ pub(crate) async fn embed_image(
                 .send()
                 .await
                 .map_err(|e| format!("image embed request failed: {e}"))?;
-            let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("image embed response read failed: {e}"))?;
-            if !status.is_success() {
-                return Err(format!("HTTP {}: {}", status.as_u16(), text));
-            }
+            let text = response_text_checked(resp, "image embed response read failed").await?;
             let v: Value = serde_json::from_str(&text)
                 .map_err(|e| format!("image embed response parse failed: {e}"))?;
             let emb = v
@@ -238,14 +219,7 @@ pub(crate) async fn embed_image(
                 .send()
                 .await
                 .map_err(|e| format!("image embed request failed: {e}"))?;
-            let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("image embed response read failed: {e}"))?;
-            if !status.is_success() {
-                return Err(format!("HTTP {}: {}", status.as_u16(), text));
-            }
+            let text = response_text_checked(resp, "image embed response read failed").await?;
             let v: Value = serde_json::from_str(&text)
                 .map_err(|e| format!("image embed response parse failed: {e}"))?;
             let emb = v
@@ -359,60 +333,27 @@ pub(crate) async fn check_connection(
         EmbeddingApiFormat::OpenAi => format!("{base}/models"),
         EmbeddingApiFormat::Gemini => format!("{base}/v1beta/models"),
     };
-    let mut req = client.get(&models_url);
-    req = match provider.api_format {
+    let auth: Vec<(&'static str, String)> = match provider.api_format {
         EmbeddingApiFormat::OpenAi => {
-            req.header("Authorization", format!("Bearer {}", provider.api_key))
+            vec![("Authorization", format!("Bearer {}", provider.api_key))]
         }
-        EmbeddingApiFormat::Gemini => req.header("x-goog-api-key", provider.api_key.clone()),
+        EmbeddingApiFormat::Gemini => vec![("x-goog-api-key", provider.api_key.clone())],
     };
     let mut models = Vec::new();
     let mut list_error: Option<String> = None;
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            match resp.text().await {
-                Ok(text) => {
-                    if status.is_success() {
-                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                            models = match provider.api_format {
-                                EmbeddingApiFormat::Gemini => v
-                                    .get("models")
-                                    .and_then(Value::as_array)
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|m| {
-                                                m.get("name")
-                                                    .and_then(Value::as_str)
-                                                    .map(strip_models_prefix)
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                                EmbeddingApiFormat::OpenAi => v
-                                    .get("data")
-                                    .and_then(Value::as_array)
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|m| {
-                                                m.get("id")
-                                                    .and_then(Value::as_str)
-                                                    .map(String::from)
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                            };
-                            models.sort();
-                        }
-                    } else {
-                        list_error = Some(format!("HTTP {}: {}", status.as_u16(), text));
-                    }
-                }
-                Err(e) => list_error = Some(format!("response body read failed: {e}")),
-            }
-        }
-        Err(e) => list_error = Some(format!("request failed: {e}")),
+    // Best-effort listing: a failure here is only fatal when no model is
+    // configured yet (see below) — with a model selected, the real embed call
+    // that follows is the connectivity signal.
+    match fetch_advertised_models(
+        &client,
+        &models_url,
+        &auth,
+        provider.api_format == EmbeddingApiFormat::Gemini,
+    )
+    .await
+    {
+        Ok(m) => models = m,
+        Err(e) => list_error = Some(e),
     }
     if provider.model.trim().is_empty() {
         // No model yet, so this listing call is the only connectivity/auth

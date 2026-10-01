@@ -1,7 +1,9 @@
 //! HTTP transport primitives shared across the AI pipeline and `embeddings`:
 //! the browser-envelope reqwest client, its UA constant, the request timeout,
-//! and base-URL / model-id munging helpers.
+//! base-URL / model-id munging helpers, the status/body error check, and the
+//! advertised-models listing used by both connection tests.
 
+use serde_json::Value;
 use std::time::Duration;
 
 /// Shared chat-completions request timeout (also the effective cap on how long
@@ -49,4 +51,77 @@ pub(crate) fn http_client(timeout: Duration) -> Result<reqwest::Client, String> 
 /// → `gemini-3.5-flash`).
 pub(crate) fn strip_models_prefix(name: &str) -> String {
     name.strip_prefix("models/").unwrap_or(name).to_string()
+}
+
+/// Read a response body as text, mapping a non-success status to the shared
+/// `HTTP <code>: <body>` error. `read_label` prefixes the body-read failure
+/// wording so each call site keeps its existing message (e.g. "embed response
+/// read failed"); an empty label yields the bare error string. The `HTTP
+/// <code>:` wording is load-bearing — `embeddings::is_transient_embed_error`
+/// substring-matches it to decide retries.
+pub(crate) async fn response_text_checked(
+    resp: reqwest::Response,
+    read_label: &str,
+) -> Result<String, String> {
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| {
+        if read_label.is_empty() {
+            e.to_string()
+        } else {
+            format!("{read_label}: {e}")
+        }
+    })?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
+/// GET a provider's `/models` endpoint and return the advertised model ids,
+/// sorted. Gemini answers `{"models":[{"name":"models/<id>"}]}` (prefix
+/// stripped so values match the id the request body expects); OpenAI-shaped
+/// APIs (OpenAI, Anthropic) answer `{"data":[{"id":"..."}]}`. A JSON parse
+/// failure yields an empty list — listing is best-effort across gateways.
+/// Consumed by `ai::test_connection` and `embeddings::check_connection`.
+pub(crate) async fn fetch_advertised_models(
+    client: &reqwest::Client,
+    models_url: &str,
+    auth: &[(&'static str, String)],
+    gemini: bool,
+) -> Result<Vec<String>, String> {
+    let mut req = client.get(models_url);
+    for (name, value) in auth {
+        req = req.header(*name, value.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let text = response_text_checked(resp, "response body read failed").await?;
+    let v = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+    let mut models: Vec<String> = if gemini {
+        v.get("models")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        m.get("name")
+                            .and_then(Value::as_str)
+                            .map(strip_models_prefix)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        v.get("data")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    models.sort();
+    Ok(models)
 }

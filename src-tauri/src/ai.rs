@@ -46,7 +46,6 @@ mod response;
 mod transport;
 mod types;
 
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -56,7 +55,9 @@ use tokio::sync::oneshot;
 // Items consumed by sibling modules (`embeddings`, `lib.rs`) are re-exported
 // here so external paths like `crate::ai::http_client` stay valid.
 pub(crate) use completion::ImageData;
-pub(crate) use transport::{http_client, strip_models_prefix, trim_trailing_slash};
+pub(crate) use transport::{
+    fetch_advertised_models, http_client, response_text_checked, trim_trailing_slash,
+};
 pub use types::{
     ApiFormat, ArtefactColumnSpec, ArtefactInput, CatalogueResult, ConnectionTest, FieldSpec,
     Provider, Suggestion,
@@ -659,61 +660,17 @@ pub fn build_vision_prompt_preview(
 #[tauri::command]
 pub async fn test_connection(provider: Provider) -> Result<ConnectionTest, String> {
     let base = trim_trailing_slash(&provider.base_url);
-    let (_completions, url) = provider.api_format.endpoints(&base);
+    let (_completions, models_url) = provider.api_format.endpoints(&base);
 
     let client = http_client(Duration::from_secs(20))?;
-
-    let mut req = client.get(&url);
-    for (name, value) in provider.api_format.auth(&provider.api_key) {
-        req = req.header(name, value);
-    }
-
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(format!("request failed: {e}"));
-        }
-    };
-
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("response body read failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status.as_u16(), text));
-    }
-
-    // Both OpenAI and Anthropic return `{"data":[{"id":"..."}, ...]}`. Gemini
-    // returns `{"models":[{"name":"models/<id>"}, ...]}` — strip the `models/`
-    // prefix so the value matches the id the request body expects.
-    let mut models: Vec<String> = Vec::new();
-    if let Ok(v) = serde_json::from_str::<Value>(&text) {
-        match provider.api_format {
-            ApiFormat::Gemini => {
-                if let Some(arr) = v.get("models").and_then(Value::as_array) {
-                    models = arr
-                        .iter()
-                        .filter_map(|m| {
-                            m.get("name")
-                                .and_then(Value::as_str)
-                                .map(strip_models_prefix)
-                        })
-                        .collect();
-                    models.sort();
-                }
-            }
-            _ => {
-                if let Some(arr) = v.get("data").and_then(Value::as_array) {
-                    models = arr
-                        .iter()
-                        .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
-                        .collect();
-                    models.sort();
-                }
-            }
-        }
-    }
+    let auth = provider.api_format.auth(&provider.api_key);
+    let models = fetch_advertised_models(
+        &client,
+        &models_url,
+        &auth,
+        provider.api_format == ApiFormat::Gemini,
+    )
+    .await?;
 
     Ok(ConnectionTest {
         ok: "Connection successful".to_string(),

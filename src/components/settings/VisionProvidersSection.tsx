@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi, XCircle } from "lucide-react";
+import { useRef } from "react";
+import { ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
@@ -8,12 +8,14 @@ import type { ApiFormat, Provider, ThinkingEffort } from "../../app/types";
 import { providerEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
 import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
-import { StatusIndicator } from "./SaveActions";
+import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
+import { UnsavedBadge } from "./UnsavedBadge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
@@ -55,23 +57,13 @@ export function VisionProvidersSection({ state, actions }: Props) {
   const live = state.providerDraft ?? providerDraftFromSettings(settings);
 
   // Per-row DOM refs so a newly-added row can be scrolled into view,
-  // anchoring its editor within the scroll pane. A ref tracks the previous
-  // provider count so the scroll fires ONLY when the count grows (an Add),
-  // never on content edits or deletes — which also change `live.providers`.
+  // anchoring its editor within the scroll pane.
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const prevCountRef = useRef(live.providers.length);
-  useEffect(() => {
-    const grew = live.providers.length > prevCountRef.current;
-    prevCountRef.current = live.providers.length;
-    if (!grew) return;
-    // Add appends, so the new row is the last. Scroll it into view.
-    const last = live.providers[live.providers.length - 1];
-    const node = last ? cardRefs.current[last.id] : null;
-    // block:"nearest" avoids jumping when the row is already partly visible;
-    // a small timeout lets the expanded body measure before scrolling.
-    const t = setTimeout(() => node?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 30);
-    return () => clearTimeout(t);
-  }, [live.providers]);
+  useScrollNewRowIntoView(
+    live.providers.length,
+    cardRefs,
+    live.providers[live.providers.length - 1]?.id
+  );
 
   // Grid template shared by the header row and each provider row so columns
   // align exactly: Provider / Model / Status / Active.
@@ -145,7 +137,7 @@ interface RowProps {
   entry: ProviderDraft["providers"][number];
   /** Shared grid template (header + rows) so columns align. */
   grid: string;
-  testStatus: "testing" | "ok" | "err" | null;
+  testStatus: TestStatus;
   showProvKey: boolean;
   isActive: boolean;
   /** Whether this row has unsaved draft changes (drives the "unsaved" badge). */
@@ -189,7 +181,7 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
           ) : (
             <>
               <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
-              {dirty && <Badge variant="secondary" className="font-semibold text-amber-600 dark:text-amber-400">Unsaved</Badge>}
+              <UnsavedBadge dirty={dirty} />
             </>
           )}
         </div>
@@ -298,17 +290,4 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
       )}
     </div>
   );
-}
-
-/** Compact connection-status badge for the row's Status column. */
-function StatusBadge({ status }: { status: "testing" | "ok" | "err" | null }) {
-  if (status === "ok") return <Badge variant="default" className="w-fit gap-1 tracking-[0.04em]"><CheckCircle2 className="size-2.5" />Connected</Badge>;
-  if (status === "err") return <Badge variant="destructive" className="w-fit gap-1 tracking-[0.04em]"><XCircle className="size-2.5" />Failed</Badge>;
-  if (status === "testing") return <Badge variant="secondary" className="w-fit gap-1 tracking-[0.04em]"><Loader2 className="size-2.5 animate-spin" />Testing…</Badge>;
-  return <Badge variant="secondary" className="w-fit tracking-[0.04em]">Not tested</Badge>;
-}
-
-function ConnectionStatus({ status }: { status: "testing" | "ok" | "err" | null }) {
-  const message = status === "testing" ? "Testing connection…" : status === "ok" ? "Connection successful" : status === "err" ? "Failed — check URL and API key" : "No status";
-  return <StatusIndicator state={status === "testing" ? "busy" : status} message={message} />;
 }

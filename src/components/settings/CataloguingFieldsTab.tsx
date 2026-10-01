@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
-import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { useMemo, useRef, useState } from "react";
+import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { AlertTriangle, GripVertical, Plus, X } from "lucide-react";
 import type { AppActions } from "../../app/actions";
@@ -24,6 +23,8 @@ import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
+import { SortableList } from "./SortableList";
+import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
@@ -40,41 +41,9 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
     [state.fieldDraft, settings.fields]
   );
 
-  // Per-row DOM refs so a newly-added row can be scrolled into view. A ref
-  // tracks the previous field count so the scroll fires ONLY when the count
-  // grows (an Add), never on content edits, deletes, or reorders — which also
-  // change `live.fields`. Mirrors ProvidersTab's add-scroll behaviour.
+  // Per-row DOM refs so a newly-added row can be scrolled into view.
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const prevCountRef = useRef(live.fields.length);
-  useEffect(() => {
-    const grew = live.fields.length > prevCountRef.current;
-    prevCountRef.current = live.fields.length;
-    if (!grew) return;
-    // Add appends, so the new row is the last. Scroll it into view.
-    const last = live.fields[live.fields.length - 1];
-    const node = last ? rowRefs.current[last.id] : null;
-    // block:"nearest" avoids jumping when the row is already partly visible;
-    // a small timeout lets the expanded body measure before scrolling.
-    const t = setTimeout(() => node?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 30);
-    return () => clearTimeout(t);
-  }, [live.fields]);
-
-  // Require a small drag threshold so a normal click on a row still toggles the
-  // editor instead of starting a drag.
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
-  const onDragEnd = useCallback(
-    (e: DragEndEvent) => {
-      const { active, over } = e;
-      if (!over || active.id === over.id) return;
-      const ids = live.fields.map((f) => f.id);
-      const from = ids.indexOf(active.id as string);
-      const to = ids.indexOf(over.id as string);
-      if (from === -1 || to === -1) return;
-      void actions.reorderFields(arrayMove(ids, from, to));
-    },
-    [live.fields, actions]
-  );
+  useScrollNewRowIntoView(live.fields.length, rowRefs, live.fields[live.fields.length - 1]?.id);
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -94,26 +63,27 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Type</span>
         </div>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-          <SortableContext items={live.fields.map((f) => f.id)} strategy={verticalListSortingStrategy}>
-            {live.fields.map((f) => {
-              const saved = settings.fields.find((s) => s.id === f.id);
-              const fieldDirty = !!state.fieldDraft && (!saved || fieldsDiffer(f, saved, ["id", "name", "type", "layout", "prompt", "vocabSources"]));
-              return (
-                <SortableFieldRow
-                  key={f.id}
-                  field={f}
-                  lists={settings.vocabSources}
-                  expanded={!!settingsFieldExpanded[f.id]}
-                  dirty={fieldDirty}
-                  cardStatus={state.fieldCardSaveStatus[f.id] ?? null}
-                  cardRef={(node) => { rowRefs.current[f.id] = node; }}
-                  actions={actions}
-                />
-              );
-            })}
-          </SortableContext>
-        </DndContext>
+        <SortableList
+          items={live.fields.map((f) => f.id)}
+          onReorder={(ids) => void actions.reorderFields(ids)}
+        >
+          {live.fields.map((f) => {
+            const saved = settings.fields.find((s) => s.id === f.id);
+            const fieldDirty = !!state.fieldDraft && (!saved || fieldsDiffer(f, saved, ["id", "name", "type", "layout", "prompt", "vocabSources"]));
+            return (
+              <SortableFieldRow
+                key={f.id}
+                field={f}
+                lists={settings.vocabSources}
+                expanded={!!settingsFieldExpanded[f.id]}
+                dirty={fieldDirty}
+                cardStatus={state.fieldCardSaveStatus[f.id] ?? null}
+                cardRef={(node) => { rowRefs.current[f.id] = node; }}
+                actions={actions}
+              />
+            );
+          })}
+        </SortableList>
       </Card>
 
       <Button onClick={actions.startAddField} variant="outline" className="text-muted-foreground w-full border-dashed">

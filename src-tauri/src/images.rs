@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::paths::validate_path_segment;
 use crate::settings::exe_dir;
 
 const TEMP_ROOT: &str = "tmp";
@@ -45,22 +46,6 @@ fn session_dir(session_id: &str) -> Result<PathBuf, String> {
     Ok(temp_app_dir().join(id))
 }
 
-/// Validate a single renderer-supplied path segment, returning the cleaned base
-/// name. Rejects anything that could escape one directory level.
-fn validate_path_segment(raw: &str, label: &str) -> Result<String, String> {
-    let cleaned = std::path::Path::new(raw)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty() && s != "." && s != "..");
-    match cleaned {
-        // `file_name` already strips any leading dir components, but a raw id
-        // like "../x" would resolve to "x" — reject it unless it matched verbatim.
-        Some(name) if name == raw => Ok(name),
-        _ => Err(format!("invalid {label}: rejected path traversal")),
-    }
-}
-
 /// Validate that `path` (renderer-supplied absolute image path) resolves inside
 /// the image scratch dir `<exe_dir>/tmp/artefact-cataloguer/`. Returns the
 /// canonicalized path on success. The renderer is untrusted, so an absolute path
@@ -81,7 +66,6 @@ pub fn validate_scratch_path(path: &str) -> Result<PathBuf, String> {
 
 /// Wipe the entire `<exe_dir>/tmp/artefact-cataloguer/` subtree.
 /// Safe to call when the dir does not exist. Called on startup and on quit.
-#[tauri::command]
 pub fn cleanup_temp() -> Result<(), String> {
     let dir = temp_app_dir();
     if dir.exists() {

@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { DndContext, type DragEndEvent, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
-import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { AlertTriangle, BookOpen, CheckCircle2, Download, GripVertical, Loader2, Plus, Upload, X, XCircle } from "lucide-react";
 import type { AppActions } from "../../app/actions";
@@ -17,6 +16,7 @@ import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
+import { SortableList } from "./SortableList";
 
 interface Props {
   state: AppState;
@@ -42,21 +42,6 @@ export function VocabTab({ state, actions }: Props) {
         }),
       }
     : { vocabSources: settings.vocabSources };
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
-  const onDragEnd = useCallback(
-    (e: DragEndEvent) => {
-      const { active, over } = e;
-      if (!over || active.id === over.id) return;
-      const ids = live.vocabSources.map((v) => v.id);
-      const from = ids.indexOf(active.id as string);
-      const to = ids.indexOf(over.id as string);
-      if (from === -1 || to === -1) return;
-      void actions.reorderVocab(arrayMove(ids, from, to));
-    },
-    [live.vocabSources, actions]
-  );
 
   const anySyncing = Object.keys(state.vocabSyncProgress).length > 0;
 
@@ -140,29 +125,30 @@ export function VocabTab({ state, actions }: Props) {
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Status</span>
           <span />
         </div>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-          <SortableContext items={live.vocabSources.map((v) => v.id)} strategy={verticalListSortingStrategy}>
-            {live.vocabSources.map((vs) => {
-              const saved = settings.vocabSources.find((s) => s.id === vs.id);
-              const draftSource = state.vocabDraft?.vocabSources.find((v) => v.id === vs.id);
-              const cardDirty = !!state.vocabDraft && (!saved || (draftSource?.name ?? "") !== (saved.name ?? ""));
-              return (
-                <SortableVocabRow
-                  key={vs.id}
-                  vs={vs}
-                  expanded={!!state.settingsVocabExpanded[vs.id]}
-                  dirty={cardDirty}
-                  cardStatus={state.vocabCardSaveStatus[vs.id] ?? null}
-                  cardError={state.vocabCardError[vs.id]}
-                  syncProgress={state.vocabSyncProgress[vs.id]}
-                  liveFields={state.fieldDraft?.fields ?? settings.fields}
-                  hasEmbeddingProvider={!!settings.activeEmbeddingProvider}
-                  actions={actions}
-                />
-              );
-            })}
-          </SortableContext>
-        </DndContext>
+        <SortableList
+          items={live.vocabSources.map((v) => v.id)}
+          onReorder={(ids) => void actions.reorderVocab(ids)}
+        >
+          {live.vocabSources.map((vs) => {
+            const saved = settings.vocabSources.find((s) => s.id === vs.id);
+            const draftSource = state.vocabDraft?.vocabSources.find((v) => v.id === vs.id);
+            const cardDirty = !!state.vocabDraft && (!saved || (draftSource?.name ?? "") !== (saved.name ?? ""));
+            return (
+              <SortableVocabRow
+                key={vs.id}
+                vs={vs}
+                expanded={!!state.settingsVocabExpanded[vs.id]}
+                dirty={cardDirty}
+                cardStatus={state.vocabCardSaveStatus[vs.id] ?? null}
+                cardError={state.vocabCardError[vs.id]}
+                syncProgress={state.vocabSyncProgress[vs.id]}
+                liveFields={state.fieldDraft?.fields ?? settings.fields}
+                hasEmbeddingProvider={!!settings.activeEmbeddingProvider}
+                actions={actions}
+              />
+            );
+          })}
+        </SortableList>
         {live.vocabSources.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">No vocabulary sources yet</div>
         )}

@@ -12,6 +12,7 @@
 mod ai;
 mod embeddings;
 mod images;
+mod paths;
 mod secrets;
 mod settings;
 mod vocab_files;
@@ -80,7 +81,6 @@ pub fn run() {
             settings::load_state,
             settings::save_state,
             images::extract_images,
-            images::cleanup_temp,
             ai::catalogue_artefact,
             ai::cancel_catalogue,
             ai::build_vision_prompt_preview,

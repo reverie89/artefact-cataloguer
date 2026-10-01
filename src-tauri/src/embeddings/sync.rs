@@ -16,7 +16,9 @@ use tauri::{AppHandle, Emitter};
 use crate::vocab_files::{list_source_files, parse_source_file, VocabSourceField};
 
 use super::provider::{embed_texts, EmbeddingProvider, EMBED_BATCH_SIZE};
-use super::store::{connect_db, existing_hashes, sql_quote, table_name, table_schema};
+use super::store::{
+    connect_db, existing_hashes, open_table_if_exists, sql_quote, table_name, table_schema,
+};
 
 const SYNC_EVENT: &str = "ac-vocab-sync";
 
@@ -302,7 +304,14 @@ pub(crate) async fn run_sync(
         let batch = build_record_batch(&schema, chunk, &vectors, &now)?;
         let iter = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
 
-        table = Some(match table.take() {
+        // Upsert this batch: reuse the already-open table, else open the
+        // persisted one, else create it on the first sync (the batch iterator
+        // IS the initial insert, so only the existing-table paths merge).
+        let existing = match table.take() {
+            Some(t) => Some(t),
+            None => open_table_if_exists(&db, &name).await?,
+        };
+        table = Some(match existing {
             Some(t) => {
                 let mut mi = t.merge_insert(&["term_key"]);
                 mi.when_matched_update_all(None)
@@ -312,33 +321,11 @@ pub(crate) async fn run_sync(
                     .map_err(|e| e.to_string())?;
                 t
             }
-            None => {
-                if db
-                    .table_names()
-                    .execute()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .contains(&name)
-                {
-                    let t = db
-                        .open_table(&name)
-                        .execute()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let mut mi = t.merge_insert(&["term_key"]);
-                    mi.when_matched_update_all(None)
-                        .when_not_matched_insert_all();
-                    mi.execute(Box::new(iter))
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    t
-                } else {
-                    db.create_table(&name, iter)
-                        .execute()
-                        .await
-                        .map_err(|e| e.to_string())?
-                }
-            }
+            None => db
+                .create_table(&name, iter)
+                .execute()
+                .await
+                .map_err(|e| e.to_string())?,
         });
 
         embedded += chunk.len();
@@ -354,24 +341,7 @@ pub(crate) async fn run_sync(
     if !deleted.is_empty() {
         let t = match table {
             Some(t) => Some(t),
-            None => {
-                if db
-                    .table_names()
-                    .execute()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .contains(&name)
-                {
-                    Some(
-                        db.open_table(&name)
-                            .execute()
-                            .await
-                            .map_err(|e| e.to_string())?,
-                    )
-                } else {
-                    None
-                }
-            }
+            None => open_table_if_exists(&db, &name).await?,
         };
         if let Some(t) = t {
             let filter = format!(
@@ -391,23 +361,13 @@ pub(crate) async fn run_sync(
 
     // Dimensions weren't learned this pass if every row was reused — read them
     // back from the table's schema so the caller can still record them.
-    if dimensions == 0
-        && db
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| e.to_string())?
-            .contains(&name)
-    {
-        let t = db
-            .open_table(&name)
-            .execute()
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Ok(schema) = t.schema().await {
-            if let Ok(f) = schema.field_with_name("vector") {
-                if let DataType::FixedSizeList(_, w) = f.data_type() {
-                    dimensions = *w as u32;
+    if dimensions == 0 {
+        if let Some(t) = open_table_if_exists(&db, &name).await? {
+            if let Ok(schema) = t.schema().await {
+                if let Ok(f) = schema.field_with_name("vector") {
+                    if let DataType::FixedSizeList(_, w) = f.data_type() {
+                        dimensions = *w as u32;
+                    }
                 }
             }
         }

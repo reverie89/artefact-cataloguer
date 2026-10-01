@@ -32,7 +32,7 @@ All colours are OKLCH values resolved through Tailwind semantic classes. Do not 
 ## 2. Primitive catalog
 
 ### shadcn primitives (`src/components/ui/`)
-`button`, `card`, `input`, `label`, `textarea`, `select`, `badge`, `separator`, `tabs`, `dialog`, `alert-dialog`, `sheet`, `scroll-area`, `dropdown-menu`, `tooltip`, `alert`, `checkbox`.
+`button`, `card`, `input`, `label`, `textarea`, `select`, `badge`, `separator`, `tabs`, `dialog`, `sheet`, `dropdown-menu`, `alert`, `checkbox`.
 
 Key usage:
 - **Button** — variants `default|secondary|outline|ghost|destructive|link`; sizes `xs|sm|default|lg|icon|icon-sm`. Prefer `size="sm"` in dense rows. The default height (`h-9`) is the single control standard.
@@ -55,6 +55,8 @@ The single home for labeled form fields. **Reuse these wherever a form appears**
 - **`CardActions`** — per-card `[status][Delete][Discard][Save]` row. Gates Save/Discard on `dirty` (kept in-layout via `invisible`).
 - **`PendingChangesBar`** — tab-level `[count][status][Discard all][Apply]` banner for structural changes.
 - **`StatusIndicator` / `SaveStatus`** (`SaveActions.tsx`) — shared status dispatch (busy→spinner, ok→check, err→x). Domains map their state into `StatusKind`.
+- **`StatusBadge` / `ConnectionStatus`** (`ProviderStatus.tsx`) — provider Test Connection outcome as a compact row badge / inline indicator (with learned `dimensions`), shared by both provider sections.
+- **`SortableList`** (`settings/SortableList.tsx`) — vertical drag-to-reorder wrapper owning the DndContext/sensor/drop-guard wiring for the settings card lists; rows call `useSortable` and apply the drag transform inline (§4 #1).
 
 ## 3. Adding / extending
 
@@ -93,8 +95,10 @@ Records where similar designs were evaluated during the shadcn migration and the
 | **Wordmark/titles** | **Standardized** to sans system stack | DM Serif Display removed per "only keep shadcn"; titles are now `font-semibold` sans. |
 | **Monospace** (ids, paths, code) | **Removed** | Monospace was intentionally dropped — all text renders in the sans system stack. |
 | **Per-row action button** (ResultRow Stop/Retry, plus the error/cancelled Retry) | **Standardized** on shadcn `Button variant="outline" size="xs"` with `icon + label`, nested in the row's clickable header via `e.stopPropagation()` | One control for every inline row action. Stop = `Ban` icon (matches UploadPanel's whole-run Cancel); Retry = `RotateCcw` icon. The two are mutually exclusive by row status: `processing` → Stop (transport-level cancel of the in-flight AI call); `done`/`error`/`cancelled` → Retry; `queued` → none (the run is about to process it, so a retry would double-call). Stop cancels only that row and the run continues to the rest; real errors stay fail-fast. |
-| **Dark-mode primary lightness** (`--primary` in `.dark`) | **Edge case — lifted** | The shadcn indigo is identical across themes (`oklch(0.546 0.245 262.881)`), and that mid-tone is low-contrast when `--primary` is used as text on the dark card (controlled-vocab dropdown selections, chevrons, AI dot, confidence-bar fill, "Use typed"). `.dark` lifts primary to `oklch(0.62 0.24 262.881)` — same hue/chroma, brighter lightness — and `--ring`/`--sidebar-primary`/`--sidebar-ring` track it so accents don't drift. `:root` (light) is unchanged. Lift is bounded at 0.62 to keep `--primary-foreground` (near-white) legible on default Buttons; push higher only after re-checking button contrast. |
+| **Dark-mode primary lightness** (`--primary` in `.dark`) | **Edge case — lifted** | The shadcn indigo is identical across themes (`oklch(0.546 0.245 262.881)`), and that mid-tone is low-contrast when `--primary` is used as text on the dark card (controlled-vocab dropdown selections, chevrons, AI dot, confidence-bar fill, "Use typed"). `.dark` lifts primary to `oklch(0.62 0.24 262.881)` — same hue/chroma, brighter lightness — and `--ring` tracks it so accents don't drift. `:root` (light) is unchanged. Lift is bounded at 0.62 to keep `--primary-foreground` (near-white) legible on default Buttons; push higher only after re-checking button contrast. |
 | **Select default position** (`ui/select.tsx`) | **Edge case — popper instead of stock item-aligned** | Item-aligned clips/mis-sizes the popup when a select opens with no selected value (the Model dropdown immediately after Test Connection blanks the model); popper anchors beside the trigger and behaves identically before and after restart. |
+| **Drag-sortable card lists** (Fields, Artefact File, Vocab tabs) | **Standardized** on `SortableList` (`settings/SortableList.tsx`) | One DndContext/PointerSensor(5px)/drop-guard wiring instead of three copies; rows keep their own `useSortable` + inline drag transform (§4 #1). |
+| **Provider card-lists** (Vision vs Embedding sections) | **Edge case — two sections, shared pieces** | The sections' field sets, copy, and action surfaces diverge intentionally (thinking vs dimensions, base-URL endpoint semantics), so full unification would need a ~15-callback adapter. The genuinely identical pieces are shared instead: `ProviderStatus`, `UnsavedBadge`, `useScrollNewRowIntoView`, and the §2 expandable-body/grid vocabulary. |
 
 ## 6. Testing Radix overlays (jsdom note)
 

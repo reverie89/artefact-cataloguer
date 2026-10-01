@@ -28,6 +28,6 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./src/setupTests.ts",
-    exclude: ["**/node_modules/**", "**/dist/**", "**/linkii/**"],
+    exclude: ["**/node_modules/**", "**/dist/**"],
   },
 });

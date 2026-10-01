@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::paths::validate_path_segment;
 use crate::settings::exe_dir;
 
 const VOCAB_FILES_DIR: &str = "vocab_files";
@@ -61,21 +62,6 @@ pub fn vocab_files_dir() -> PathBuf {
     exe_dir().join(VOCAB_FILES_DIR)
 }
 
-/// Validate a single renderer-supplied path segment (source id or filename),
-/// returning the cleaned base name. Mirrors `images::validate_path_segment` —
-/// rejects anything that could escape one directory level.
-fn validate_path_segment(raw: &str, label: &str) -> Result<String, String> {
-    let cleaned = Path::new(raw)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty() && s != "." && s != "..");
-    match cleaned {
-        Some(name) if name == raw => Ok(name),
-        _ => Err(format!("invalid {label}: rejected path traversal")),
-    }
-}
-
 pub fn source_dir(source_id: &str) -> Result<PathBuf, String> {
     let id = validate_path_segment(source_id, "source id")?;
     Ok(vocab_files_dir().join(id))
@@ -85,6 +71,13 @@ fn file_path(source_id: &str, filename: &str) -> Result<PathBuf, String> {
     let dir = source_dir(source_id)?;
     let name = validate_path_segment(filename, "filename")?;
     Ok(dir.join(name))
+}
+
+/// Header-row heuristic shared by both format readers: the first row counts
+/// as a header only when its first cell carries no digit (a label, not data)
+/// — mirrors the original parseVocabFile heuristic.
+fn looks_like_header(first: Option<&str>) -> bool {
+    first.is_some_and(|c| !c.chars().any(|ch| ch.is_ascii_digit()))
 }
 
 /// Detect header columns from one file (first row only — cheap even for a
@@ -103,13 +96,7 @@ fn detect_fields(path: &Path) -> Result<Vec<String>, String> {
             return Ok(Vec::new());
         };
         let first = first.map_err(|e| format!("read header failed: {e}"))?;
-        // Only treat the first row as a header (drop it) if it looks like a
-        // label rather than data — mirrors the old parseVocabFile heuristic.
-        let looks_like_header = first
-            .iter()
-            .next()
-            .is_some_and(|c| !c.chars().any(|ch| ch.is_ascii_digit()));
-        if !looks_like_header {
+        if !looks_like_header(first.iter().next()) {
             return Ok(Vec::new());
         }
         Ok(first
@@ -130,10 +117,7 @@ fn detect_fields(path: &Path) -> Result<Vec<String>, String> {
         let Some(first) = range.rows().next() else {
             return Ok(Vec::new());
         };
-        let looks_like_header = first
-            .first()
-            .is_some_and(|c| !c.to_string().chars().any(|ch| ch.is_ascii_digit()));
-        if !looks_like_header {
+        if !looks_like_header(first.first().map(|c| c.to_string()).as_deref()) {
             return Ok(Vec::new());
         }
         Ok(first
@@ -178,10 +162,7 @@ pub fn parse_source_file(
             return Ok(rows);
         };
         let first = first.map_err(|e| format!("read failed: {e}"))?;
-        let header_row = first
-            .iter()
-            .next()
-            .is_some_and(|c| !c.chars().any(|ch| ch.is_ascii_digit()));
+        let header_row = looks_like_header(first.iter().next());
         let headers: Vec<String> = if header_row {
             first.iter().map(|s| s.trim().to_string()).collect()
         } else {
@@ -189,11 +170,23 @@ pub fn parse_source_file(
         };
         let term_index = resolve_term_index(&headers, term_field);
         if !header_row {
-            push_row_csv(&mut rows, &first, &headers, term_index, filename);
+            push_row(
+                &mut rows,
+                first.iter().map(|s| s.trim().to_string()).collect(),
+                &headers,
+                term_index,
+                filename,
+            );
         }
         for rec in records {
             let rec = rec.map_err(|e| format!("read failed: {e}"))?;
-            push_row_csv(&mut rows, &rec, &headers, term_index, filename);
+            push_row(
+                &mut rows,
+                rec.iter().map(|s| s.trim().to_string()).collect(),
+                &headers,
+                term_index,
+                filename,
+            );
         }
     } else {
         let mut wb = open_workbook_auto(path).map_err(|e| format!("open workbook failed: {e}"))?;
@@ -209,9 +202,7 @@ pub fn parse_source_file(
         let Some(first) = iter.next() else {
             return Ok(rows);
         };
-        let header_row = first
-            .first()
-            .is_some_and(|c| !c.to_string().chars().any(|ch| ch.is_ascii_digit()));
+        let header_row = looks_like_header(first.first().map(|c| c.to_string()).as_deref());
         let headers: Vec<String> = if header_row {
             first
                 .iter()
@@ -222,10 +213,27 @@ pub fn parse_source_file(
         };
         let term_index = resolve_term_index(&headers, term_field);
         if !header_row {
-            push_row_calamine(&mut rows, first, &headers, term_index, filename);
+            push_row(
+                &mut rows,
+                first
+                    .iter()
+                    .map(|c| c.to_string().trim().to_string())
+                    .collect(),
+                &headers,
+                term_index,
+                filename,
+            );
         }
         for rec in iter {
-            push_row_calamine(&mut rows, rec, &headers, term_index, filename);
+            push_row(
+                &mut rows,
+                rec.iter()
+                    .map(|c| c.to_string().trim().to_string())
+                    .collect(),
+                &headers,
+                term_index,
+                filename,
+            );
         }
     }
     Ok(rows)
@@ -241,44 +249,16 @@ fn resolve_term_index(headers: &[String], term_field: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
-fn push_row_csv(
+/// Push one parsed row built from `cells` (the row's string values in file
+/// order). Rows without a non-empty term cell are skipped; every other
+/// column is recorded as `(header, value)` in file order.
+fn push_row(
     rows: &mut Vec<ParsedRow>,
-    rec: &csv::StringRecord,
+    cells: Vec<String>,
     headers: &[String],
     term_index: usize,
     filename: &str,
 ) {
-    let cells: Vec<String> = rec.iter().map(|c| c.trim().to_string()).collect();
-    let Some(term) = cells.get(term_index).cloned() else {
-        return;
-    };
-    if term.is_empty() {
-        return;
-    }
-    let columns = headers
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != term_index)
-        .filter_map(|(i, name)| cells.get(i).map(|val| (name.clone(), val.clone())))
-        .collect();
-    rows.push(ParsedRow {
-        term,
-        columns,
-        source_file: filename.to_string(),
-    });
-}
-
-fn push_row_calamine(
-    rows: &mut Vec<ParsedRow>,
-    rec: &[calamine::Data],
-    headers: &[String],
-    term_index: usize,
-    filename: &str,
-) {
-    let cells: Vec<String> = rec
-        .iter()
-        .map(|c| c.to_string().trim().to_string())
-        .collect();
     let Some(term) = cells.get(term_index).cloned() else {
         return;
     };
