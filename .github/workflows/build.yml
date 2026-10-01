@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows — NSIS installer only
+          # Windows — NSIS installer only (a portable exe is attached from the same build)
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: win-x64
@@ -131,6 +131,25 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }} ${{ matrix.bundles }}
 
+      - name: Attach portable exe
+        if: runner.os == 'Windows'
+        # The standalone exe is a byproduct of the NSIS build; the app stores its
+        # state next to the binary, so the raw exe doubles as a portable build.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          # tauri build renames the binary to productName; fall back to a glob if that changes.
+          src="src-tauri/target/${{ matrix.target }}/release/Artefact Cataloguer.exe"
+          if [ ! -f "$src" ]; then
+            src=$(find "src-tauri/target/${{ matrix.target }}/release" -maxdepth 1 -name '*.exe' | head -n1)
+          fi
+          dest="src-tauri/target/${{ matrix.target }}/release/Artefact Cataloguer_${VERSION}_${{ matrix.artifact_name }}-portable.exe"
+          cp "$src" "$dest"
+          gh release upload "$GITHUB_REF_NAME" "$dest" --clobber --repo "$GITHUB_REPOSITORY"
+
       - name: Generate SHA-256 checksums
         shell: bash
         run: |
@@ -138,6 +157,10 @@ jobs:
           cd src-tauri/target/*/release/bundle 2>/dev/null || exit 0
           find . -type f \( -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" \) \
             -exec openssl dgst -sha256 -r {} \; > "${{ matrix.artifact_name }}-checksums.txt"
+          # Include the portable exe (see "Attach portable exe"); it sits in release/,
+          # one level above this bundle/ directory.
+          find .. -maxdepth 1 -name "*-portable.exe" \
+            -exec openssl dgst -sha256 -r {} \; >> "${{ matrix.artifact_name }}-checksums.txt"
           cat "${{ matrix.artifact_name }}-checksums.txt"
 
       - name: Upload checksums

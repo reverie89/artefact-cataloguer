@@ -30,7 +30,11 @@
 
 ## Quick Start
 
-Pre-built binaries are on the [Releases page](https://github.com/reverie89/artefact-cataloguer/releases).
+Pre-built binaries are on the [Releases page](https://github.com/reverie89/artefact-cataloguer/releases):
+Windows NSIS installers, Linux AppImage/`.deb` packages, and a portable single-EXE Windows build
+(`*-portable.exe`). The portable exe needs the WebView2 Runtime (preinstalled on Windows 11 and
+updated Windows 10 — there is no installer to set it up) and must be kept in a writable folder,
+since it writes `settings.json` and scratch files next to itself.
 To run from source:
 
 ```bash
