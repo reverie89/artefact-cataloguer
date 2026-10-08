@@ -120,7 +120,7 @@ describe("reducer", () => {
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeInExport: true }] }),
+      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true }] }),
     });
     expect(next.artefactDraft).not.toBeNull();
     expect(next.artefactDraft!.artefactFields.length).toBe(before + 1);

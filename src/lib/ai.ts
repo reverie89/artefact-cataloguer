@@ -3,7 +3,7 @@
 // can surface them — there is no demo fallback.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
+import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
 
 interface RawCatalogueResult {
   fieldResults: Record<string, { value: string; similarity?: number }[]>;
@@ -84,6 +84,31 @@ interface RustArtefact {
    *  by Rust. */
   visionSystemPrompt: string;
   artefactColumns: RustArtefactColumn[];
+}
+
+/**
+ * The record the AI sees: only configured Artefact File columns with
+ * `includeForAI` on, matched case-insensitively against the sheet's headers.
+ * Unconfigured columns — and configured columns toggled off — still appear in
+ * the source record panel; this bound applies only to the AI payload. The
+ * Image column never appears in `record` (the parser excludes it; its bytes
+ * travel separately).
+ */
+export function recordForAI(record: Record<string, string>, artefactFields: ArtefactField[]): Record<string, string> {
+  const include = new Set(artefactFields.filter((f) => f.includeForAI).map((f) => f.name.trim().toLowerCase()));
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(record)) {
+    if (include.has(k.trim().toLowerCase())) out[k] = v;
+  }
+  return out;
+}
+
+/** Per-column guidance lines for the prompt — only for columns the AI
+ *  actually receives; guidance about an excluded column would be misleading. */
+function aiIncludedColumns(settings: Settings): RustArtefactColumn[] {
+  return (settings.artefactFields || [])
+    .filter((c) => c.includeForAI)
+    .map((c) => ({ name: c.name, prompt: c.prompt ?? "" }));
 }
 
 /** Ids of this field's vocab sources whose embedded index is ready for
@@ -170,7 +195,8 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
  * in Rust. Returns per-field suggestions: open-ended fields carry no
  * similarity; controlled-vocab fields carry cosine `similarity`. Throws on
  * transport/HTTP errors so callers can surface them — there is no demo
- * fallback.
+ * fallback. `record` is filtered to the Artefact File columns with Include
+ * for AI on before invoke (see {@link recordForAI}).
  *
  * `cancelKey` identifies this call in Rust's cancel registry (see
  * {@link cancelCatalogue}); cancelling it makes the Rust side drop the in-flight
@@ -195,13 +221,13 @@ export async function catalogueArtefact(
     vocabSourceIds: vocabSourceIdsForRetrieval(f, settings),
   }));
   const rustArtefact: RustArtefact = {
-    record,
+    record: recordForAI(record, settings.artefactFields || []),
     imagePath: imagePath || null,
     // The unified vision-analysis prompt: persona + output-format preamble.
     // Rust appends the XML field enumeration and the <artefact_file> record
     // block.
     visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
-    artefactColumns: (settings.artefactFields || []).map((c) => ({ name: c.name, prompt: c.prompt ?? "" })),
+    artefactColumns: aiIncludedColumns(settings),
   };
   const embProvider = activeEmbeddingProvider(settings);
   const res = await invoke<RawCatalogueResult>("catalogue_artefact", {
@@ -245,7 +271,7 @@ export async function buildPromptPreview(settings: Settings): Promise<string> {
     visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
     artefactColumns: [],
   };
-  const columns: RustArtefactColumn[] = (settings.artefactFields || []).map((c) => ({ name: c.name, prompt: c.prompt ?? "" }));
+  const columns: RustArtefactColumn[] = aiIncludedColumns(settings);
   const fields: RustField[] = (settings.fields || []).map((f) => ({
     name: f.name,
     type: f.type,

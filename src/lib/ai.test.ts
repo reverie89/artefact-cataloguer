@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "./ai";
+import { findUnsyncedVocabField, findVocabFieldWithoutEmbedding, recordForAI } from "./ai";
 import { _DEF } from "../app/defaults";
-import type { CatalogueField, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
+import type { ArtefactField, CatalogueField, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
 
 function baseSettings(fields: CatalogueField[], vocabSources: VocabSource[]): Settings {
   return { ..._DEF(), fields, vocabSources };
@@ -23,6 +23,27 @@ function source(id: string, name: string, opts: Partial<VocabSource>): VocabSour
     embedding: embedding("never"), ...opts,
   };
 }
+
+describe("recordForAI", () => {
+  const fields: ArtefactField[] = [
+    { id: "a", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: true },
+    { id: "b", name: "Internal Notes", description: "", prompt: "", includeForAI: false, includeInExport: true },
+    { id: "c", name: "Curator's notes", description: "", prompt: "", includeForAI: true, includeInExport: false },
+  ];
+
+  it("keeps only configured columns with Include for AI on", () => {
+    const record = { Material: "bronze", "Internal Notes": "private", "Curator's notes": "fine piece", Unconfigured: "dropped" };
+    expect(recordForAI(record, fields)).toEqual({ Material: "bronze", "Curator's notes": "fine piece" });
+  });
+
+  it("matches headers case-insensitively, preserving the record's key casing", () => {
+    expect(recordForAI({ MATERIAL: "bronze" }, fields)).toEqual({ MATERIAL: "bronze" });
+  });
+
+  it("returns an empty record when no column is configured", () => {
+    expect(recordForAI({ Material: "bronze" }, [])).toEqual({});
+  });
+});
 
 describe("findUnsyncedVocabField", () => {
   it("flags a field whose source has never been synced", () => {

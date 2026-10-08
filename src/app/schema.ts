@@ -94,6 +94,9 @@ const ArtefactFieldSchema = z.object({
   // `.default(true)` so settings written before this field existed load with
   // every column exporting (the opt-out default) — no separate migration step.
   includeInExport: z.boolean().default(true),
+  // Same back-compat: settings written before this field existed load with
+  // every configured column sent to the AI — the pre-toggle behaviour.
+  includeForAI: z.boolean().default(true),
 });
 
 /**

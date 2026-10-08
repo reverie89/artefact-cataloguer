@@ -2034,10 +2034,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch { console.error("[artefact] reorderAF: save failed"); }
   }, [state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch]);
   const updateAF = useCallback((id: string, key: EditableArtefactFieldKey, value: string) => {
-    // `includeInExport` is a boolean persisted on ArtefactField, but the Segmented
-    // toggle emits the string "true"/"false" — coerce here so the draft carries
-    // the typed value, while name/description/prompt stay string passthroughs.
-    const coerced = key === "includeInExport" ? value === "true" : value;
+    // The Include-for-AI / Include-in-Export booleans are persisted on
+    // ArtefactField, but the Segmented toggles emit the string "true"/"false" —
+    // coerce here so the draft carries the typed value, while
+    // name/description/prompt stay string passthroughs.
+    const coerced = key === "includeForAI" || key === "includeInExport" ? value === "true" : value;
     patchArtefactDraft((d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...f, [key]: coerced } : f)) }));
   }, [patchArtefactDraft]);
   const removeAF = useCallback(async (id: string) => {
@@ -2060,7 +2061,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [state.artefactDraft, state.settings, state.darkMode, state.zoom, patchArtefactDraft, dispatch, confirmDelete]);
   const startAddAF = useCallback(() => {
     const id = gid();
-    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "", includeInExport: true }] }));
+    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "", includeForAI: true, includeInExport: true }] }));
     dispatch({ type: "TOGGLE_AF", id });
   }, [patchArtefactDraft, dispatch]);
 

@@ -79,7 +79,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
             The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
           <div className="text-muted-foreground text-[13px] leading-relaxed">
-            Every column configured here must be present when the file is parsed, even if some cells are empty. Additional (unconfigured) columns are still parsed and appear in the source record panel. All parsed columns are sent to the AI in the vision-analysis prompt.
+            Every column configured here must be present when the file is parsed, even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. Configured columns are sent to the AI in the vision-analysis prompt unless you turn their Include for AI toggle off.
           </div>
         </div>
       </Card>
@@ -156,7 +156,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
             const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
               { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
               { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
-              ["id", "name", "description", "prompt", "includeInExport"],
+              ["id", "name", "description", "prompt", "includeForAI", "includeInExport"],
             ));
             return (
               <ArtefactColumnRow
@@ -202,7 +202,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
 /** A single artefact-column row. Clicking anywhere on the row toggles the
  *  editor (mirrors CataloguingFieldsTab's SortableFieldRow). */
 interface ArtefactColumnRowProps {
-  field: { id: string; name: string; description: string; prompt: string; includeInExport: boolean };
+  field: { id: string; name: string; description: string; prompt: string; includeForAI: boolean; includeInExport: boolean };
   expanded: boolean;
   /** Whether this column has unsaved content edits. */
   dirty: boolean;
@@ -258,12 +258,30 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             desc="Internal note about this column, shown in the columns list — not sent to the AI."
             labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
           />
+          {/* AI inclusion — draft-buffered like Include in Export below (the
+              Segmented emits "true"/"false" strings; updateAF coerces to a
+              boolean on the draft). Off keeps the column export-only: its
+              values never reach the model and its prompt instruction is
+              omitted. */}
+          <Field
+            label="Include for AI"
+            desc="Send this column's values to the AI in the vision-analysis prompt. Turn off to keep the column for export only — its values still appear in the source record panel but never reach the model."
+          >
+            <Segmented
+              value={af.includeForAI ? "true" : "false"}
+              onChange={(v) => actions.updateAF(af.id, "includeForAI", v)}
+              options={[
+                { value: "true", label: "Yes" },
+                { value: "false", label: "No" },
+              ]}
+            />
+          </Field>
           <FieldTextarea
             label="Prompt Instruction"
             value={af.prompt}
             onChange={(e) => actions.updateAF(af.id, "prompt", e.target.value)}
             placeholder="Teach the AI how to read this column's values (optional)"
-            desc="Teach the AI how to read this column when cataloguing — e.g. what its values mean or how to use them. Leave blank to send the value with no field-specific guidance; the instruction is then omitted from the prompt."
+            desc="Teach the AI how to read this column when cataloguing — e.g. what its values mean or how to use them. Leave blank to send the value with no field-specific guidance; the instruction is then omitted from the prompt. Only used when Include for AI is on."
             labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
             rows={2}
             className="resize-y leading-relaxed"

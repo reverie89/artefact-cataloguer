@@ -11,18 +11,25 @@ export type ThinkingEffort = "low" | "medium" | "high";
 
 /** A configurable column the artefact spreadsheet must provide. Every
  *  configured column must be present when the file is parsed (even if some
- *  cells are empty), and its values are always sent to the AI in the
- *  vision-analysis prompt. `prompt` is an optional per-column instruction for
- *  how the vision call should use that column's value — empty means "no
- *  field-specific guidance" and is omitted from the prompt (the value still
- *  reaches the model via the record). `includeInExport` controls whether this
- *  column is written as a leading column in the exported spreadsheet, before
- *  the catalogue fields; an image column's bytes are embedded per row. */
+ *  cells are empty). `includeForAI` gates whether the column's values reach
+ *  the AI: when on, they are part of the vision-analysis prompt's record;
+ *  when off (or when the column isn't configured here at all), the values
+ *  still appear in the source record panel but never reach the model.
+ *  `prompt` is an optional per-column instruction for how the vision call
+ *  should use that column's value — empty means "no field-specific guidance"
+ *  and is omitted from the prompt (the value still reaches the model via the
+ *  record); it only applies while `includeForAI` is on. `includeInExport`
+ *  controls whether this column is written as a leading column in the
+ *  exported spreadsheet, before the catalogue fields; an image column's bytes
+ *  are embedded per row. */
 export interface ArtefactField {
   id: string;
   name: string;
   description: string;
   prompt: string;
+  /** Whether this column's values are sent to the AI in the vision-analysis
+   *  prompt. Default true (opt-out). */
+  includeForAI: boolean;
   /** Whether this column is emitted as a leading column in xlsx export,
    *  before the catalogue fields. Default true (opt-out). */
   includeInExport: boolean;

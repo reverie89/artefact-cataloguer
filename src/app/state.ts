@@ -91,7 +91,7 @@ export type ArtefactDraft = {
 export type EditableCatalogueFieldKey = "name" | "type" | "prompt";
 
 /** Editable keys of an existing artefact-column row. */
-export type EditableArtefactFieldKey = "name" | "description" | "prompt" | "includeInExport";
+export type EditableArtefactFieldKey = "name" | "description" | "prompt" | "includeForAI" | "includeInExport";
 
 export interface AppState {
   darkMode: boolean;

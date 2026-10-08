@@ -21,9 +21,9 @@ export interface ParsedArtefactFile {
   imageRowIndices: number[];
   /** Names of required columns missing from the sheet, if any. */
   missingColumns: string[];
-  /** Columns dropped from the AI record, mapped name → reason. The Image column
+  /** Columns dropped from the record, mapped name → reason. The Image column
    *  is excluded (its bytes go to vision separately) and fully-empty columns
-   *  carry nothing for the model. */
+   *  carry nothing for the panel or the model. */
   discardedColumns: Record<string, string>;
   /** Indexed by 1-based sheet row; value = 0-based data-row index, or -1 if the
    *  row was skipped as fully-empty. Used to attribute embedded images, whose
@@ -124,7 +124,9 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
   const imageRowIndices: number[] = [];
 
   json.forEach((obj) => {
-    // Record all non-image source columns for the detail panel + AI payload.
+    // Record all non-image source columns for the source record panel (+ export).
+    // The AI payload is bounded separately — to configured Include-for-AI
+    // columns — at the catalogueArtefact boundary (lib/ai.ts recordForAI).
     const record: Record<string, string> = {};
     Object.entries(obj).forEach(([k, v]) => {
       if (imageKey && k.toLowerCase() === imageKey) return;

@@ -116,7 +116,7 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // Id-keyed, not positional — see the "fields" case above for why.
       const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
       const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
-      return differById(draftFields, savedFields, "id", ["name", "description", "prompt", "includeInExport"]);
+      return differById(draftFields, savedFields, "id", ["name", "description", "prompt", "includeForAI", "includeInExport"]);
     }
     case "about":
     default:

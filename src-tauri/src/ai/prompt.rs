@@ -10,11 +10,12 @@ use std::collections::HashMap;
 use super::types::{ArtefactColumnSpec, FieldSpec, NetCandidate};
 
 /// Collect every (column, value) pair from the record as strings. The record
-/// only ever contains columns the user configured in the Artefact File tab
-/// (the parser is config-strict — see `lib/spreadsheet.ts`), so every column
-/// is meaningful and reaches the model verbatim. The Image column never arrives
-/// here: the parser excludes it from `record` (its bytes travel a separate
-/// fflate-extracted path into the image content block).
+/// is config-strict by the time it arrives: the frontend wrapper (`lib/ai.ts`
+/// `recordForAI`) filters it down to the Artefact File columns with Include
+/// for AI on, so every column here is meaningful and reaches the model
+/// verbatim. The Image column never arrives here: the parser excludes it from
+/// `record` (its bytes travel a separate fflate-extracted path into the image
+/// content block).
 fn record_pairs(record: &Value) -> Vec<(String, String)> {
     let Some(obj) = record.as_object() else {
         return Vec::new();

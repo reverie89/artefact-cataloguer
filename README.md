@@ -259,7 +259,7 @@ flowchart TD
     subgraph PREP["Stage 0 — Prep inputs"]
         XLSX[".xlsx file"]
         XLSX --> IMG["Embedded drawings<br/>extracted via fflate → disk<br/>(row.imagePath)"]
-        XLSX --> COLS["Configured columns<br/>(Image column excluded from record)"]
+        XLSX --> COLS["Configured columns sent to AI<br/>(Image column excluded from record)"]
         SP["System prompt<br/>+ fixed XML reply contract"]
         AF["Artefact File tab<br/>per-column guidance"]
         CF["Cataloguing Fields tab<br/>per-field guidance + type"]

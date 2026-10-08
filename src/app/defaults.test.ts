@@ -10,10 +10,11 @@ import { _DEF, _DEF_AF, _DEF_FIELDS, _DEF_VOCAB } from "./defaults";
  * they don't belong in the repo).
  */
 describe("synced seed data", () => {
-  it("seeds 9 artefact columns, each with an empty prompt and export on", () => {
+  it("seeds 9 artefact columns, each with an empty prompt and both toggles on", () => {
     expect(_DEF_AF).toHaveLength(9);
     for (const col of _DEF_AF) {
       expect(col.prompt).toBe("");
+      expect(col.includeForAI).toBe(true);
       expect(col.includeInExport).toBe(true);
       expect(typeof col.name).toBe("string");
       expect(col.name.length).toBeGreaterThan(0);

@@ -14,6 +14,7 @@ function settings(fieldNames: string[]): Settings {
       name,
       description: "",
       prompt: "",
+      includeForAI: true,
       includeInExport: true,
     })),
   };
