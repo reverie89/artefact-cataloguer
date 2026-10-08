@@ -262,8 +262,8 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
             label="Prompt Instruction"
             value={af.prompt}
             onChange={(e) => actions.updateAF(af.id, "prompt", e.target.value)}
-            placeholder="How should the vision-analysis step use this column's value? (optional)"
-            desc="Optional per-column guidance for the vision-analysis call. Leave blank to send this column's value with no field-specific guidance — it is omitted from the prompt."
+            placeholder="Teach the AI how to read this column's values (optional)"
+            desc="Teach the AI how to read this column when cataloguing — e.g. what its values mean or how to use them. Leave blank to send the value with no field-specific guidance; the instruction is then omitted from the prompt."
             labelSuffix={<Badge variant="secondary" className="text-[10px] font-normal tracking-[0.04em]">Optional</Badge>}
             rows={2}
             className="resize-y leading-relaxed"

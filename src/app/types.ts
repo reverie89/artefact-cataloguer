@@ -56,9 +56,9 @@ export interface VocabSourceFile {
 
 /** A column detected from the union of headers across a source's files
  *  (every column, including whichever one is currently used for ingestion).
- *  Controls whether that column's values feed the embedding text and the
- *  AI-facing shortlist hint — a metadata column is either used for AI
- *  context or it isn't. */
+ *  Controls whether that column's values feed the term's embedding text
+ *  (retrieval only — the model is shown the term itself, never column
+ *  values). */
 export interface VocabSourceField {
   name: string;
   includeForAI: boolean;

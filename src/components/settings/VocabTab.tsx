@@ -326,18 +326,29 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
             <div className="flex flex-col gap-1.25">
               <div className="text-muted-foreground text-xs uppercase tracking-[0.08em]">Fields</div>
               <div className="text-muted-foreground text-[12px] leading-relaxed">
-                Pick which column identifies each term (used for embedding and dedup — defaults to the first column
-                when unset) and, optionally, one column to show as the label and one as the badge when browsing this
-                source&apos;s terms on the main screen. Toggle which columns feed the embedding text and the AI-facing
-                hint for a shortlisted term — changing Ingestion or Include for AI re-embeds the whole source on the
-                next sync; Label/Badge are display-only and don&apos;t require a re-sync.
+                Each row of your files becomes one term — hover the column headers for what each control does.
               </div>
               <div className="overflow-hidden rounded border">
                 <div className="bg-card grid grid-cols-[1fr_110px_170px_140px] gap-2.5 border-b px-2.5 py-1.5">
                   <span className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]">Column Name</span>
-                  <span className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]">Ingestion</span>
-                  <span className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]">Label/Badge</span>
-                  <span className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]">Include for AI</span>
+                  <span
+                    className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]"
+                    title="Which column names the term (one term per row, deduped across files). Defaults to the first column. Changing it re-embeds the source on the next sync."
+                  >
+                    Ingestion
+                  </span>
+                  <span
+                    className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]"
+                    title="How each term reads in the picker on the main screen — label is the main text, badge the secondary chip. Display-only; applies immediately, no re-sync."
+                  >
+                    Label/Badge
+                  </span>
+                  <span
+                    className="text-muted-foreground text-[11px] uppercase tracking-[0.08em]"
+                    title="Fold this column's text into the term's embedding so cataloguing can match on it (e.g. synonyms, scope notes). The AI itself only ever sees the term. Changing it re-embeds the source on the next sync."
+                  >
+                    Include for AI
+                  </span>
                 </div>
                 {vs.fields.map((f) => {
                   const effectiveIngestion = vs.ingestionField ?? vs.fields[0]?.name ?? null;

@@ -48,8 +48,9 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Configure the fields the AI will extract for each artefact. Click a row to edit its prompt and type.
-        The unified system prompt and output format live on the Artefact File tab.
+        Teach the AI how to fill in each field: click a row to edit its prompt and type. Open-ended fields get a
+        free-text answer; Controlled vocab fields are matched against terms from your Vocabulary Lists. The system
+        prompt lives on the Artefact File tab.
       </div>
 
       <ExpandCollapseAll
@@ -244,8 +245,8 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
       <FieldTextarea
         label="Prompt Instruction"
         desc={field.type === "vocab"
-          ? "Field-specific guidance applied when validation picks candidates (e.g. tiebreak preferences)."
-          : "Field-specific guidance for this field's answer in vision analysis."}
+          ? "Teach the AI what to look for when extracting this field — and, with validation on, how to pick the closest matching vocabulary terms."
+          : "Teach the AI how to answer this field."}
         value={field.prompt}
         onChange={(e) => onPrompt(e.target.value)}
         rows={2}
