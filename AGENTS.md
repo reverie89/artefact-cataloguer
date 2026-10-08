@@ -30,6 +30,10 @@ Every implementation plan must account for the application's design system and p
 
 When two surfaces look similar, **flag it for a decision** rather than silently diverging: standardize into one primitive/variant, or explicitly keep it as a named, documented edge case. Undocumented drift is the failure mode. Surface the decision (and the reason) in code comments and `docs/DESIGN_SYSTEM.md`'s decision log.
 
+### Reuse Assessment
+
+Every plan states, before approval is requested, what it reuses and why anything new cannot: name the existing components, hooks, helpers, and modules the work builds on, and justify each new piece against them. When the same logic appears twice with the same reason to change, propose extracting a shared module rather than copying a variant.
+
 ### UX Mockups
 
 Any plan that changes visible layout or a user flow must include an ASCII wireframe of the proposed surface in the plan before implementation begins — show the new arrangement of controls, regions, and key states (e.g. empty/loading/error/selected) so the design intent is reviewable in totality, not reconstructed from prose.
@@ -109,6 +113,12 @@ Run the smallest relevant verification set before finishing a change:
 - `cargo test --manifest-path "src-tauri/Cargo.toml"`
 
 If a command cannot run in the current environment, report the command and the reason.
+
+## Git Commits
+
+- Never commit on your own. After the verification set above passes, ask the user for permission to commit, and only commit (with a Conventional Commits message) when they approve.
+- A commit message is `type(scope): subject` — lowercase, imperative, no trailing period. Scope is the localized area (`settings`, `export`, `providers`…), omitted when the change spans the app. Add a short body only when the why isn't obvious from the subject. Never add attribution trailers (e.g. `Co-Authored-By:`).
+- If the user commits themselves, do not amend or rewrite their history unless asked.
 
 ## Documentation
 
