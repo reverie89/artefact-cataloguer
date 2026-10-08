@@ -4,7 +4,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { Eye, FileText, GripVertical, Plus } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
-import { _DEF_AF } from "../../app/defaults";
+import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
 import { fieldsDiffer } from "../../app/drafts";
 import { buildPromptPreview } from "../../lib/ai";
 import type { Settings } from "../../app/types";
@@ -102,7 +102,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
               </Button>
               {state.contractEditing ? (
                 <Button
-                  onClick={() => { actions.updateVisionSystemPromptInstruction(""); actions.setPromptEditing(false); }}
+                  onClick={() => { actions.updateVisionSystemPromptInstruction(_DEF_VISION_SYSTEM_PROMPT_INSTRUCTION); actions.setPromptEditing(false); }}
                   variant="ghost"
                   size="sm"
                   className="shrink-0"
