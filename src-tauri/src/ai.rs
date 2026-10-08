@@ -4,7 +4,7 @@
 //! `catalogue_artefact` catalogues one artefact in a **three-step XML pipeline**
 //! (validation optional, user-toggleable):
 //!
-//!   - **Vision analysis (unified prompt)** — image + the artefact record as
+//!   - **Artefact analysis (unified prompt)** — image + the artefact record as
 //!     `<artefact_file>` XML + the persona/output-format preamble. The model
 //!     replies in a fixed XML contract: one `<image_description>`, one
 //!     `<extraction field="…">` per controlled-vocab field (field-specific text
@@ -15,7 +15,7 @@
 //!     `net_count` candidates (default 20) are kept with their cosine scores.
 //!     This per-field embedding is the primary fix for the global-vector
 //!     mis-matches the previous single-description embedding produced.
-//!   - **Validation (threaded from vision analysis, optional)** — one batched
+//!   - **Validation (threaded from artefact analysis, optional)** — one batched
 //!     call presenting each vocab field's extracted text plus its ≤`net_count`
 //!     candidate **terms** (no cosine, no thesaurus — pure strings). The vision
 //!     model picks up to `shortlist_count` (default 3) verbatim; if none fit it
@@ -23,7 +23,7 @@
 //!     pick's cosine as `similarity`. When validation is disabled, the cosine
 //!     top-`shortlist_count` is used directly.
 //!
-//! Open-ended fields are filled directly from vision analysis (`similarity`
+//! Open-ended fields are filled directly from artefact analysis (`similarity`
 //! absent); controlled-vocab fields carry cosine `similarity`. The XML format is
 //! used for both the request payload (the artefact record) and the response, so
 //! the model sees one consistent format.
@@ -334,24 +334,24 @@ pub async fn catalogue_artefact(
     };
 
     // The whole per-row pipeline races the cancel signal as one unit, so
-    // Stop/Cancel works the same whether a row is mid-vision-analysis,
+    // Stop/Cancel works the same whether a row is mid-artefact-analysis,
     // mid-embed, or mid-validation. Dropping the future on cancel aborts its
     // in-flight reqwest request (the client closes the connection on drop).
     //
     // Three steps feed one result:
-    //   - Vision analysis: XML description + per-vocab-field <extraction> +
+    //   - Artefact analysis: XML description + per-vocab-field <extraction> +
     //     per-open-field <open_field>.
     //   - Embedding: each vocab field's extraction → candidate net (cosine).
     //   - Validation (optional, threaded): vision picks top-N from each
     //     field's net; when off, cosine top-N is used directly.
     let app_for_pipeline = app.clone();
     let pipeline = async move {
-        // --- Vision analysis: unified prompt (image attached here, once) ---
+        // --- Artefact analysis: unified prompt (image attached here, once) ---
         // Reused verbatim as the first turn of the validation thread so the
         // model keeps the image, the persona, and the <artefact_file> record
         // in context while validating candidates.
         let unified_prompt = build_unified_prompt(
-            &artefact.vision_system_prompt,
+            &artefact.artefact_analysis_system_prompt,
             &artefact.artefact_columns,
             &fields,
             &artefact.record,
@@ -362,12 +362,12 @@ pub async fn catalogue_artefact(
             text: unified_prompt.clone(),
             image: image.clone(),
         }];
-        let (content1, _vision_group) =
-            do_completion(&app_for_pipeline, &provider, "Vision Analysis", &turns1).await?;
+        let (content1, _analysis_group) =
+            do_completion(&app_for_pipeline, &provider, "Artefact Analysis", &turns1).await?;
 
         let parsed = parse_unified_response(&content1, &fields);
 
-        // Fail loudly when vision analysis ignored the contract entirely. A 200
+        // Fail loudly when artefact analysis ignored the contract entirely. A 200
         // with no <image_description>/<extraction>/<open_field> is the signature
         // of a wrong model (free-router landing on a moderation model like
         // "User Safety: safe", or a non-instruct model). Surfacing it as a hard,
@@ -376,7 +376,7 @@ pub async fn catalogue_artefact(
         // every remaining row through it.
         if looks_like_unrecognized_response(&content1) {
             return Err(format!(
-                "Vision analysis returned an unrecognized response (no XML tags). \
+                "Artefact analysis returned an unrecognized response (no XML tags). \
                  The configured model {:?} may not be vision- or instruction-capable — \
                  check the active provider's model (avoid free/auto routers and \
                  moderation models). Response was: {:?}",
@@ -409,11 +409,11 @@ pub async fn catalogue_artefact(
             Vec::new()
         };
 
-        // --- Validation (optional), threaded & trimmed from vision analysis ---
-        // The assistant turn replays a TRIMMED vision-analysis answer:
+        // --- Validation (optional), threaded & trimmed from artefact analysis ---
+        // The assistant turn replays a TRIMMED artefact-analysis answer:
         // image_description + extractions only. The <open_field> answers are
         // irrelevant to vocab validation and would only add tokens. The image
-        // is re-sent via the replayed vision-analysis user turn because
+        // is re-sent via the replayed artefact-analysis user turn because
         // vision-grounded disambiguation is validation's purpose; this is the
         // bulk of the token cost and is a deliberate, one-line-reversible
         // decision.
@@ -599,7 +599,7 @@ pub async fn catalogue_artefact(
     Ok(result)
 }
 
-/// Trim vision analysis's XML answer down to just the parts validation needs:
+/// Trim artefact analysis's XML answer down to just the parts validation needs:
 /// the `<image_description>` and every `<extraction>` block. `<open_field>`
 /// answers are dropped (irrelevant to vocab validation). Falls back to the full
 /// answer if parsing yields nothing, so validation always has *some* assistant
@@ -635,19 +635,19 @@ fn trim_for_validation(content1: &str) -> String {
     }
 }
 
-/// Assemble the unified vision-analysis prompt exactly as `catalogue_artefact`
+/// Assemble the unified artefact-analysis prompt exactly as `catalogue_artefact`
 /// would send it as its first user turn, without making any network call. Used
 /// by the Artefact File tab's prompt preview. The row's source values are
 /// produced at parse time, so the record is shown as a placeholder; the image
 /// attaches as a separate content block in real runs.
 #[tauri::command]
-pub fn build_vision_prompt_preview(
+pub fn build_artefact_analysis_prompt_preview(
     columns: Vec<ArtefactColumnSpec>,
     fields: Vec<FieldSpec>,
     artefact: ArtefactInput,
 ) -> String {
     build_unified_prompt(
-        &artefact.vision_system_prompt,
+        &artefact.artefact_analysis_system_prompt,
         &columns,
         &fields,
         &artefact.record,

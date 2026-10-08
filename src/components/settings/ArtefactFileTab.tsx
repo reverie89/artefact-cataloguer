@@ -4,7 +4,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { Eye, FileText, GripVertical, Plus } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
-import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
+import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
 import { fieldsDiffer } from "../../app/drafts";
 import { buildPromptPreview } from "../../lib/ai";
 import type { Settings } from "../../app/types";
@@ -33,14 +33,14 @@ export function ArtefactFileTab({ state, actions }: Props) {
   // Render from the pending draft if there are unsaved edits, otherwise from
   // persisted settings. Edits accumulate in the draft and only hit disk on Save.
   const live = state.artefactDraft ?? {
-    visionSystemPromptInstruction: settings.visionSystemPromptInstruction ?? "",
+    artefactAnalysisSystemPromptInstruction: settings.artefactAnalysisSystemPromptInstruction ?? "",
     artefactFields: settings.artefactFields || _DEF_AF,
   };
-  const visionInstrDirty =
+  const artefactAnalysisInstrDirty =
     !!state.artefactDraft &&
-    (state.artefactDraft.visionSystemPromptInstruction ?? "") !== (settings.visionSystemPromptInstruction ?? "");
+    (state.artefactDraft.artefactAnalysisSystemPromptInstruction ?? "") !== (settings.artefactAnalysisSystemPromptInstruction ?? "");
 
-  // Local UI state for the Vision Analysis Prompt Preview sheet — mirrors
+  // Local UI state for the artefact-analysis prompt preview sheet — mirrors
   // CataloguingFieldsTab's previewOpen. Transient tab affordance, not reducer state.
   const [previewOpen, setPreviewOpen] = useState(false);
   // Effective settings (persisted merged with the in-progress draft) so the
@@ -50,11 +50,11 @@ export function ArtefactFileTab({ state, actions }: Props) {
     () => ({
       ...settings,
       artefactFields: live.artefactFields,
-      visionSystemPromptInstruction: live.visionSystemPromptInstruction,
+      artefactAnalysisSystemPromptInstruction: live.artefactAnalysisSystemPromptInstruction,
     }),
-    [settings, live.artefactFields, live.visionSystemPromptInstruction]
+    [settings, live.artefactFields, live.artefactAnalysisSystemPromptInstruction]
   );
-  const buildVisionPreview = useCallback(
+  const buildArtefactAnalysisPreview = useCallback(
     () => buildPromptPreview(previewSettings),
     [previewSettings]
   );
@@ -79,12 +79,12 @@ export function ArtefactFileTab({ state, actions }: Props) {
             The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
           <div className="text-muted-foreground text-[13px] leading-relaxed">
-            Every column configured here must be present when the file is parsed, even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. Configured columns are sent to the AI in the vision-analysis prompt unless you turn their Include for AI toggle off.
+            Every column configured here must be present when the file is parsed, even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. The AI receives every configured column when it examines each artefact, unless you turn a column&apos;s Include for AI toggle off.
           </div>
         </div>
       </Card>
 
-      {/* Unified System Prompt (vision analysis). Persona + output-format
+      {/* Unified System Prompt (artefact analysis). Persona + output-format
           preamble in one Override-gated field — disabled by default since its
           preamble tells the model how to format responses (editing it can
           break parsing). The dynamic per-field XML enumeration and the
@@ -93,7 +93,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
       <Card className="gap-2 py-3.5">
         <Field
           label="System Prompt"
-          desc="Persona + output format for vision analysis. The image and per-column guidance below attach alongside; the artefact-file record is included. Edit with care."
+          desc="How the AI should examine each artefact and format its answers. The image and per-column guidance below attach alongside; the artefact-file record is included. Edit with care."
           action={
             <>
               <Button onClick={() => setPreviewOpen(true)} variant="secondary" size="sm" className="shrink-0">
@@ -102,7 +102,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
               </Button>
               {state.contractEditing ? (
                 <Button
-                  onClick={() => { actions.updateVisionSystemPromptInstruction(_DEF_VISION_SYSTEM_PROMPT_INSTRUCTION); actions.setPromptEditing(false); }}
+                  onClick={() => { actions.updateArtefactAnalysisSystemPromptInstruction(_DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION); actions.setPromptEditing(false); }}
                   variant="ghost"
                   size="sm"
                   className="shrink-0"
@@ -119,8 +119,8 @@ export function ArtefactFileTab({ state, actions }: Props) {
           className="px-4"
         >
           <Textarea
-            value={live.visionSystemPromptInstruction || ""}
-            onChange={(e) => actions.updateVisionSystemPromptInstruction(e.target.value)}
+            value={live.artefactAnalysisSystemPromptInstruction || ""}
+            onChange={(e) => actions.updateArtefactAnalysisSystemPromptInstruction(e.target.value)}
             readOnly={!state.contractEditing}
             rows={5}
             className={cn("resize-y leading-relaxed", !state.contractEditing && "bg-muted/40 text-muted-foreground")}
@@ -128,10 +128,10 @@ export function ArtefactFileTab({ state, actions }: Props) {
         </Field>
         <div className="px-4">
           <CardActions
-            dirty={visionInstrDirty}
-            status={state.artefactCardSaveStatus["vision-instruction"] ?? null}
-            onSave={() => { void actions.saveVisionSystemPromptInstruction(); actions.setPromptEditing(false); }}
-            onDiscard={() => { actions.discardVisionSystemPromptInstruction(); actions.setPromptEditing(false); }}
+            dirty={artefactAnalysisInstrDirty}
+            status={state.artefactCardSaveStatus["artefact-analysis-instruction"] ?? null}
+            onSave={() => { void actions.saveArtefactAnalysisSystemPromptInstruction(); actions.setPromptEditing(false); }}
+            onDiscard={() => { actions.discardArtefactAnalysisSystemPromptInstruction(); actions.setPromptEditing(false); }}
           />
         </div>
       </Card>
@@ -183,11 +183,11 @@ export function ArtefactFileTab({ state, actions }: Props) {
       <PromptPreviewSheet
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
-        build={buildVisionPreview}
+        build={buildArtefactAnalysisPreview}
         description={
           <>
-            The exact message sent to your AI provider as the unified vision-analysis step of each parsing job,
-            including the persona, output-format preamble, and the Rust-appended per-field XML
+            The exact message sent to your AI provider when it catalogues each artefact,
+            including the persona, output-format preamble, and the automatically appended per-field XML
             enumeration. The artefact row&apos;s source values are produced at parse time, so the
             <span className="px-1 font-mono">&lt;artefact_file&gt;</span>
             record is shown as an empty placeholder; the extracted image is attached as a separate
@@ -265,7 +265,7 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
               omitted. */}
           <Field
             label="Include for AI"
-            desc="Send this column's values to the AI in the vision-analysis prompt. Turn off to keep the column for export only — its values still appear in the source record panel but never reach the model."
+            desc="Send this column's values to the AI when it examines each artefact. Turn off to keep the column for export only — its values still appear in the source record panel but never reach the model."
           >
             <Segmented
               value={af.includeForAI ? "true" : "false"}

@@ -75,7 +75,7 @@ export function VisionProvidersSection({ state, actions }: Props) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
-        Configure the vision providers that power vision analysis and validation. Add at least one provider to run the catalogue; click a row to edit its credentials and model.
+        Configure the vision providers that power artefact analysis and validation. Add at least one provider to run the catalogue; click a row to edit its credentials and model.
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">

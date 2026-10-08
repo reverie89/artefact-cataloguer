@@ -1,4 +1,4 @@
-//! Prompt construction for the two LLM calls: the unified vision-analysis
+//! Prompt construction for the two LLM calls: the unified artefact-analysis
 //! prompt (persona preamble, per-column guidance, XML field enumeration,
 //! `<artefact_file>` record) and the validation prompt (pure candidate terms +
 //! the fixed `<validated>` reply contract), plus the record→XML rendering and
@@ -108,7 +108,7 @@ fn xml_escape_attr(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Compose the unified vision-analysis prompt. Structure (joined by blank lines):
+/// Compose the unified artefact-analysis prompt. Structure (joined by blank lines):
 ///   1. The user-editable persona + output-format preamble (the merged "System
 ///      Prompt" from ArtefactFileTab). This text *already* instructs the model
 ///      to read `<artefact_file>` and reply in XML.
@@ -193,7 +193,7 @@ pub(crate) fn build_unified_prompt(
 }
 
 /// Compose the validation prompt. For each vocab field: the field name,
-/// its extracted text (from vision analysis), an optional per-field `prompt`
+/// its extracted text (from artefact analysis), an optional per-field `prompt`
 /// (e.g. user preferences), and a list of its candidate **terms only** — no
 /// cosine, no thesaurus badge, to avoid biasing the model toward internal
 /// scores. Ends with the fixed XML reply contract. Pure; built once per

@@ -70,8 +70,8 @@ describe("synced seed data", () => {
     const d = _DEF();
     // The unified prompt carries the museum persona + output-format preamble;
     // it is the single system prompt now (Call 2 is gone).
-    expect(d.visionSystemPromptInstruction.length).toBeGreaterThan(0);
-    expect(d.visionSystemPromptInstruction).toContain("<artefact_file>");
+    expect(d.artefactAnalysisSystemPromptInstruction.length).toBeGreaterThan(0);
+    expect(d.artefactAnalysisSystemPromptInstruction).toContain("<artefact_file>");
     expect(d.vocabNetCount).toBe(20);
     expect(d.vocabShortlistCount).toBe(3);
     expect(d.validationEnabled).toBe(false);

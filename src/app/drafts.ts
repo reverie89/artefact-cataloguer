@@ -110,9 +110,9 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
     case "artefactFile": {
       const d = state.artefactDraft;
       if (!d) return false;
-      // Vision-analysis system instruction is draft-buffered like the catalogue
+      // Artefact-analysis system instruction is draft-buffered like the catalogue
       // tab's Part-1 instruction.
-      if ((d.visionSystemPromptInstruction ?? "") !== (settings.visionSystemPromptInstruction ?? "")) return true;
+      if ((d.artefactAnalysisSystemPromptInstruction ?? "") !== (settings.artefactAnalysisSystemPromptInstruction ?? "")) return true;
       // Id-keyed, not positional — see the "fields" case above for why.
       const savedFields = (settings.artefactFields || []).map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));
       const draftFields = d.artefactFields.map((f) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "" }));

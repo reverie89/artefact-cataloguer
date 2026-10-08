@@ -79,10 +79,10 @@ export type EmbeddingProviderDraft = {
 };
 
 /** In-memory draft of the Artefact File tab's required-column config + the
- *  vision-analysis system instruction. Mirrors the other drafts; `null` means
+ *  artefact-analysis system instruction. Mirrors the other drafts; `null` means
  *  "no pending edits; render settings". */
 export type ArtefactDraft = {
-  visionSystemPromptInstruction: string;
+  artefactAnalysisSystemPromptInstruction: string;
   artefactFields: ArtefactField[];
 };
 
@@ -835,7 +835,7 @@ export function embeddingProviderDraftFromSettings(s: Settings): EmbeddingProvid
  *  checks. Mirrors fieldDraftFromSettings. */
 export function artefactDraftFromSettings(s: Settings): ArtefactDraft {
   return {
-    visionSystemPromptInstruction: s.visionSystemPromptInstruction ?? "",
+    artefactAnalysisSystemPromptInstruction: s.artefactAnalysisSystemPromptInstruction ?? "",
     artefactFields: (s.artefactFields || _DEF_AF).map((f) => ({ ...f })),
   };
 }

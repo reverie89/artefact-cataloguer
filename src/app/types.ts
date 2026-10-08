@@ -12,10 +12,10 @@ export type ThinkingEffort = "low" | "medium" | "high";
 /** A configurable column the artefact spreadsheet must provide. Every
  *  configured column must be present when the file is parsed (even if some
  *  cells are empty). `includeForAI` gates whether the column's values reach
- *  the AI: when on, they are part of the vision-analysis prompt's record;
+ *  the AI: when on, they are part of the artefact-analysis prompt's record;
  *  when off (or when the column isn't configured here at all), the values
  *  still appear in the source record panel but never reach the model.
- *  `prompt` is an optional per-column instruction for how the vision call
+ *  `prompt` is an optional per-column instruction for how the artefact-analysis call
  *  should use that column's value — empty means "no field-specific guidance"
  *  and is omitted from the prompt (the value still reaches the model via the
  *  record); it only applies while `includeForAI` is on. `includeInExport`
@@ -27,7 +27,7 @@ export interface ArtefactField {
   name: string;
   description: string;
   prompt: string;
-  /** Whether this column's values are sent to the AI in the vision-analysis
+  /** Whether this column's values are sent to the AI in the artefact-analysis
    *  prompt. Default true (opt-out). */
   includeForAI: boolean;
   /** Whether this column is emitted as a leading column in xlsx export,
@@ -149,13 +149,13 @@ export interface EmbeddingProvider {
 
 /** The whole persisted settings object. */
 export interface Settings {
-  /** The unified vision-analysis system prompt: the museum-cataloguing persona
+  /** The unified artefact-analysis system prompt: the museum-cataloguing persona
    *  + the output-format preamble (instructs the model to read `<artefact_file>`
    *  and reply in XML). The dynamic per-field XML enumeration and the record
    *  block are appended by Rust at runtime, so this holds only the
    *  user-editable prose. Gated behind an Override in the UI (disabled by
    *  default). */
-  visionSystemPromptInstruction: string;
+  artefactAnalysisSystemPromptInstruction: string;
   /** Candidates the embedding search returns per vocab field before validation
    *  (the "net"). Default 20. */
   vocabNetCount: number;

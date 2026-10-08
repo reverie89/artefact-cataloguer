@@ -185,7 +185,7 @@ src-tauri/src/
   settings.rs          settings.json persistence (keys excepted — see secrets.rs)
   secrets.rs           OS-keychain storage + scrub/rehydrate on save/load
   images.rs            write extracted image bytes, asset-protocol serving
-  ai.rs                three-step XML pipeline (vision analysis/extraction +
+  ai.rs                three-step XML pipeline (artefact analysis/extraction +
                        embeddings.rs per-field search + validation)
 ```
 
@@ -272,8 +272,8 @@ flowchart TD
 
     PROMPT --> VISION
     IMGDATA --> VISION
-    subgraph S1["Stage 1 — Vision analysis"]
-        VISION["do_completion · Vision Analysis<br/>image content block + unified prompt text"]
+    subgraph S1["Stage 1 — Artefact analysis"]
+        VISION["do_completion · Artefact Analysis<br/>image content block + unified prompt text"]
         VISION --> UP["UnifiedParse<br/>· extractions (per vocab field)<br/>· open_values (per open field)"]
     end
 
@@ -294,7 +294,7 @@ flowchart TD
     VALDEC -->|"no"| DIRECT["Take top shortlist_count (default 3)<br/>by cosine"]
     VALDEC -->|"yes"| VALIDATE
     subgraph S3["Stage 3 — Validation (optional)"]
-        VALIDATE["do_completion · Vocab Validation<br/>re-sends image + vision-analysis extractions<br/>+ candidate terms (scores hidden)"]
+        VALIDATE["do_completion · Vocab Validation<br/>re-sends image + artefact-analysis extractions<br/>+ candidate terms (scores hidden)"]
         VALIDATE --> PICKS["≤ shortlist_count verbatim picks<br/>re-ranked by cosine"]
     end
 
@@ -304,15 +304,15 @@ flowchart TD
     RESULT["CatalogueResult<br/>fieldResults: field → suggestions[ ]"]
 ```
 
-- **Vision analysis.** Observes the artefact and answers every field in one XML response: a rich `<image_description>`, one `<extraction field="…">` per controlled-vocab field (field-specific text used to search that field's own source), and one `<open_field field="…">` per open-ended field (the free-text answer, used directly). Built from the **Artefact File tab**'s single Override-gated "System Prompt" (persona + output-format preamble); the dynamic per-field XML enumeration and the `<artefact_file>` record are Rust-appended at runtime. The artefact record is delivered as XML, not JSON, for format consistency.
+- **Artefact analysis.** Observes the artefact and answers every field in one XML response: a rich `<image_description>`, one `<extraction field="…">` per controlled-vocab field (field-specific text used to search that field's own source), and one `<open_field field="…">` per open-ended field (the free-text answer, used directly). Built from the **Artefact File tab**'s single Override-gated "System Prompt" (persona + output-format preamble); the dynamic per-field XML enumeration and the `<artefact_file>` record are Rust-appended at runtime. The artefact record is delivered as XML, not JSON, for format consistency.
 - **Embedding step (per-field).** Each vocab field's **own** `<extraction>` is embedded in one batched call, and the artefact image is embedded alongside it (embedding providers must be multimodal — text + image; an image-embed failure hard-fails the row after one retry on a network error). The per-field vector and the image vector are each searched against the synced LanceDB tables; the best candidates across sources/modalities are fused by **max cosine similarity**, and the top `net count` (default 20, configurable) are kept. Per-field embedding (rather than one global description vector) is the primary fix for mis-matches like "u-shape" returned for a circular object. Empty/missing extraction → no candidates for that field + a warning.
-- **Validation (optional, toggleable).** One batched call, threaded and trimmed onto vision analysis (image re-sent). Each vocab field's extracted text and its ≤net-count candidate **terms** (pure strings — no cosine, no thesaurus) are presented; the vision model picks the top `shortlist count` (default 3, configurable) **verbatim from the candidate set** (a hallucination guard in Rust drops any term not in the net). If none fit, the field stays **empty + warning** — a controlled-vocab field can only ever receive values that exist in its source. When validation is **off**, the cosine top-`shortlist count` is used directly.
+- **Validation (optional, toggleable).** One batched call, threaded and trimmed onto artefact analysis (image re-sent). Each vocab field's extracted text and its ≤net-count candidate **terms** (pure strings — no cosine, no thesaurus) are presented; the vision model picks the top `shortlist count` (default 3, configurable) **verbatim from the candidate set** (a hallucination guard in Rust drops any term not in the net). If none fit, the field stays **empty + warning** — a controlled-vocab field can only ever receive values that exist in its source. When validation is **off**, the cosine top-`shortlist count` is used directly.
 - **Similarity.** Controlled-vocab picks carry `similarity = cosine` (grounded in vector distance, not the model's self-reported guess); open-ended fields have no similarity. When validation overrides a poor embedding match, that pick's similarity stays low — an honest signal that the vision model overrode a weak embedding.
 - **No thesaurus tiebreak.** Candidate ranking is the embedding's alone; final selection is validation's. The `Thesaurus` vocab column still feeds embedding text at sync time (useful for embedding quality) but is never surfaced to the LLM.
 - **Optional prompts.** An empty per-column or per-field prompt is **omitted** from the prompt rather than emitted as a blank line.
 - **Cancel/Stop** drops the in-flight `reqwest` future at any point (real socket close), resolving the call with a cancel sentinel the renderer distinguishes from a genuine failure.
 
-The unified System Prompt is editable (Override-gated) and previewable in Settings → Artefact File; per-field prompts live in Settings → Cataloguing Fields. The exact vision-analysis prompt is assembled by the same Rust builder the live call uses, so the preview can't drift.
+The unified System Prompt is editable (Override-gated) and previewable in Settings → Artefact File; per-field prompts live in Settings → Cataloguing Fields. The exact artefact-analysis prompt is assembled by the same Rust builder the live call uses, so the preview can't drift.
 
 ##### Decision: resolving controlled-vocabulary fields
 

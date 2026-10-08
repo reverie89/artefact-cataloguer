@@ -22,7 +22,7 @@ export interface ParsedArtefactFile {
   /** Names of required columns missing from the sheet, if any. */
   missingColumns: string[];
   /** Columns dropped from the record, mapped name → reason. The Image column
-   *  is excluded (its bytes go to vision separately) and fully-empty columns
+   *  is excluded (its bytes go to artefact analysis separately) and fully-empty columns
    *  carry nothing for the panel or the model. */
   discardedColumns: Record<string, string>;
   /** Indexed by 1-based sheet row; value = 0-based data-row index, or -1 if the
@@ -147,12 +147,12 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
     }
   });
 
-  // Columns dropped from the AI record: the Image column (bytes go to vision
+  // Columns dropped from the AI record: the Image column (bytes go to artefact analysis
   // separately) and any header with no non-empty values across every row.
   const discardedColumns: Record<string, string> = {};
   if (imageKey) {
     const imgCol = present.find((p) => p.toLowerCase() === imageKey);
-    if (imgCol) discardedColumns[imgCol] = "image bytes (sent to vision separately)";
+    if (imgCol) discardedColumns[imgCol] = "image bytes (sent to the AI separately)";
   }
   for (const col of present) {
     if (discardedColumns[col]) continue;

@@ -33,12 +33,12 @@ pub(crate) struct ImageData {
 }
 
 /// One turn of a multi-turn conversation sent to a chat-completions provider.
-/// The cataloguing pipeline threads validation (vocab validation) onto vision
-/// analysis (vision + extraction) so the model keeps the image and its own
+/// The cataloguing pipeline threads validation (vocab validation) onto artefact
+/// analysis (image + extraction) so the model keeps the image and its own
 /// analysis in context while picking vocab candidates. An image attaches only
-/// to the turn that carries it (vision analysis's user turn); validation's
+/// to the turn that carries it (artefact analysis's user turn); validation's
 /// user turn is text-only but still sees the earlier image via the replayed
-/// vision-analysis history.
+/// artefact-analysis history.
 #[derive(Clone)]
 pub(crate) struct Turn {
     pub role: TurnRole,
@@ -279,7 +279,7 @@ pub(crate) async fn do_completion(
 
     // One group id per call so the renderer resolves the in-flight "busy" dot
     // (request sent) when the terminal stage lands. The label identifies which
-    // pipeline step this call belongs to ("Vision Analysis" / "Cataloguing").
+    // pipeline step this call belongs to ("Artefact Analysis" / "Cataloguing").
     let job_group = next_call_group();
     log_stage(
         app,

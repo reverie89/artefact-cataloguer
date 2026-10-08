@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 const STEPS: { n: number; title: string; body: string }[] = [
   { n: 1, title: "Upload", body: "Drop an artefact spreadsheet (.xlsx) with the required columns. Each row is one artefact. Configure required columns in the Artefact File tab." },
   { n: 2, title: "Configure", body: "Set up cataloguing fields and write prompt instructions. Attach vocabulary lists to controlled-vocabulary fields for consistent terminology." },
-  { n: 3, title: "Parse", body: "Each artefact is catalogued through a three-step pipeline (vision analysis → embedding → validation). Open-ended fields are answered directly; controlled-vocabulary fields carry a cosine similarity score." },
+  { n: 3, title: "Parse", body: "Each artefact is catalogued through a three-step pipeline (artefact analysis → embedding → validation). Open-ended fields are answered directly; controlled-vocabulary fields carry a cosine similarity score." },
   { n: 4, title: "Review", body: "Each catalogue field shows a combined dropdown — AI suggestions first (ranked by similarity), followed by vocabulary list terms. Select a value, search, or type a custom entry. You make the final call." },
   { n: 5, title: "Export", body: "Download the completed catalogue as an .xlsx file. Pick which artefact-file columns to include in the Artefact File tab (default all on); they export as leading columns, followed by the catalogue fields, with images embedded per row." },
 ];

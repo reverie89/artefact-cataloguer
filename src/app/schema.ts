@@ -89,7 +89,7 @@ const ArtefactFieldSchema = z.object({
   name: z.string(),
   description: z.string(),
   // `.default("")` so settings.json written before this field existed load
-  // cleanly — an absent key reads as "no per-column vision guidance".
+  // cleanly — an absent key reads as "no per-column analysis guidance".
   prompt: z.string().default(""),
   // `.default(true)` so settings written before this field existed load with
   // every column exporting (the opt-out default) — no separate migration step.
@@ -104,7 +104,7 @@ const ArtefactFieldSchema = z.object({
  * malformed payload should surface a precise error rather than a runtime crash.
  */
 export const SettingsSchema = z.object({
-  visionSystemPromptInstruction: z.string(),
+  artefactAnalysisSystemPromptInstruction: z.string(),
   vocabNetCount: z.number(),
   vocabShortlistCount: z.number(),
   validationEnabled: z.boolean(),
@@ -126,7 +126,10 @@ export const SettingsSchema = z.object({
  * Note: the legacy `vocabularyLists` key (pre-VocabSource settings files) is
  * migrated to `vocabSources` by a raw-JSON pre-pass in lib/store.ts, *before*
  * this schema ever sees the object — so this schema only ever validates the
- * current `vocabSources` shape, not the old one.
+ * current `vocabSources` shape, not the old one. The pre-rename
+ * `visionSystemPromptInstruction` key is likewise renamed to
+ * `artefactAnalysisSystemPromptInstruction` by a pre-pass, carrying the user's
+ * custom prompt across the stage rename.
  *
  * The pre-XML-pipeline keys `systemPromptInstruction` and
  * `systemPromptContractOverride` (the old Call-2 prompt + JSON contract) are
@@ -134,7 +137,7 @@ export const SettingsSchema = z.object({
  * contract is fundamentally replaced by the fixed XML contract in Rust.
  */
 export const PersistedSettingsSchema = SettingsSchema.partial({
-  visionSystemPromptInstruction: true,
+  artefactAnalysisSystemPromptInstruction: true,
   vocabNetCount: true,
   vocabShortlistCount: true,
   validationEnabled: true,

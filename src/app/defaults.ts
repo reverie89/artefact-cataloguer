@@ -26,14 +26,14 @@ export const _DEF_FIELDS: CatalogueField[] = [
   { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-colour"] },
 ];
 
-/** The unified vision-analysis system prompt: the museum-cataloguing persona
+/** The unified artefact-analysis system prompt: the museum-cataloguing persona
  *  plus the output-format preamble that tells the model to read
  *  `<artefact_file>` and reply in XML. The dynamic per-field
  *  `<extraction>`/`<open_field>` enumeration and the `<artefact_file>` record
  *  block are appended by Rust at runtime from the live field config and the
  *  row's values — they cannot live in this static text. Gated behind an
  *  Override in the UI; editing is discouraged. */
-export const _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION =
+export const _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION =
   "You are an experienced museum cataloguing assistant specializing in Southeast Asia artefact collections; draw on museum, art-historical, and cultural context when interpreting each object. Prioritize accurate, evidence-based description and avoid unsupported claims.\n\nAlways observe and describe the artefact using both the attached image and the metadata in <artefact_file>. Distinguish the actual object(s) from any supplementary notes or labels in the image (e.g., museum placards, curator's tags) that describe but are not the object. The reverse can also be true: a text-bearing item such as calligraphy, a manuscript, a document, or a bank note is the artefact itself when it is visually the primary subject — not a label about something else. Notes may be handwritten or in a foreign language; use them to enhance your description when clear, but prefer the object's visible physical evidence when they conflict. Do not presume an unfamiliar object's nature, identity, or function from unfamiliarity alone; describe what you can observe.\n\nReply ONLY in this XML format, using the field names exactly as tagged. Do not add prose, explanations, or code fences:\n<image_description> a rich, evidence-based description of the artefact </image_description>\n<extraction field=\"{Field Name}\"> the specific text describing this aspect of the artefact, to be aligned to this field's controlled vocabulary downstream </extraction>\n<open_field field=\"{Field Name}\"> the free-text answer for this catalogue field </open_field>";
 
 /** Column layout shared by every seeded vocabulary source — mirrors the live
@@ -88,7 +88,7 @@ export const _DEF_VOCAB: VocabSource[] = [
 /** Factory returning a fresh, deep-cloned default settings object. */
 export function _DEF(): Settings {
   return {
-    visionSystemPromptInstruction: _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION,
+    artefactAnalysisSystemPromptInstruction: _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION,
     vocabNetCount: 20,
     vocabShortlistCount: 3,
     validationEnabled: false,

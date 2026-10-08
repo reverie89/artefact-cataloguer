@@ -19,7 +19,7 @@ function source(partial: Partial<VocabSource> = {}): VocabSource {
 
 function settings(vocabSources: VocabSource[]): Settings {
   return {
-    visionSystemPromptInstruction: "",
+    artefactAnalysisSystemPromptInstruction: "",
     vocabNetCount: 20,
     vocabShortlistCount: 3,
     validationEnabled: false,

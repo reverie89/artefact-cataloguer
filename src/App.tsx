@@ -13,7 +13,7 @@ import { useConfirmDelete } from "./hooks/useConfirmDelete";
 import { pushLog, type LogVerbose } from "./lib/logs";
 
 /** A cataloguing-pipeline stage emitted by Rust onto the "ac-logs" event.
- *  Carries vision-analysis and validation stages from `ai.rs` and embedding
+ *  Carries artefact-analysis and validation stages from `ai.rs` and embedding
  *  stages from `embeddings.rs` (each with its own jobGroup). Each maps to one
  *  row in the Logs Viewer; `verbose` carries the redacted request/response
  *  envelope shown on row click. */
@@ -29,10 +29,10 @@ interface PipelineStageEvent {
   verbose?: LogVerbose;
 }
 
-/** Human label for the legacy vision-completion stages (postSent/jobFound/
+/** Human label for the legacy artefact-analysis completion stages (postSent/jobFound/
  *  done/timeout/failed), used when Rust omits `label`. Embedding-stage emits
  *  always supply their own label, so they don't need an entry here. */
-const VISION_STAGE_LABEL: Record<string, string> = {
+const ARTEFACT_ANALYSIS_STAGE_LABEL: Record<string, string> = {
   postSent: "Sent POST request, waiting for job ID",
   jobFound: "Job ID found, polling for response",
   done: "Response received",
@@ -75,7 +75,7 @@ export default function App() {
     };
   }, []);
 
-  // Rust→frontend pipeline-stage bridge. `ai.rs` emits the vision-analysis and
+  // Rust→frontend pipeline-stage bridge. `ai.rs` emits the artefact-analysis and
   // validation call stages onto "ac-logs" (POST → job-ID → poll → response),
   // and `embeddings.rs` emits the per-row embedding stages (text batch + image
   // + retry). Forward each into the Logs Viewer stream so the run transcript
@@ -89,7 +89,7 @@ export default function App() {
         pushLog({
           status: e.status,
           jobId: e.jobGroup,
-          label: e.label ?? VISION_STAGE_LABEL[e.stage] ?? e.stage,
+          label: e.label ?? ARTEFACT_ANALYSIS_STAGE_LABEL[e.stage] ?? e.stage,
           detail: e.detail,
           elapsedMs: e.elapsedMs,
           verbose: e.verbose,

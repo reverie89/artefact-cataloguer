@@ -23,7 +23,7 @@ export interface StagedVocabFile {
 
 /** Progress/outcome of one `sync_vocab_source` run, emitted on the
  *  "ac-vocab-sync" event once per completed batch — mirrors the
- *  VisionStageEvent bridge in App.tsx for the existing "ac-logs" stream. */
+ *  PipelineStageEvent bridge in App.tsx for the existing "ac-logs" stream. */
 export interface VocabFileProgress {
   rowsDone: number;
   rowsTotal: number;

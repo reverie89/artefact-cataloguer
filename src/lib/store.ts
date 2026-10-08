@@ -2,7 +2,7 @@
 // via the Rust `load_state` / `save_state` commands. No localStorage.
 
 import { invoke } from "@tauri-apps/api/core";
-import { _DEF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION } from "../app/defaults";
+import { _DEF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../app/defaults";
 import { PersistedSettingsSchema } from "../app/schema";
 import type { Settings, StateBundle, VocabSource } from "../app/types";
 
@@ -81,14 +81,33 @@ export function stripBuiltinLegacyVocabFields(raw: unknown): unknown {
   return { ...obj, vocabSources: stripped };
 }
 
+/**
+ * Rename a raw persisted settings object's pre-rename `visionSystemPromptInstruction`
+ * key to `artefactAnalysisSystemPromptInstruction` (the artefact-analysis stage's
+ * former name), *before* schema validation — carrying the user's custom system
+ * prompt across the rename instead of silently reverting it to the default. The
+ * old key is always stripped so it never rides back into saved settings; a no-op
+ * on settings without it (fresh install / already migrated).
+ */
+export function migrateLegacyVisionPromptKey(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null) return raw;
+  const obj = raw as Record<string, unknown>;
+  if (obj.visionSystemPromptInstruction === undefined) return raw;
+  const { visionSystemPromptInstruction: legacy, ...rest } = obj;
+  void legacy;
+  if (rest.artefactAnalysisSystemPromptInstruction !== undefined) return rest;
+  return { ...rest, artefactAnalysisSystemPromptInstruction: legacy };
+}
+
 /** Read the persisted bundle, falling back to defaults if anything is off. */
 export async function loadState(): Promise<LoadedState> {
   try {
     const bundle = await invoke<StateBundle>("load_state");
     // Validate the persisted (hand-editable, possibly older-schema) settings
     // before trusting them, instead of casting blindly. Legacy vocab lists are
-    // migrated first so the schema only ever sees the current shape.
-    const migrated = stripBuiltinLegacyVocabFields(migrateLegacyVocabularyLists(bundle.ac_settings));
+    // migrated and the legacy prompt-instruction key renamed first so the
+    // schema only ever sees the current shape.
+    const migrated = migrateLegacyVisionPromptKey(stripBuiltinLegacyVocabFields(migrateLegacyVocabularyLists(bundle.ac_settings)));
     const parsed = PersistedSettingsSchema.safeParse(migrated);
     let settings: Settings;
     if (parsed.success) {
@@ -114,11 +133,11 @@ export async function loadState(): Promise<LoadedState> {
  *  setting (now `validationEnabled`) are dropped here: the JSON contract is
  *  fundamentally replaced by the fixed XML contract built in Rust, and the
  *  rename is breaking by design. Their old values cannot carry over. The
- *  persona now lives in `visionSystemPromptInstruction`. */
+ *  persona now lives in `artefactAnalysisSystemPromptInstruction`. */
 export function withDefaultSettings(settings: Settings): Settings {
   const def = _DEF();
   return {
-    visionSystemPromptInstruction: settings.visionSystemPromptInstruction ?? _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION,
+    artefactAnalysisSystemPromptInstruction: settings.artefactAnalysisSystemPromptInstruction ?? _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION,
     vocabNetCount: settings.vocabNetCount ?? def.vocabNetCount,
     vocabShortlistCount: settings.vocabShortlistCount ?? def.vocabShortlistCount,
     validationEnabled: settings.validationEnabled ?? def.validationEnabled,

@@ -1,6 +1,6 @@
 // Right-side slide-out sheet previewing the exact prompt message sent for each
 // parsing job, including all hardcoded framing. Shared by the Cataloguing
-// Fields tab (validation prompt) and the Artefact File tab (vision-analysis
+// Fields tab (validation prompt) and the Artefact File tab (artefact-analysis
 // prompt).
 //
 // Built on the shadcn Sheet (Radix), which handles focus trapping, scroll

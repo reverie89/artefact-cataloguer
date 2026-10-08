@@ -6,14 +6,14 @@ import { ArtefactFileTab } from "./ArtefactFileTab";
 import { initialState } from "../../app/state";
 import type { AppState } from "../../app/state";
 import type { AppActions } from "../../app/actions";
-import { _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
+import { _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
 
 // Proxy-backed no-op actions (ResultsPanel.test.tsx pattern) with the two
 // handlers the Reset button drives swapped for spies.
 function makeActions(updateSpy: ReturnType<typeof vi.fn>, editingSpy: ReturnType<typeof vi.fn>): AppActions {
   return new Proxy<AppActions>({} as AppActions, {
     get: (_t, prop) => {
-      if (prop === "updateVisionSystemPromptInstruction") return updateSpy;
+      if (prop === "updateArtefactAnalysisSystemPromptInstruction") return updateSpy;
       if (prop === "setPromptEditing") return editingSpy;
       return () => vi.fn();
     },
@@ -35,7 +35,7 @@ describe("ArtefactFileTab System Prompt reset", () => {
     renderWith({ contractEditing: true }, makeActions(updateSpy, editingSpy));
 
     await user.click(screen.getByRole("button", { name: "Reset to default" }));
-    expect(updateSpy).toHaveBeenCalledWith(_DEF_VISION_SYSTEM_PROMPT_INSTRUCTION);
+    expect(updateSpy).toHaveBeenCalledWith(_DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION);
     expect(editingSpy).toHaveBeenCalledWith(false);
   });
 });

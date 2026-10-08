@@ -5,7 +5,7 @@
 //!   * `state` — load/save the single settings.json beside the exe
 //!   * `images` — write extracted spreadsheet images to <exedir>/tmp/...,
 //!     wiping that subtree on startup and on app quit
-//!   * `ai` — three-step XML cataloguing pipeline (Call 1 vision +
+//!   * `ai` — three-step XML cataloguing pipeline (Call 1 artefact analysis +
 //!     extraction → embedding search → optional Call 3 vocab validation);
 //!     keys never touch the renderer, so there is no CORS
 
@@ -83,7 +83,7 @@ pub fn run() {
             images::extract_images,
             ai::catalogue_artefact,
             ai::cancel_catalogue,
-            ai::build_vision_prompt_preview,
+            ai::build_artefact_analysis_prompt_preview,
             ai::test_connection,
             embeddings::test_embedding_connection,
             embeddings::sync_vocab_source,

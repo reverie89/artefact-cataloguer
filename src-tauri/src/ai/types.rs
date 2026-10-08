@@ -95,9 +95,9 @@ pub struct Provider {
 }
 
 /// One catalogue field the AI must populate. For open-ended fields, the model
-/// answers directly in vision analysis's `<open_field>` block. For
+/// answers directly in artefact analysis's `<open_field>` block. For
 /// controlled-vocab fields, the model emits a field-specific `<extraction>` in
-/// vision analysis; that text is embedded and searched against
+/// artefact analysis; that text is embedded and searched against
 /// `vocab_source_ids` to build a candidate net, then (optionally) validation
 /// validates the net against the image. The vocab list itself is never sent to
 /// the LLM; `similarity` is grounded in cosine.
@@ -133,7 +133,7 @@ pub(crate) struct NetCandidate {
     pub score: f32,
 }
 
-/// One configured artefact-file column, as seen by the vision-analysis prompt.
+/// One configured artefact-file column, as seen by the artefact-analysis prompt.
 /// `prompt` is the optional per-column guidance the user edits on the Artefact
 /// File tab; empty means "no field-specific guidance" and is omitted from the
 /// prompt (the column's value still reaches the model via the record).
@@ -153,14 +153,14 @@ pub struct ArtefactInput {
     /// Absolute path to the extracted image file, if any.
     #[serde(rename = "imagePath")]
     pub image_path: Option<String>,
-    /// The unified vision-analysis prompt: persona + output-format preamble.
+    /// The unified artefact-analysis prompt: persona + output-format preamble.
     /// The XML field enumeration and the `<artefact_file>` record block are
     /// appended by Rust at runtime, so this field holds only the user-editable
     /// prose.
-    #[serde(rename = "visionSystemPrompt", default)]
-    pub vision_system_prompt: String,
+    #[serde(rename = "artefactAnalysisSystemPrompt", default)]
+    pub artefact_analysis_system_prompt: String,
     /// The configured artefact-file columns with their optional per-column
-    /// prompts. Used to seed the per-column guidance block in vision analysis.
+    /// prompts. Used to seed the per-column guidance block in artefact analysis.
     #[serde(rename = "artefactColumns", default)]
     pub artefact_columns: Vec<ArtefactColumnSpec>,
     /// **Deprecated** (kept for `settings.json` serde back-compat; the frontend

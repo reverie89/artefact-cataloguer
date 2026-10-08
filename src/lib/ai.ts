@@ -79,10 +79,10 @@ interface RustArtefactColumn {
 interface RustArtefact {
   record: Record<string, string>;
   imagePath: string | null;
-  /** The unified vision-analysis prompt (persona + output-format preamble).
+  /** The unified artefact-analysis prompt (persona + output-format preamble).
    *  The XML field enumeration and `<artefact_file>` record block are appended
    *  by Rust. */
-  visionSystemPrompt: string;
+  artefactAnalysisSystemPrompt: string;
   artefactColumns: RustArtefactColumn[];
 }
 
@@ -156,7 +156,7 @@ export function findUnsyncedVocabField(settings: Settings): { fieldName: string;
 
 /**
  * Vocab fields are resolved purely by embedding search against the
- * vision-analysis description — no LLM call, no vocab list in any prompt.
+ * artefact-analysis description — no LLM call, no vocab list in any prompt.
  * That requires an active embedding provider; without one, a vocab field
  * would silently yield empty results. Returns the first such field so a Parse
  * run can fail loudly with a pointer to fix it, mirroring
@@ -190,8 +190,8 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
 
 /**
  * Catalogue one artefact via the active provider. The image (when present) is
- * inlined into vision analysis by the Rust side; the three-step XML pipeline
- * (vision analysis vision+extraction → embedding → validation) runs entirely
+ * inlined into artefact analysis by the Rust side; the three-step XML pipeline
+ * (artefact analysis vision+extraction → embedding → validation) runs entirely
  * in Rust. Returns per-field suggestions: open-ended fields carry no
  * similarity; controlled-vocab fields carry cosine `similarity`. Throws on
  * transport/HTTP errors so callers can surface them — there is no demo
@@ -223,10 +223,10 @@ export async function catalogueArtefact(
   const rustArtefact: RustArtefact = {
     record: recordForAI(record, settings.artefactFields || []),
     imagePath: imagePath || null,
-    // The unified vision-analysis prompt: persona + output-format preamble.
+    // The unified artefact-analysis prompt: persona + output-format preamble.
     // Rust appends the XML field enumeration and the <artefact_file> record
     // block.
-    visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
+    artefactAnalysisSystemPrompt: settings.artefactAnalysisSystemPromptInstruction?.trim() || "",
     artefactColumns: aiIncludedColumns(settings),
   };
   const embProvider = activeEmbeddingProvider(settings);
@@ -254,21 +254,21 @@ export async function cancelCatalogue(cancelKey: string): Promise<void> {
 }
 
 /**
- * Assemble the exact unified vision-analysis prompt `catalogueArtefact` would
+ * Assemble the exact unified artefact-analysis prompt `catalogueArtefact` would
  * send as its first user turn, without making any network call. Used by the
  * Artefact File tab's prompt preview. The row's source values are produced at
  * parse time, so the record is shown as a placeholder; the image attaches as a
  * separate content block in real runs.
  *
  * Includes ALL fields (open + vocab): both emit XML blocks in the unified
- * prompt's enumeration, so the preview reflects exactly what vision analysis
+ * prompt's enumeration, so the preview reflects exactly what artefact analysis
  * sends.
  */
 export async function buildPromptPreview(settings: Settings): Promise<string> {
   const rustArtefact: RustArtefact = {
     record: {},
     imagePath: null,
-    visionSystemPrompt: settings.visionSystemPromptInstruction?.trim() || "",
+    artefactAnalysisSystemPrompt: settings.artefactAnalysisSystemPromptInstruction?.trim() || "",
     artefactColumns: [],
   };
   const columns: RustArtefactColumn[] = aiIncludedColumns(settings);
@@ -278,7 +278,7 @@ export async function buildPromptPreview(settings: Settings): Promise<string> {
     prompt: f.prompt,
     vocabSourceIds: [],
   }));
-  return invoke<string>("build_vision_prompt_preview", { columns, fields, artefact: rustArtefact });
+  return invoke<string>("build_artefact_analysis_prompt_preview", { columns, fields, artefact: rustArtefact });
 }
 
 /** Ping the provider (GET /models) to validate URL + key and fetch the model list. */

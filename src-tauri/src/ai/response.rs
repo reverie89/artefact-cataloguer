@@ -1,5 +1,5 @@
 //! Parsing the LLM's XML response contract into domain values: the unified
-//! vision-analysis reply (`<image_description>` / `<extraction>` /
+//! artefact-analysis reply (`<image_description>` / `<extraction>` /
 //! `<open_field>` blocks) and validation's `<validated><pick term="…" />`
 //! reply, plus the fence-stripping and tag-walking primitives they share.
 
@@ -28,7 +28,7 @@ pub(crate) fn strip_code_fence(s: &str) -> &str {
     close_fence("```").trim_end()
 }
 
-/// The parsed result of vision analysis's unified XML response. Vocab fields'
+/// The parsed result of artefact analysis's unified XML response. Vocab fields'
 /// `extractions` are embedded to build the candidate net; open fields'
 /// `open_values` become the field's suggestion directly (no similarity).
 /// Missing sections surface as warnings rather than errors. The
@@ -80,7 +80,7 @@ fn tag_attr(tag_text: &str, attr: &str) -> Option<String> {
     }
 }
 
-/// Parse vision analysis's XML response. Tolerant of a code fence or
+/// Parse artefact analysis's XML response. Tolerant of a code fence or
 /// surrounding prose (the contract forbids them, but models add them anyway).
 /// For each vocab field, records its `<extraction>` text (empty string if
 /// absent or empty — the resolver treats both as "no candidates"); for each
@@ -89,7 +89,7 @@ fn tag_attr(tag_text: &str, attr: &str) -> Option<String> {
 /// wording: "missing" when the tag was never emitted (the model broke the
 /// format) versus "empty" when the tag was emitted but blank (the model
 /// correctly had nothing to say). A missing `<image_description>` is warned on
-/// (a useful vision-analysis health signal) but its text isn't carried —
+/// (a useful artefact-analysis health signal) but its text isn't carried —
 /// validation's context is built by `trim_for_validation` straight from the
 /// raw response.
 pub(crate) fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> UnifiedParse {
@@ -149,7 +149,7 @@ pub(crate) fn parse_unified_response(content: &str, fields: &[FieldSpec]) -> Uni
     }
 }
 
-/// True when the vision-analysis response contains none of the contract's XML
+/// True when the artefact-analysis response contains none of the contract's XML
 /// tags — i.e. the model didn't attempt the output format at all. The classic
 /// cause is a wrong model behind a free/auto router (e.g. a moderation model
 /// replying "User Safety: safe") or a non-instruct model. Deliberately distinct

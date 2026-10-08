@@ -10,7 +10,7 @@ import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
 import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
-import { _DEF_AF, _DEF_VISION_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
+import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
 import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort } from "./types";
 import { isTabDirty } from "./drafts";
 import { parseArtefactFile } from "../lib/spreadsheet";
@@ -20,7 +20,7 @@ import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testE
 import * as vocabLib from "../lib/vocab";
 import type { StagedVocabFile } from "../lib/vocab";
 import { pushLog } from "../lib/logs";
-import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, stripBuiltinLegacyVocabFields, type DebouncedSaver } from "../lib/store";
+import { saveState, withDefaultSettings, migrateLegacyVocabularyLists, migrateLegacyVisionPromptKey, stripBuiltinLegacyVocabFields, type DebouncedSaver } from "../lib/store";
 import { PersistedSettingsSchema } from "./schema";
 import type { ConfirmDeleteOptions } from "../components/common/ConfirmDialog";
 import { emptyEmbedding, markStaleIfSynced, newVocabSource, sourceWithAddedFiles, sourceWithRemovedFile, updateVocabSource, withoutVocabSource, withReorderedVocabSources } from "./vocabSettings";
@@ -247,13 +247,13 @@ export interface AppActions {
   saveArtefactCard(id: string): Promise<void>;
   /** Revert only this artefact-column row's content edits. */
   discardArtefactCard(id: string): void;
-  /** Update the unified system prompt (vision-analysis persona +
+  /** Update the unified system prompt (artefact-analysis persona +
    *  output-format preamble) in the draft. */
-  updateVisionSystemPromptInstruction(value: string): void;
+  updateArtefactAnalysisSystemPromptInstruction(value: string): void;
   /** Persist the unified system prompt to disk. */
-  saveVisionSystemPromptInstruction(): Promise<void>;
+  saveArtefactAnalysisSystemPromptInstruction(): Promise<void>;
   /** Revert the unified system prompt to its persisted value. */
-  discardVisionSystemPromptInstruction(): void;
+  discardArtefactAnalysisSystemPromptInstruction(): void;
   /** Toggle whether the unified system prompt textarea is editable. Backed by a
    *  warning-confirmed Override (it tells the model how to format responses). */
   setPromptEditing(editing: boolean): void;
@@ -971,7 +971,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
 
     // Embed the actual image bytes for any toggled-on image column. The image
-    // column carries no text (its bytes go to vision separately at parse), so
+    // column carries no text (its bytes go to artefact analysis separately at parse), so
     // its cell above is empty; this anchors the extracted image to that cell.
     if (imageColName) {
       const colIdx = headers.indexOf(imageColName); // 0-based
@@ -2107,31 +2107,31 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" } : f)) }) });
   }, [state.artefactDraft, state.settings.artefactFields, dispatch]);
 
-  // --- vision-analysis system instruction (artefact tab, vision-analysis
+  // --- artefact-analysis system instruction (artefact tab, artefact-analysis
   // stage of the threaded pipeline). Deferred draft + per-card save,
   // mirroring the catalogue tab's System Instructions trio.
-  const updateVisionSystemPromptInstruction = useCallback((value: string) => {
-    patchArtefactDraft((d) => ({ ...d, visionSystemPromptInstruction: value }));
+  const updateArtefactAnalysisSystemPromptInstruction = useCallback((value: string) => {
+    patchArtefactDraft((d) => ({ ...d, artefactAnalysisSystemPromptInstruction: value }));
   }, [patchArtefactDraft]);
-  const saveVisionSystemPromptInstruction = useCallback(async () => {
+  const saveArtefactAnalysisSystemPromptInstruction = useCallback(async () => {
     const draft = state.artefactDraft;
     if (!draft) return;
-    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "saving" });
-    const newSettings: Settings = { ...state.settings, visionSystemPromptInstruction: draft.visionSystemPromptInstruction };
+    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "artefact-analysis-instruction", status: "saving" });
+    const newSettings: Settings = { ...state.settings, artefactAnalysisSystemPromptInstruction: draft.artefactAnalysisSystemPromptInstruction };
     try {
       await saveState(newSettings, state.darkMode, state.zoom);
       dispatch({ type: "SET_SETTINGS", settings: newSettings });
-      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "ok" });
+      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "artefact-analysis-instruction", status: "ok" });
     } catch {
-      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: "err" });
+      dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "artefact-analysis-instruction", status: "err" });
     }
   }, [state.artefactDraft, state.settings, state.darkMode, state.zoom, dispatch]);
-  const discardVisionSystemPromptInstruction = useCallback(() => {
+  const discardArtefactAnalysisSystemPromptInstruction = useCallback(() => {
     const draft = state.artefactDraft;
     if (!draft) return;
-    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "vision-instruction", status: null });
-    dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, visionSystemPromptInstruction: state.settings.visionSystemPromptInstruction ?? "" }) });
-  }, [state.artefactDraft, state.settings.visionSystemPromptInstruction, dispatch]);
+    dispatch({ type: "SET_ARTEFACT_CARD_STATUS", id: "artefact-analysis-instruction", status: null });
+    dispatch({ type: "PATCH_ARTEFACT_DRAFT", patch: (d) => ({ ...d, artefactAnalysisSystemPromptInstruction: state.settings.artefactAnalysisSystemPromptInstruction ?? "" }) });
+  }, [state.artefactDraft, state.settings.artefactAnalysisSystemPromptInstruction, dispatch]);
 
   // Override gating for the unified System Prompt. Disabled by default (the
   // prompt's preamble tells the model how to format responses); editing is
@@ -2145,10 +2145,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     });
     if (!ok) return;
     // Seed the draft with the default so editing starts from known-good text.
-    const current = state.artefactDraft?.visionSystemPromptInstruction ?? state.settings.visionSystemPromptInstruction ?? "";
-    if (!current) updateVisionSystemPromptInstruction(_DEF_VISION_SYSTEM_PROMPT_INSTRUCTION);
+    const current = state.artefactDraft?.artefactAnalysisSystemPromptInstruction ?? state.settings.artefactAnalysisSystemPromptInstruction ?? "";
+    if (!current) updateArtefactAnalysisSystemPromptInstruction(_DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION);
     setPromptEditing(true);
-  }, [confirmDelete, state.artefactDraft, state.settings.visionSystemPromptInstruction, updateVisionSystemPromptInstruction, setPromptEditing]);
+  }, [confirmDelete, state.artefactDraft, state.settings.artefactAnalysisSystemPromptInstruction, updateArtefactAnalysisSystemPromptInstruction, setPromptEditing]);
 
   // --- settings import/export ---
   const exportSettings = useCallback(async () => {
@@ -2184,12 +2184,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       alert(`Invalid settings file: not valid JSON.\n${(err as Error).message}`);
       return;
     }
-    // Migrate a pre-VocabSource export (old `vocabularyLists` key), then
-    // validate with the same tolerant schema loadState uses — an imported
+    // Migrate a pre-VocabSource export (old `vocabularyLists` key) and the
+    // pre-rename `visionSystemPromptInstruction` prompt key, then validate
+    // with the same tolerant schema loadState uses — an imported
     // file can be just as old/partial as a persisted one, and
     // withDefaultSettings fills any gaps (e.g. a pre-embeddings export
     // missing `embeddingProviders`/`activeEmbeddingProvider` entirely).
-    const migrated = stripBuiltinLegacyVocabFields(migrateLegacyVocabularyLists(raw));
+    const migrated = migrateLegacyVisionPromptKey(stripBuiltinLegacyVocabFields(migrateLegacyVocabularyLists(raw)));
     const parsed = PersistedSettingsSchema.safeParse(migrated);
     if (!parsed.success) {
       const first = parsed.error.issues[0];
@@ -2210,7 +2211,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
     startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
     toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
-    toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateVisionSystemPromptInstruction, saveVisionSystemPromptInstruction, discardVisionSystemPromptInstruction, setPromptEditing, overridePrompt,
+    toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
   };
 }

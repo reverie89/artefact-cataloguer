@@ -127,7 +127,7 @@ describe("reducer", () => {
     expect(next.artefactDraft!.artefactFields[before].name).toBe("Obj. Number");
   });
 
-  it("seeds the vision instruction into the artefact draft and lets it be patched", () => {
+  it("seeds the artefact-analysis instruction into the artefact draft and lets it be patched", () => {
     const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
     // The draft is null until the first PATCH self-heals it from settings.
     expect(base.artefactDraft).toBeNull();
@@ -135,13 +135,13 @@ describe("reducer", () => {
       type: "PATCH_ARTEFACT_DRAFT",
       patch: (d) => d, // no-op patch forces the self-heal
     });
-    // Self-heal carries the vision instruction from settings into the draft.
-    expect(seeded.artefactDraft!.visionSystemPromptInstruction).toBe(initialState.settings.visionSystemPromptInstruction);
+    // Self-heal carries the artefact-analysis instruction from settings into the draft.
+    expect(seeded.artefactDraft!.artefactAnalysisSystemPromptInstruction).toBe(initialState.settings.artefactAnalysisSystemPromptInstruction);
     const next = reducer(seeded, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, visionSystemPromptInstruction: "edited vision guidance" }),
+      patch: (d) => ({ ...d, artefactAnalysisSystemPromptInstruction: "edited artefact-analysis guidance" }),
     });
-    expect(next.artefactDraft!.visionSystemPromptInstruction).toBe("edited vision guidance");
+    expect(next.artefactDraft!.artefactAnalysisSystemPromptInstruction).toBe("edited artefact-analysis guidance");
   });
 
   it("seeds a provider's persisted connStatus into the draft (and defaults to untested)", () => {

@@ -63,7 +63,7 @@ describe("parseArtefactFile", () => {
     const { rows, imageRowIndices } = await parseArtefactFile(file, settings(headers));
 
     expect(rows).toHaveLength(2);
-    // Image column never enters the record; its bytes go to vision separately.
+    // Image column never enters the record; its bytes go to artefact analysis separately.
     expect(rows[0].record).toEqual({ "Object Name": "Cup" });
     expect(rows[1].record).toEqual({ "Object Name": "Bowl" });
     // Only the first row had a visible Image cell value.
