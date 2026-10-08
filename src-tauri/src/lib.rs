@@ -30,6 +30,13 @@ pub fn run() {
         eprintln!("[artefact] startup temp cleanup failed: {e}");
     }
 
+    // Rename any pre-rename `vocab_*` LanceDB tables so existing installs
+    // match the bare-id table naming. Non-fatal: a skipped rename just means
+    // that source re-syncs into a fresh table under the new name.
+    if let Err(e) = embeddings::migrate_legacy_table_names(&embeddings::vocab_db_dir()) {
+        eprintln!("[artefact] vocab table migration failed: {e}");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())

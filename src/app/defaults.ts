@@ -17,13 +17,13 @@ export const _DEF_AF: ArtefactField[] = [
 
 export const _DEF_FIELDS: CatalogueField[] = [
   { id: "f3", name: "Physical Description", type: "open", layout: "row", prompt: "Make a physical description of the artefact.\n\nAdditionally, if handwriting or motif can be observed and is legible, answer in a structured markdown format:\n```\nRaw text:\n{words as-is identified}\n\nEnglish Translation:\n{English translation}\n```", vocabSources: [] },
-  { id: "f4", name: "Obj./Work type", type: "vocab", layout: "row", prompt: "When two or more candidates are otherwise equally plausible, rank the one hinted \"Thesaurus: NHB\" above the others.", vocabSources: ["vocab-object-type"] },
-  { id: "f5", name: "Place", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-place"] },
-  { id: "f6", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-material"] },
-  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "Name the specific making process, never use generic terms. Review everything in <artefact_file> to evaluate the making process.", vocabSources: ["vocab-technique"] },
-  { id: "f8", name: "Shape", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-shape"] },
+  { id: "f4", name: "Obj./Work type", type: "vocab", layout: "row", prompt: "When two or more candidates are otherwise equally plausible, rank the one hinted \"Thesaurus: NHB\" above the others.", vocabSources: ["object-type"] },
+  { id: "f5", name: "Place", type: "vocab", layout: "row", prompt: "", vocabSources: ["place"] },
+  { id: "f6", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["material"] },
+  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "Name the specific making process, never use generic terms. Review everything in <artefact_file> to evaluate the making process.", vocabSources: ["technique"] },
+  { id: "f8", name: "Shape", type: "vocab", layout: "row", prompt: "", vocabSources: ["shape"] },
   { id: "f9", name: "Date/Period", type: "open", layout: "row", prompt: "Translate and convert to the Gregorian calendar and even if only century notation can be derived, you must express it in Gregorian (e.g., \"19th century\" → \"1800s\", \"20th century\" → \"1900s\").", vocabSources: [] },
-  { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["vocab-colour"] },
+  { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["colour"] },
 ];
 
 /** The unified artefact-analysis system prompt: the museum-cataloguing persona
@@ -74,15 +74,17 @@ function vocab(id: string, name: string): VocabSource {
  *  `embedding.status` is "never" because the source CSVs live beside the binary
  *  (not in the repo) and don't exist on a fresh install. The user re-adds the
  *  real files and syncs each source, same as any other fresh source. Ids are
- *  stable semantic strings so the seeded catalogue fields can reference them. */
+ *  stable semantic strings so the seeded catalogue fields can reference them,
+ *  and must never start with `vocab_`: the Rust startup migration treats a
+ *  `vocab_`-prefixed LanceDB table as a legacy pre-rename artifact. */
 export const _DEF_VOCAB: VocabSource[] = [
-  vocab("vocab-object-type", "Object Type"),
-  vocab("vocab-place", "Place"),
-  vocab("vocab-material", "Material"),
-  vocab("vocab-technique", "Technique"),
-  vocab("vocab-subject", "Subject"),
-  vocab("vocab-shape", "Shape"),
-  vocab("vocab-colour", "Colour"),
+  vocab("object-type", "Object Type"),
+  vocab("place", "Place"),
+  vocab("material", "Material"),
+  vocab("technique", "Technique"),
+  vocab("subject", "Subject"),
+  vocab("shape", "Shape"),
+  vocab("colour", "Colour"),
 ];
 
 /** Factory returning a fresh, deep-cloned default settings object. */

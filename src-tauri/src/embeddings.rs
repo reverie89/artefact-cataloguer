@@ -32,6 +32,7 @@ use crate::vocab_files::VocabSourceField;
 // stay valid.
 pub use provider::EmbeddingProvider;
 pub(crate) use provider::{embed_image_with_retry, embed_texts};
+pub(crate) use store::migrate_legacy_table_names;
 pub use store::CandidateTerm;
 pub use store::{drop_table_best_effort, search_similar};
 

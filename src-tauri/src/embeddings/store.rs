@@ -10,12 +10,17 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, DistanceType, Table};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use super::vocab_db_dir;
 
+/// One vocab source's LanceDB table name. Kept as the single naming point for
+/// every read/write/drop path. Source ids must never start with `vocab_` —
+/// that prefix is reserved by `migrate_legacy_table_names` as the marker of a
+/// pre-rename table.
 pub(crate) fn table_name(source_id: &str) -> String {
-    format!("vocab_{source_id}")
+    source_id.to_string()
 }
 
 /// Whether a table with this name exists in the db.
@@ -50,6 +55,38 @@ pub(crate) async fn connect_db() -> Result<Connection, String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let uri = dir.to_str().ok_or("non-utf8 vocab_db path")?;
     connect(uri).execute().await.map_err(|e| e.to_string())
+}
+
+/// One-time startup migration from the old `vocab_{source_id}` table naming to
+/// the bare source id: legacy `*.lance` directories carrying the `vocab_`
+/// prefix are renamed in place. A directory rename is a true rename for the
+/// local LanceDB backend — tables are discovered purely by listing `*.lance`
+/// entries, with no separate registry — so no re-embedding is needed.
+///
+/// Idempotent by construction: post-rename ids never start with `vocab_`
+/// (seed ids are bare words, UI-generated ids start with `_`), so no live
+/// table can carry the prefix. A rename whose target already exists is
+/// skipped, orphaning the old directory rather than destroying either copy;
+/// the affected source simply syncs into the new table from scratch.
+pub(crate) fn migrate_legacy_table_names(db_dir: &Path) -> Result<(), String> {
+    const LEGACY_PREFIX: &str = "vocab_";
+    const TABLE_EXT: &str = ".lance";
+    for entry in std::fs::read_dir(db_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_name = entry.file_name();
+        let Some(stem) = file_name.to_str().and_then(|n| n.strip_suffix(TABLE_EXT)) else {
+            continue;
+        };
+        let Some(source_id) = stem.strip_prefix(LEGACY_PREFIX) else {
+            continue;
+        };
+        let target = db_dir.join(format!("{source_id}{TABLE_EXT}"));
+        if target.exists() {
+            continue;
+        }
+        std::fs::rename(entry.path(), target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub(crate) fn table_schema(dim: i32) -> Arc<Schema> {
@@ -246,4 +283,98 @@ pub(crate) async fn list_terms(source_id: String) -> Result<Vec<VocabTermRow>, S
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use arrow_array::types::Float32Type;
+    use arrow_array::{FixedSizeListArray, RecordBatchIterator};
+    use std::path::PathBuf;
+
+    /// One row shaped like a real embedding row, via the production schema.
+    fn demo_batch() -> RecordBatch {
+        let dim = 2;
+        let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec![Some(vec![Some(0.25), Some(0.75)])],
+            dim,
+        );
+        RecordBatch::try_new(
+            table_schema(dim),
+            vec![
+                Arc::new(StringArray::from(vec!["t1"])),
+                Arc::new(StringArray::from(vec!["term one"])),
+                Arc::new(StringArray::from(vec!["{\"Thesaurus\":\"NHB\"}"])),
+                Arc::new(StringArray::from(vec!["term one"])),
+                Arc::new(StringArray::from(vec!["h1"])),
+                Arc::new(vectors),
+                Arc::new(StringArray::from(vec!["file.csv"])),
+                Arc::new(StringArray::from(vec!["2026-01-01"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Fresh per-test db dir under the OS temp dir (no tempfile dep), wiped
+    /// first so reruns start clean.
+    fn scratch_db_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ac_store_migrate_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn renames_legacy_table_and_keeps_rows() {
+        let dir = scratch_db_dir("rename");
+        let batch = demo_batch();
+        let db = connect(dir.to_str().unwrap()).execute().await.unwrap();
+        db.create_table(
+            "vocab_demo",
+            RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema()),
+        )
+        .execute()
+        .await
+        .unwrap();
+        drop(db);
+
+        migrate_legacy_table_names(&dir).unwrap();
+
+        let db = connect(dir.to_str().unwrap()).execute().await.unwrap();
+        assert_eq!(db.table_names().execute().await.unwrap(), vec!["demo"]);
+        let count = db
+            .open_table("demo")
+            .execute()
+            .await
+            .unwrap()
+            .count_rows(None)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn migration_is_idempotent_and_spares_collisions() {
+        let dir = scratch_db_dir("idem");
+        // A legacy table whose already-migrated target also exists.
+        std::fs::create_dir_all(dir.join("vocab_demo.lance")).unwrap();
+        std::fs::create_dir_all(dir.join("demo.lance")).unwrap();
+
+        migrate_legacy_table_names(&dir).unwrap();
+        assert!(dir.join("vocab_demo.lance").exists());
+        assert!(dir.join("demo.lance").exists());
+
+        // With the target gone, a rerun completes the rename; a third run
+        // after it finds nothing prefixed and changes nothing.
+        std::fs::remove_dir_all(dir.join("demo.lance")).unwrap();
+        migrate_legacy_table_names(&dir).unwrap();
+        assert!(!dir.join("vocab_demo.lance").exists());
+        assert!(dir.join("demo.lance").exists());
+        migrate_legacy_table_names(&dir).unwrap();
+        assert!(dir.join("demo.lance").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
