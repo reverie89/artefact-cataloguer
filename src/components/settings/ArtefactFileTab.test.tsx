@@ -39,3 +39,35 @@ describe("ArtefactFileTab System Prompt reset", () => {
     expect(editingSpy).toHaveBeenCalledWith(false);
   });
 });
+
+describe("ArtefactFileTab column identification mode", () => {
+  it("shows the per-field letter binding only in letter mode, and persists mode changes immediately", async () => {
+    const user = userEvent.setup();
+    const modeSpy = vi.fn();
+    const actions = new Proxy<AppActions>({} as AppActions, {
+      get: (_t, prop) => {
+        if (prop === "setArtefactColumnMode") return modeSpy;
+        return () => vi.fn();
+      },
+    });
+    renderWith(
+      {
+        settings: { ...initialState.settings, artefactColumnMode: "letter" },
+        // Expand the first default column (Image) so its editor is visible.
+        artefactFieldExpanded: { af1: true },
+      },
+      actions,
+    );
+
+    expect(screen.getByPlaceholderText("e.g. C")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Column name" }));
+    expect(modeSpy).toHaveBeenCalledWith("name");
+  });
+
+  it("hides the letter binding in name mode", () => {
+    renderWith({ artefactFieldExpanded: { af1: true } }, makeActions(vi.fn(), vi.fn()));
+
+    expect(screen.queryByPlaceholderText("e.g. C")).not.toBeInTheDocument();
+  });
+});

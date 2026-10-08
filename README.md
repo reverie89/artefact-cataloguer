@@ -52,7 +52,9 @@ npm run tauri:dev     # full app (Rust backend + renderer + window); HMR
 ### Step 1: Upload an artefact spreadsheet
 
 Drag-and-drop one or more `.xlsx` files (or use the file picker). Each file is validated against the configured required columns, with per-file status
-(`validating` / `valid` / `invalid`) and missing-column errors surfaced inline. Embedded images are extracted automatically.
+(`validating` / `valid` / `invalid`) and problems surfaced inline. Columns are identified either by row-1 header text (default; case- and
+whitespace-insensitive) or, via the toggle in Settings → Artefact File, by an Excel column letter bound to each configured field. A header name repeated
+across two columns is rejected. Embedded images are extracted automatically.
 
 ### Step 2: Configure an AI provider
 

@@ -26,9 +26,9 @@ function source(id: string, name: string, opts: Partial<VocabSource>): VocabSour
 
 describe("recordForAI", () => {
   const fields: ArtefactField[] = [
-    { id: "a", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: true },
-    { id: "b", name: "Internal Notes", description: "", prompt: "", includeForAI: false, includeInExport: true },
-    { id: "c", name: "Curator's notes", description: "", prompt: "", includeForAI: true, includeInExport: false },
+    { id: "a", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+    { id: "b", name: "Internal Notes", description: "", prompt: "", includeForAI: false, includeInExport: true, column: "" },
+    { id: "c", name: "Curator's notes", description: "", prompt: "", includeForAI: true, includeInExport: false, column: "" },
   ];
 
   it("keeps only configured columns with Include for AI on", () => {

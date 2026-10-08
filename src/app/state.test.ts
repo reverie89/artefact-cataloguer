@@ -53,6 +53,28 @@ describe("reducer", () => {
     expect(next.expandedRows).toEqual({});
   });
 
+  it("stores a file's validation verdict with per-file errors and the shared banner errors", () => {
+    const populated = {
+      ...initialState,
+      files: [
+        { id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "validating" as const, errors: [] },
+        { id: "f2", name: "b.xlsx", size: 20, sizeLabel: "20 B", status: "validating" as const, errors: [] },
+      ],
+    };
+
+    // addFiles accumulates the banner list across files and re-passes it on
+    // every verdict, so a later valid file must not wipe earlier reasons.
+    const errs = [{ message: "a.xlsx: Missing required column: Obj. Number" }];
+    let next = reducer(populated, { type: "SET_FILE_STATUS", id: "f1", status: "invalid", errors: errs, validationErrors: errs });
+    expect(next.files[0]).toMatchObject({ status: "invalid", errors: errs });
+    expect(next.files[1]).toMatchObject({ status: "validating" });
+    expect(next.validationErrors).toEqual(errs);
+
+    next = reducer(next, { type: "SET_FILE_STATUS", id: "f2", status: "valid", errors: [], validationErrors: errs });
+    expect(next.files[1]).toMatchObject({ status: "valid", errors: [] });
+    expect(next.validationErrors).toEqual(errs);
+  });
+
   it("clears the whole upload + parse lifecycle on RESET_UPLOAD", () => {
     const populated: typeof initialState = {
       ...initialState,
@@ -120,7 +142,7 @@ describe("reducer", () => {
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true }] }),
+      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" }] }),
     });
     expect(next.artefactDraft).not.toBeNull();
     expect(next.artefactDraft!.artefactFields.length).toBe(before + 1);
@@ -276,7 +298,7 @@ describe("reducer PATCH_SETTINGS search-column reconcile", () => {
   it("seeds every loaded column as searchable on INIT", () => {
     const next = reducer(initialState, {
       type: "INIT",
-      settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true }] },
+      settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" }] },
       darkMode: true,
       zoom: 1,
     });

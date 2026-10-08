@@ -147,6 +147,7 @@ export function withDefaultSettings(settings: Settings): Settings {
     providers: settings.providers ?? [],
     embeddingProviders: settings.embeddingProviders ?? [],
     activeEmbeddingProvider: settings.activeEmbeddingProvider ?? settings.embeddingProviders?.[0]?.id ?? null,
+    artefactColumnMode: settings.artefactColumnMode ?? "name",
     artefactFields: (settings.artefactFields ?? def.artefactFields).map((f) => ({
       ...f,
       description: f.description ?? "",
@@ -155,6 +156,7 @@ export function withDefaultSettings(settings: Settings): Settings {
       // schema already defaults persisted loads to true, but a freshly-built
       // ArtefactField (e.g. in tests) may not set it.
       includeInExport: f.includeInExport ?? true,
+      column: f.column ?? "",
     })),
   };
 }

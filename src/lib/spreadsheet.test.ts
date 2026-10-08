@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 
-import { parseArtefactFile } from "./spreadsheet";
+import { columnLetterToIndex, parseArtefactFile } from "./spreadsheet";
 import { _DEF } from "../app/defaults";
 import type { Settings } from "../app/types";
 
-/** Minimal settings: only artefactFields is consulted by parseArtefactFile. */
+/** Minimal settings: only artefactFields/artefactColumnMode are consulted by
+ *  parseArtefactFile. Name mode by default. */
 function settings(fieldNames: string[]): Settings {
   return {
     ..._DEF(),
@@ -16,6 +17,24 @@ function settings(fieldNames: string[]): Settings {
       prompt: "",
       includeForAI: true,
       includeInExport: true,
+      column: "",
+    })),
+  };
+}
+
+/** Letter-mode settings: each configured field bound to an Excel column letter. */
+function letterSettings(bindings: { name: string; column: string }[]): Settings {
+  return {
+    ..._DEF(),
+    artefactColumnMode: "letter",
+    artefactFields: bindings.map((b, i) => ({
+      id: `af${i + 1}`,
+      name: b.name,
+      description: "",
+      prompt: "",
+      includeForAI: true,
+      includeInExport: true,
+      column: b.column,
     })),
   };
 }
@@ -125,5 +144,108 @@ describe("parseArtefactFile", () => {
     // sheet-row indexing); index 1 is the header.
     expect(rows.map((r) => r.record?.["Object Name"])).toEqual(["Cup", "Bowl", "Plate"]);
     expect(sheetRowToDataRow).toEqual([undefined, -1, 0, -1, 1, 2]);
+  });
+
+  it("matches headers despite interior whitespace differences (wrapped cells)", async () => {
+    // Real-world case: the source system writes header text wrapped inside the
+    // cell ("Object Name⏎Title") while the configured name is single-line.
+    const file = await xlsxFile([
+      ["Object Name\nTitle", "Creator"],
+      ["Cup", "Lee"],
+    ]);
+
+    const { rows, missingColumns } = await parseArtefactFile(file, settings(["Object Name Title"]));
+
+    expect(missingColumns).toEqual([]);
+    expect(rows).toHaveLength(1);
+    // Record keys stay the sheet's own header casing.
+    expect(Object.keys(rows[0].record ?? {})).toContain("Object Name\nTitle");
+    expect(Object.values(rows[0].record ?? {})).toContain("Cup");
+  });
+
+  it("flags repeated header names as column problems in both modes", async () => {
+    const file = await xlsxFile([
+      ["Material", "Material", "Title"],
+      ["bronze", "clay", "Cup"],
+    ]);
+
+    const byName = await parseArtefactFile(file, settings(["Material", "Title"]));
+    expect(byName.columnProblems).toEqual(["Duplicate column header: Material"]);
+
+    const byLetter = await parseArtefactFile(file, letterSettings([
+      { name: "Material", column: "A" },
+      { name: "Title", column: "C" },
+    ]));
+    expect(byLetter.columnProblems).toEqual(["Duplicate column header: Material"]);
+  });
+});
+
+describe("parseArtefactFile in letter mode", () => {
+  it("reads columns positionally and keys records by configured names", async () => {
+    const file = await xlsxFile([
+      ["Some Header A", "Some Header B", "Some Header C"],
+      ["Cup", "ignored", "Lee"],
+    ]);
+
+    // Deliberately out of sheet order: Title reads column C, Object Name reads A.
+    const { rows, missingColumns, columnProblems } = await parseArtefactFile(file, letterSettings([
+      { name: "Title", column: "C" },
+      { name: "Object Name", column: "A" },
+    ]));
+
+    expect(missingColumns).toEqual([]);
+    expect(columnProblems).toEqual([]);
+    // Bound columns are keyed by the configured name; the unbound middle column
+    // keeps its header text.
+    expect(rows[0].record).toEqual({ Title: "Lee", "Object Name": "Cup", "Some Header B": "ignored" });
+  });
+
+  it("excludes the bound image column from records but keeps the row hint", async () => {
+    const file = await xlsxFile([
+      ["Object Name", "Picture"],
+      ["Cup", "(image present)"],
+      ["Bowl", ""],
+    ]);
+
+    const { rows, imageRowIndices, discardedColumns } = await parseArtefactFile(file, letterSettings([
+      { name: "Object Name", column: "A" },
+      { name: "Image", column: "B" },
+    ]));
+
+    expect(rows[0].record).toEqual({ "Object Name": "Cup" });
+    expect(imageRowIndices).toEqual([0]);
+    expect(discardedColumns["Image"]).toBe("image bytes (sent to the AI separately)");
+  });
+
+  it("reports unassigned, invalid, out-of-range, and colliding letter bindings", async () => {
+    const file = await xlsxFile([
+      ["A", "B"],
+      ["Cup", "Lee"],
+    ]);
+
+    const { missingColumns, columnProblems } = await parseArtefactFile(file, letterSettings([
+      { name: "Assigned", column: "B" },
+      { name: "Unassigned", column: "" },
+      { name: "Invalid", column: "1A" },
+      { name: "Out of range", column: "AB" },
+      { name: "Collides", column: "b" },
+    ]));
+
+    expect(missingColumns).toEqual(["Unassigned", "Invalid", "Out of range"]);
+    expect(columnProblems).toEqual(['Fields "Assigned" and "Collides" are both bound to column B']);
+  });
+});
+
+describe("columnLetterToIndex", () => {
+  it("converts letters case-insensitively and rejects non-letters", () => {
+    expect(columnLetterToIndex("A")).toBe(1);
+    expect(columnLetterToIndex("c")).toBe(3);
+    expect(columnLetterToIndex("Z")).toBe(26);
+    expect(columnLetterToIndex("AA")).toBe(27);
+    expect(columnLetterToIndex(" ZZ ")).toBe(702);
+    expect(columnLetterToIndex("")).toBeNull();
+    expect(columnLetterToIndex("1")).toBeNull();
+    expect(columnLetterToIndex("A1")).toBeNull();
+    expect(columnLetterToIndex("AAA")).toBeNull();
   });
 });

@@ -4,15 +4,15 @@
 import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, VocabSource } from "./types";
 
 export const _DEF_AF: ArtefactField[] = [
-  { id: "af1", name: "Image", description: "Image", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af2", name: "Object Name", description: "Name of object", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af3", name: "Date/Period", description: "Date or Period", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af4", name: "Geo. Assoc.", description: "Geological Association", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af5", name: "Material", description: "Material", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af6", name: "Hist. Signi", description: "Historical Significance", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af7", name: "Style Signi", description: "Style Significance", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af8", name: "Curator's notes", description: "Curator's notes", prompt: "", includeForAI: true, includeInExport: true },
-  { id: "af9", name: "Techniques", description: "Techniques", prompt: "", includeForAI: true, includeInExport: true },
+  { id: "af1", name: "Image", description: "Image", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af2", name: "Object Name", description: "Name of object", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af3", name: "Date/Period", description: "Date or Period", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af4", name: "Geo. Assoc.", description: "Geological Association", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af5", name: "Material", description: "Material", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af6", name: "Hist. Signi", description: "Historical Significance", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af7", name: "Style Signi", description: "Style Significance", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af8", name: "Curator's notes", description: "Curator's notes", prompt: "", includeForAI: true, includeInExport: true, column: "" },
+  { id: "af9", name: "Techniques", description: "Techniques", prompt: "", includeForAI: true, includeInExport: true, column: "" },
 ];
 
 export const _DEF_FIELDS: CatalogueField[] = [
@@ -100,6 +100,7 @@ export function _DEF(): Settings {
     activeProvider: null,
     embeddingProviders: [] as EmbeddingProvider[],
     activeEmbeddingProvider: null,
+    artefactColumnMode: "name",
     artefactFields: _DEF_AF.map((f) => ({ ...f })),
   };
 }
