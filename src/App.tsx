@@ -112,7 +112,7 @@ export default function App() {
   }, [state.darkMode]);
 
   const { confirmDelete, dialog } = useConfirmDelete();
-  const actions = useActions(state, dispatch, persist, confirmDelete);
+  const actions = useActions(state, dispatch, persist, confirmDelete, () => stateRef.current);
 
   // Hold off the first meaningful paint until the persisted state has been
   // hydrated from disk. `loaded` is flipped by the INIT reducer once loadState()

@@ -255,8 +255,8 @@ export const initialState: AppState = {
   fieldDropdownSearch: {},
   resultsFilter: "all",
   resultsSearch: "",
-  // Empty at init; seeded from the loaded settings' column ids by the loader
-  // (every column searchable by default — see the SET_SETTINGS case).
+  // Empty at init; the INIT reducer seeds it from the loaded settings' column
+  // ids via reconcileSearchCols (every column searchable by default).
   searchColsAf: [],
   searchColsCat: [],
   validationErrors: [],
@@ -343,7 +343,6 @@ export type Action =
     }
   | { type: "CLEAR_FIELD"; key: string }
   | { type: "SET_OPEN_VALUE"; key: string; value: string }
-  | { type: "SET_SETTINGS"; settings: Settings }
   | { type: "PATCH_SETTINGS"; patch: (s: Settings) => Settings }
   | { type: "TOGGLE_SF"; id: string }
   | { type: "TOGGLE_VOCAB"; id: string }
@@ -385,10 +384,32 @@ export type Action =
   | { type: "SET_ARTEFACT_CARD_STATUS"; id: string; status: SaveState }
   | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "embProviderExpanded" | "artefactFieldExpanded"; ids: string[]; expanded: boolean };
 
+/** Keep the search-column scope in step with the settings' column ids: keep
+ *  selection for columns that still exist, and add any new columns
+ *  (default-on, so a freshly-added column is searchable immediately). Runs on
+ *  every settings write — the load path and functional patches alike, since
+ *  per-card saves and deletes add/remove columns through PATCH_SETTINGS too. */
+function reconcileSearchCols(state: AppState): AppState {
+  const afIds = state.settings.artefactFields.map((f) => f.id);
+  const catIds = state.settings.fields.map((f) => f.id);
+  const searchColsAf = [
+    ...state.searchColsAf.filter((id) => afIds.includes(id)),
+    ...afIds.filter((id) => !state.searchColsAf.includes(id)),
+  ];
+  const searchColsCat = [
+    ...state.searchColsCat.filter((id) => catIds.includes(id)),
+    ...catIds.filter((id) => !state.searchColsCat.includes(id)),
+  ];
+  return { ...state, searchColsAf, searchColsCat };
+}
+
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "INIT":
-      return { ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, loaded: true, fieldDraft: null, providerDraft: null, embProviderDraft: null, vocabDraft: null, artefactDraft: null };
+      // Reconcile so the loaded settings' columns are searchable by default —
+      // without this the scope stayed empty after a load and non-empty queries
+      // matched nothing until some later settings write happened to reconcile.
+      return reconcileSearchCols({ ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, loaded: true, fieldDraft: null, providerDraft: null, embProviderDraft: null, vocabDraft: null, artefactDraft: null });
     case "SET_DARK":
       return { ...state, darkMode: action.darkMode };
     case "SET_SCREEN":
@@ -566,26 +587,12 @@ export function reducer(state: AppState, action: Action): AppState {
         },
       };
 
-    case "SET_SETTINGS": {
-      // Reconcile the search column scope with the loaded column ids: keep
-      // selection for columns that still exist, and add any new columns
-      // (default-on, so a freshly-added column is searchable immediately).
-      // The reconcile runs on every SET_SETTINGS, which covers both the
-      // initial load and subsequent column add/remove/rename operations.
-      const afIds = action.settings.artefactFields.map((f) => f.id);
-      const catIds = action.settings.fields.map((f) => f.id);
-      const searchColsAf = [
-        ...state.searchColsAf.filter((id) => afIds.includes(id)),
-        ...afIds.filter((id) => !state.searchColsAf.includes(id)),
-      ];
-      const searchColsCat = [
-        ...state.searchColsCat.filter((id) => catIds.includes(id)),
-        ...catIds.filter((id) => !state.searchColsCat.includes(id)),
-      ];
-      return { ...state, settings: action.settings, searchColsAf, searchColsCat };
-    }
     case "PATCH_SETTINGS":
-      return { ...state, settings: action.patch(state.settings) };
+      // Functional patches can add/remove catalogue or artefact columns just
+      // like the load path (per-card saves, deletes), so the search-column
+      // scope must reconcile here too or new columns stop being searchable by
+      // default and deleted ones linger in the count.
+      return reconcileSearchCols({ ...state, settings: action.patch(state.settings) });
     case "TOGGLE_SF": {
       const e = { ...state.settingsFieldExpanded };
       e[action.id] = !e[action.id];

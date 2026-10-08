@@ -254,3 +254,33 @@ describe("reducer search column scope", () => {
     expect(s.searchColsCat).toEqual([]);
   });
 });
+
+describe("reducer PATCH_SETTINGS search-column reconcile", () => {
+  const field = (id: string, name: string) => ({ id, name, type: "open" as const, layout: "row" as const, prompt: "", vocabSources: [] });
+
+  it("auto-adds a newly-appended catalogue field to the search scope (searchable by default)", () => {
+    // Per-card saves append columns through PATCH_SETTINGS — the scope must
+    // pick them up the same way the load path does.
+    const base = reducer(initialState, { type: "PATCH_SETTINGS", patch: (s) => ({ ...s, fields: [field("c1", "Material")] }) });
+    expect(base.searchColsCat).toEqual(["c1"]);
+    const added = reducer(base, { type: "PATCH_SETTINGS", patch: (s) => ({ ...s, fields: [...s.fields, field("c2", "Era")] }) });
+    expect(added.searchColsCat).toEqual(["c1", "c2"]);
+  });
+
+  it("prunes a deleted catalogue field's id from the search scope", () => {
+    const base = reducer(initialState, { type: "PATCH_SETTINGS", patch: (s) => ({ ...s, fields: [field("c1", "Material"), field("c2", "Era")] }) });
+    const removed = reducer(base, { type: "PATCH_SETTINGS", patch: (s) => ({ ...s, fields: s.fields.filter((f) => f.id !== "c1") }) });
+    expect(removed.searchColsCat).toEqual(["c2"]);
+  });
+
+  it("seeds every loaded column as searchable on INIT", () => {
+    const next = reducer(initialState, {
+      type: "INIT",
+      settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true }] },
+      darkMode: true,
+      zoom: 1,
+    });
+    expect(next.searchColsCat).toEqual(["c1"]);
+    expect(next.searchColsAf).toEqual(["a1"]);
+  });
+});

@@ -8,6 +8,7 @@ import {
   newVocabSource,
   sourceWithAddedFiles,
   sourceWithRemovedFile,
+  syncInputsChanged,
   updateVocabSource,
   withoutVocabSource,
   withReorderedVocabSources,
@@ -112,6 +113,58 @@ describe("sourceWithRemovedFile", () => {
     const synced = { ...v, embedding: { ...emptyEmbedding(), status: "synced" as const, model: "m" } };
     expect(sourceWithRemovedFile(synced, "missing.csv").embedding.status).toBe("stale");
     expect(sourceWithRemovedFile(v, "missing.csv")).toEqual(v);
+  });
+});
+
+describe("syncInputsChanged", () => {
+  const base = source({
+    files: [{ id: "f1", filename: "one.csv", addedDate: "", sizeBytes: 1 }],
+    fields: [{ name: "term", includeForAI: true }, { name: "notes", includeForAI: false }],
+    ingestionField: "term",
+  });
+
+  it("is false when the sync-relevant inputs are unchanged", () => {
+    // Display-only config (name, label/badge fields) never affects embeddings.
+    const touched = { ...base, name: "Renamed", labelField: "term", badgeField: "notes" };
+    expect(syncInputsChanged(base, touched)).toBe(false);
+  });
+
+  it("is true when a file was added or removed mid-sync", () => {
+    expect(syncInputsChanged(base, sourceWithAddedFiles(base, [staged("f2", [])]))).toBe(true);
+    expect(syncInputsChanged(base, sourceWithRemovedFile(base, "one.csv"))).toBe(true);
+  });
+
+  it("is true when the ingestion column or an includeForAI flag flipped", () => {
+    expect(syncInputsChanged(base, { ...base, ingestionField: "notes" })).toBe(true);
+    const toggled = { ...base, fields: base.fields.map((f) => (f.name === "term" ? { ...f, includeForAI: false } : f)) };
+    expect(syncInputsChanged(base, toggled)).toBe(true);
+  });
+});
+
+describe("sync completion vs concurrent edits", () => {
+  it("a file added to source B mid-sync survives A's completion write", () => {
+    // The sync-completion race regression guard: completion is a functional
+    // update touching only the synced source, so a concurrent add to another
+    // source composes instead of being erased by a stale whole-settings
+    // snapshot (files used to vanish from the card once the sync finished).
+    let s = settings([source({ id: "a" }), source({ id: "b" })]);
+    s = updateVocabSource(s, "b", (v) => sourceWithAddedFiles(v, [staged("b1", ["colB"])]));
+    s = updateVocabSource(s, "a", (v) => ({
+      ...v,
+      embedding: { ...emptyEmbedding(), status: "synced", model: "m", rowsEmbedded: 5 },
+    }));
+    expect(s.vocabSources.find((v) => v.id === "b")!.files.map((f) => f.filename)).toEqual(["b1.xlsx"]);
+    expect(s.vocabSources.find((v) => v.id === "a")!.embedding.status).toBe("synced");
+  });
+
+  it("a mid-sync add to the syncing source flags the finished embed as drifted", () => {
+    const atStart = source({
+      files: [{ id: "f1", filename: "one.csv", addedDate: "", sizeBytes: 1 }],
+      embedding: { ...emptyEmbedding(), status: "synced" as const, model: "m" },
+    });
+    const midSync = sourceWithAddedFiles(atStart, [staged("f2", [])]);
+    // The sync pass never saw f2 — completion must land stale, not synced.
+    expect(syncInputsChanged(atStart, midSync)).toBe(true);
   });
 });
 

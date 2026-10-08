@@ -21,6 +21,22 @@ export function markStaleIfSynced(e: VocabEmbeddingStatus): VocabEmbeddingStatus
   return e.status === "synced" ? { ...e, status: "stale" } : e;
 }
 
+/** Whether the inputs a sync embeds differ between the source snapshot a pass
+ *  started from and the live source at its completion. Filenames stand in for
+ *  file content (staged files are immutable once added), so a mid-sync
+ *  add/remove, an ingestion-column change, or an includeForAI flip means the
+ *  finished index doesn't describe the source as it now stands and completion
+ *  must land stale, not synced. Display-only config (name, label/badge fields)
+ *  never affects embeddings and isn't compared. */
+export function syncInputsChanged(before: VocabSource, after: VocabSource): boolean {
+  if (before.ingestionField !== after.ingestionField) return true;
+  if (before.files.length !== after.files.length) return true;
+  const afterNames = new Set(after.files.map((f) => f.filename));
+  if (before.files.some((f) => !afterNames.has(f.filename))) return true;
+  if (before.fields.length !== after.fields.length) return true;
+  return before.fields.some((f, i) => f.name !== after.fields[i].name || f.includeForAI !== after.fields[i].includeForAI);
+}
+
 /** Immutably map one source by id; unrelated sources pass through untouched
  *  (and an unknown id is a no-op, never a dropped source). */
 export function updateVocabSource(settings: Settings, id: string, fn: (v: VocabSource) => VocabSource): Settings {
