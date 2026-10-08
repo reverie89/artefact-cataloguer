@@ -24,7 +24,9 @@ interface Props {
 
 /** True when a single draft entry differs from its persisted embedding
  *  provider — drives the per-row "unsaved" badge. Mirrors entryDiffers in
- *  VisionProvidersSection.tsx. */
+ *  VisionProvidersSection.tsx. Only user-authored fields are compared:
+ *  `modelOptions`/`dimensions`/`connStatus` are machine-written by Test
+ *  Connection and must not flag the row (see isTabDirty in drafts.ts). */
 function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: EmbeddingProvider): boolean {
   return fieldsDiffer(
     e,
@@ -39,7 +41,7 @@ function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: Embeddi
       dimensions: p.dimensions ?? null,
       connStatus: p.connStatus ?? "untested",
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "dimensions", "connStatus"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat"],
   );
 }
 
@@ -94,6 +96,7 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
               entry={entry}
               grid={GRID}
               testStatus={testStatus}
+              testError={state.embProvStatus[entry.id]?.error}
               showEmbProvKey={showEmbProvKey}
               isActive={isActive}
               dirty={cardDirty}
@@ -124,6 +127,7 @@ interface RowProps {
   entry: EmbeddingProviderDraft["providers"][number];
   grid: string;
   testStatus: TestStatus;
+  testError?: string;
   showEmbProvKey: boolean;
   isActive: boolean;
   dirty: boolean;
@@ -134,7 +138,7 @@ interface RowProps {
   actions: AppActions;
 }
 
-function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
+function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
   const modelOptions = entry.modelOptions.includes(entry.model) || !entry.model ? entry.modelOptions : [entry.model, ...entry.modelOptions];
   const modelsReady = modelOptions.length > 0;
   const id = entry.id;
@@ -162,7 +166,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
           )}
         </div>
         <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
-        <StatusBadge status={testStatus} />
+        <StatusBadge status={testStatus} error={testError} />
         <div onClick={(e) => e.stopPropagation()}>
           {isActive ? (
             <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
@@ -176,7 +180,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
             label="Base URL"
-            desc="The full embeddings endpoint for this provider — requests are posted here directly, so it must include any provider-specific path (e.g. /embeddings, /embed). /models is appended only to look up available models."
+            desc="The full embeddings endpoint for this provider — requests are posted here directly, so it must include any provider-specific path (e.g. /embeddings, /embed). /models is appended only to look up available models; if the provider doesn't serve models there, the API root's /models is tried instead and filtered to embedding models."
             hint={entry.baseUrl.trim() ? (
               <>POST <code className="text-foreground">{embeddingProviderEndpoints(entry).embeddings}</code></>
             ) : undefined}
@@ -214,7 +218,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, showEmbProvKey, isActiv
               {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
               <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
             </Button>
-            <ConnectionStatus status={testStatus} dimensions={entry.dimensions} />
+            <ConnectionStatus status={testStatus} dimensions={entry.dimensions} error={testError} />
           </div>
 
           <FieldSelect

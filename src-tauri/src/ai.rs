@@ -56,7 +56,8 @@ use tokio::sync::oneshot;
 // here so external paths like `crate::ai::http_client` stay valid.
 pub(crate) use completion::ImageData;
 pub(crate) use transport::{
-    fetch_advertised_models, http_client, response_text_checked, trim_trailing_slash,
+    embeddings_root, fetch_advertised_models, http_client, response_text_checked,
+    trim_trailing_slash,
 };
 pub use types::{
     ApiFormat, ArtefactColumnSpec, ArtefactInput, CatalogueResult, ConnectionTest, FieldSpec,
@@ -669,6 +670,7 @@ pub async fn test_connection(provider: Provider) -> Result<ConnectionTest, Strin
         &models_url,
         &auth,
         provider.api_format == ApiFormat::Gemini,
+        false,
     )
     .await?;
 

@@ -32,7 +32,10 @@ const THINKING_OPTIONS: { value: "off" | ThinkingEffort; label: string }[] = [
 ];
 
 /** True when a single draft entry differs from its persisted provider — drives
- *  the per-row "unsaved" badge. Mirrors isProvidersDirty but per row. */
+ *  the per-row "unsaved" badge. Mirrors isProvidersDirty but per row. Only
+ *  user-authored fields are compared: `modelOptions`/`connStatus` are
+ *  machine-written by Test Connection and must not flag the row (see
+ *  isTabDirty in drafts.ts). */
 function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boolean {
   return fieldsDiffer(
     e,
@@ -47,7 +50,7 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
       connStatus: p.connStatus ?? "untested",
       thinking: p.thinking ?? null,
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus", "thinking"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking"],
   );
 }
 
@@ -107,6 +110,7 @@ export function VisionProvidersSection({ state, actions }: Props) {
               entry={entry}
               grid={GRID}
               testStatus={testStatus}
+              testError={provStatus[entry.id]?.error}
               showProvKey={showProvKey}
               isActive={isActive}
               dirty={cardDirty}
@@ -138,6 +142,7 @@ interface RowProps {
   /** Shared grid template (header + rows) so columns align. */
   grid: string;
   testStatus: TestStatus;
+  testError?: string;
   showProvKey: boolean;
   isActive: boolean;
   /** Whether this row has unsaved draft changes (drives the "unsaved" badge). */
@@ -153,7 +158,7 @@ interface RowProps {
   actions: AppActions;
 }
 
-function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
+function ProviderRow({ entry, grid, testStatus, testError, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
   // The model dropdown is only meaningful after a successful connection, which
   // is what populates `modelOptions`. Before that, show a muted hint so the user
   // understands the dependency.
@@ -188,7 +193,7 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
         {/* Model */}
         <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
         {/* Status */}
-        <StatusBadge status={testStatus} />
+        <StatusBadge status={testStatus} error={testError} />
 {/* Active: kept interactive via stopPropagation so the row doesn't toggle.
     "Set Active" persists immediately to disk (no per-card Save needed). */}
 <div onClick={(e) => e.stopPropagation()}>
@@ -243,7 +248,7 @@ function ProviderRow({ entry, grid, testStatus, showProvKey, isActive, dirty, ca
               {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
               <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
             </Button>
-            <ConnectionStatus status={testStatus} />
+            <ConnectionStatus status={testStatus} error={testError} />
           </div>
 
           <FieldSelect

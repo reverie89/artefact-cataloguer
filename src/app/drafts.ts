@@ -80,17 +80,20 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // Providers are id-keyed; the draft is dirty when any provider is new,
       // removed, content-edited, or the active selection flipped. Both the chat
       // and embedding provider lists live on this one tab, so either draft
-      // being dirty makes the tab dirty.
+      // being dirty makes the tab dirty. Only user-authored fields are
+      // compared: `modelOptions`/`dimensions`/`connStatus` are machine-written
+      // by Test Connection into the draft alone, so they must never flag the
+      // tab (there is no tab-level save to clear them with — the per-card Save
+      // carries them across).
       const d = state.providerDraft;
       const chatDirty = !!d && (differById(
         d.providers,
         settings.providers.map((p) => ({
           id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
-          apiFormat: (p.apiFormat ?? "openai"), modelOptions: p.modelOptions ?? [],
-          connStatus: p.connStatus ?? "untested",
+          apiFormat: (p.apiFormat ?? "openai"), thinking: p.thinking ?? null,
         })),
         "id",
-        ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "connStatus"],
+        ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking"],
       ) || d.activeProvider !== settings.activeProvider);
       const ed = state.embProviderDraft;
       const embDirty = !!ed && (differById(
@@ -98,11 +101,9 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
         settings.embeddingProviders.map((p) => ({
           id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
           apiFormat: (p.apiFormat ?? "openai"),
-          modelOptions: p.modelOptions ?? [], dimensions: p.dimensions ?? null,
-          connStatus: p.connStatus ?? "untested",
         })),
         "id",
-        ["name", "baseUrl", "apiKey", "model", "apiFormat", "modelOptions", "dimensions", "connStatus"],
+        ["name", "baseUrl", "apiKey", "model", "apiFormat"],
       ) || ed.activeProvider !== settings.activeEmbeddingProvider);
       return chatDirty || embDirty;
     }

@@ -8,7 +8,8 @@ use serde_json::Value;
 use std::time::Duration;
 
 use crate::ai::{
-    fetch_advertised_models, http_client, response_text_checked, trim_trailing_slash, ImageData,
+    embeddings_root, fetch_advertised_models, http_client, response_text_checked,
+    trim_trailing_slash, ImageData,
 };
 
 /// Max rows sent per `/embeddings` / `batchEmbedContents` request; the sync
@@ -329,31 +330,42 @@ pub(crate) async fn check_connection(
 ) -> Result<EmbeddingConnectionTest, String> {
     let base = trim_trailing_slash(&provider.base_url);
     let client = http_client(Duration::from_secs(20))?;
-    let models_url = match provider.api_format {
-        EmbeddingApiFormat::OpenAi => format!("{base}/models"),
-        EmbeddingApiFormat::Gemini => format!("{base}/v1beta/models"),
+    let gemini = provider.api_format == EmbeddingApiFormat::Gemini;
+    // Gemini's base is the host root; OpenAI-shaped bases point at the
+    // embeddings endpoint, whose sibling /models not every gateway serves —
+    // when that listing fails or comes back empty, fall back to the API
+    // root's /models (still embedding-filtered).
+    let (models_url, fallback_url): (String, Option<String>) = if gemini {
+        (format!("{base}/v1beta/models"), None)
+    } else {
+        (
+            format!("{base}/models"),
+            embeddings_root(&base).map(|root| format!("{root}/models")),
+        )
     };
-    let auth: Vec<(&'static str, String)> = match provider.api_format {
-        EmbeddingApiFormat::OpenAi => {
-            vec![("Authorization", format!("Bearer {}", provider.api_key))]
-        }
-        EmbeddingApiFormat::Gemini => vec![("x-goog-api-key", provider.api_key.clone())],
+    let auth: Vec<(&'static str, String)> = if gemini {
+        vec![("x-goog-api-key", provider.api_key.clone())]
+    } else {
+        vec![("Authorization", format!("Bearer {}", provider.api_key))]
     };
     let mut models = Vec::new();
     let mut list_error: Option<String> = None;
     // Best-effort listing: a failure here is only fatal when no model is
     // configured yet (see below) — with a model selected, the real embed call
     // that follows is the connectivity signal.
-    match fetch_advertised_models(
-        &client,
-        &models_url,
-        &auth,
-        provider.api_format == EmbeddingApiFormat::Gemini,
-    )
-    .await
-    {
+    match fetch_advertised_models(&client, &models_url, &auth, gemini, true).await {
         Ok(m) => models = m,
         Err(e) => list_error = Some(e),
+    }
+    if let Some(url) = fallback_url {
+        if list_error.is_some() || models.is_empty() {
+            if let Ok(m) = fetch_advertised_models(&client, &url, &auth, false, true).await {
+                if !m.is_empty() {
+                    models = m;
+                    list_error = None;
+                }
+            }
+        }
     }
     if provider.model.trim().is_empty() {
         // No model yet, so this listing call is the only connectivity/auth
@@ -368,7 +380,22 @@ pub(crate) async fn check_connection(
             dimensions: 0,
         });
     }
-    let vectors = embed_texts(&provider, &["connection test".to_string()]).await?;
+    let vectors = match embed_texts(&provider, &["connection test".to_string()]).await {
+        Ok(v) => v,
+        Err(e) => {
+            // A selected model the provider doesn't advertise is almost always
+            // a stale pick (e.g. a chat model from before the list was
+            // embedding-filtered); when the list can adjudicate, say so
+            // instead of surfacing the raw gateway error.
+            if !models.is_empty() && !models.contains(&provider.model) {
+                return Err(format!(
+                    "model '{}' isn't in this provider's model list — pick one from the dropdown",
+                    provider.model
+                ));
+            }
+            return Err(e);
+        }
+    };
     let dimensions = vectors.first().map(|v| v.len()).unwrap_or(0);
     if dimensions == 0 {
         return Err("embedding call returned no vector".to_string());

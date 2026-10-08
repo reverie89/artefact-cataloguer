@@ -25,6 +25,15 @@ import { PersistedSettingsSchema } from "./schema";
 import type { ConfirmDeleteOptions } from "../components/common/ConfirmDialog";
 import { emptyEmbedding, markStaleIfSynced, newVocabSource, sourceWithAddedFiles, sourceWithRemovedFile, updateVocabSource, withoutVocabSource, withReorderedVocabSources } from "./vocabSettings";
 
+/** Extract a display string from a rejected promise. Tauri commands returning
+ *  `Result<T, String>` reject with the bare string; JS failures reject with
+ *  Error objects. */
+function errText(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
 export interface AppActions {
   // theme/nav/zoom
   toggleDark(): void;
@@ -1609,7 +1618,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (!baseUrl || !apiKey) {
       // Missing credentials is a failure: flag it transiently and persist the
       // outcome onto the draft entry so Save records it (mirrors modelOptions).
-      dispatch({ type: "SET_PROV_STATUS", id, test: "err" });
+      dispatch({ type: "SET_PROV_STATUS", id, test: "err", error: "Needs a base URL and an API key" });
       patchProvDraft(mapDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
       return;
     }
@@ -1628,7 +1637,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch (e) {
       console.error("[artefact] test connection failed", e);
       patchProvDraft(mapDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
-      dispatch({ type: "SET_PROV_STATUS", id, test: "err" });
+      dispatch({ type: "SET_PROV_STATUS", id, test: "err", error: errText(e) });
     }
   }, [state.providerDraft, state.settings, patchProvDraft, mapDraftEntry, dispatch]);
 
@@ -1699,28 +1708,23 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "saving" });
-    // Upsert: replace if the provider already persists, else append (a newly
-    // added provider isn't in settings yet).
-    const persisted = state.settings.providers.some((p) => p.id === id);
-    const providers = persisted
-      ? state.settings.providers.map((p) => (p.id === id ? {
-          id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
-          model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
-          connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
-        } : p))
-      : [...state.settings.providers, {
-          id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
-          model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
-          connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
-        }];
-    // "Set Active" now persists immediately (see setActiveProv), so
-    // draft.activeProvider always mirrors state.settings.activeProvider — read
-    // the source of truth directly.
-    const activeProvider = state.settings.activeProvider;
-    const newSettings: Settings = { ...state.settings, providers, activeProvider };
+    // Upsert this card's entry, computed from the reducer's LATEST settings
+    // (not a render snapshot) and flushed: "Set Active" may land mid-await,
+    // and both writes must compose rather than overwrite (mirrors the vocab
+    // side's patch+flush pattern).
+    const persistedEntry: Provider = {
+      id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
+      model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
+      connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
+    };
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => ({
+        ...s,
+        providers: s.providers.some((p) => p.id === id)
+          ? s.providers.map((p) => (p.id === id ? persistedEntry : p))
+          : [...s.providers, persistedEntry],
+      }));
+      await persist.flush();
       dispatch({ type: "PATCH_PROVIDER_DRAFT", patch: mapDraftEntry(id, (e) => ({ ...e })) });
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "ok" });
     } catch (e) {
@@ -1728,7 +1732,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "SET_PROV_CARD_ERROR", id, error: `Could not save: ${(e as Error)?.message || "unknown error"}` });
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.providerDraft, state.settings, state.darkMode, state.zoom, mapDraftEntry, dispatch]);
+  }, [state.providerDraft, patch, persist, mapDraftEntry, dispatch]);
 
   const discardProvCard = useCallback((id: string) => {
     const draft = state.providerDraft;
@@ -1778,13 +1782,15 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     // Persist the deletion immediately (after the warning confirm), rather than
     // buffering it for a tab-level Apply — the Providers tab has no banner, so
     // deletion is its own commit. If the deleted provider was active, fall back
-    // to any remaining provider in the persisted set.
-    const remaining = state.settings.providers.filter((p) => p.id !== id);
-    const activeProvider = state.settings.activeProvider === id ? (remaining[0]?.id ?? null) : state.settings.activeProvider;
-    const newSettings: Settings = { ...state.settings, providers: remaining, activeProvider };
+    // to any remaining provider in the persisted set. Patched onto the reducer's
+    // latest settings and flushed so a card Save landing mid-await composes
+    // instead of being overwritten.
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => {
+        const remaining = s.providers.filter((p) => p.id !== id);
+        return { ...s, providers: remaining, activeProvider: s.activeProvider === id ? (remaining[0]?.id ?? null) : s.activeProvider };
+      });
+      await persist.flush();
       // Mirror the deletion into any pending draft so the UI matches disk state
       // without dropping other buffered per-card edits.
       if (state.providerDraft) {
@@ -1798,26 +1804,26 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch {
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.providerDraft, state.settings, state.darkMode, state.zoom, patchProvDraft, dispatch, confirmDelete]);
+  }, [state.providerDraft, state.settings, patch, persist, patchProvDraft, dispatch, confirmDelete]);
 
   const setActiveProv = useCallback(async (id: string) => {
     // "Set Active" persists immediately rather than buffering for the row's Save
     // — the active selection is a single-field structural change, not per-card
-    // content. Modelled on deleteProv: write to disk, then mirror into any
-    // pending draft so other buffered per-card edits survive.
-    const newSettings: Settings = { ...state.settings, activeProvider: id };
+    // content. Patched onto the reducer's latest settings and flushed so a card
+    // Save landing mid-await composes instead of being overwritten.
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => ({ ...s, activeProvider: id }));
+      await persist.flush();
       if (state.providerDraft) {
         patchProvDraft((d) => ({ ...d, activeProvider: id }));
       }
     } catch {
-      // Settings not updated on failure: the button stays clickable and the
-      // row surfaces the error, matching deleteProv's catch.
+      // The button stays clickable and the row surfaces the error, matching
+      // deleteProv's catch. A failed flush leaves the in-memory patch in place;
+      // the next successful persist writes it.
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.settings, state.darkMode, state.zoom, state.providerDraft, patchProvDraft, dispatch]);
+  }, [state.providerDraft, patch, persist, patchProvDraft, dispatch]);
 
   // --- settings: embedding providers ---
   // Same per-card draft/save/discard shape as chat providers above, just a
@@ -1868,7 +1874,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (!entry) return;
     const { name, baseUrl, apiKey, model, apiFormat } = entry;
     if (!baseUrl || !apiKey) {
-      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err" });
+      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err", error: "Needs a base URL and an API key" });
       patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
       return;
     }
@@ -1881,7 +1887,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch (e) {
       console.error("[artefact] test embedding connection failed", e);
       patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, connStatus: "err" })));
-      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err" });
+      dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "err", error: errText(e) });
     }
   }, [state.embProviderDraft, state.settings, patchEmbProvDraft, mapEmbDraftEntry, dispatch]);
 
@@ -1901,29 +1907,29 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
     dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: null });
     dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "saving" });
-    const persisted = state.settings.embeddingProviders.some((p) => p.id === id);
-    const toPersisted = (): EmbeddingProvider => ({
+    // Upsert this card's entry, computed from the reducer's LATEST settings and
+    // flushed — "Set Active" may land mid-await, and both writes must compose
+    // rather than overwrite (mirrors saveProvCard / the vocab side).
+    const persistedEntry: EmbeddingProvider = {
       id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
       model: entry.model, apiFormat: entry.apiFormat,
       modelOptions: entry.modelOptions, dimensions: entry.dimensions ?? undefined, connStatus: entry.connStatus,
-    });
-    const embeddingProviders = persisted
-      ? state.settings.embeddingProviders.map((p) => (p.id === id ? toPersisted() : p))
-      : [...state.settings.embeddingProviders, toPersisted()];
-    // "Set Active" now persists immediately (see setActiveEmbProv), so read the
-    // active selection from settings directly.
-    const activeEmbeddingProvider = state.settings.activeEmbeddingProvider;
-    const newSettings: Settings = { ...state.settings, embeddingProviders, activeEmbeddingProvider };
+    };
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => ({
+        ...s,
+        embeddingProviders: s.embeddingProviders.some((p) => p.id === id)
+          ? s.embeddingProviders.map((p) => (p.id === id ? persistedEntry : p))
+          : [...s.embeddingProviders, persistedEntry],
+      }));
+      await persist.flush();
       dispatch({ type: "PATCH_EMB_PROVIDER_DRAFT", patch: mapEmbDraftEntry(id, (e) => ({ ...e })) });
       dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "ok" });
     } catch (e) {
       dispatch({ type: "SET_EMB_PROV_CARD_ERROR", id, error: `Could not save: ${(e as Error)?.message || "unknown error"}` });
       dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.embProviderDraft, state.settings, state.darkMode, state.zoom, mapEmbDraftEntry, dispatch]);
+  }, [state.embProviderDraft, patch, persist, mapEmbDraftEntry, dispatch]);
 
   const discardEmbProvCard = useCallback((id: string) => {
     const draft = state.embProviderDraft;
@@ -1962,12 +1968,19 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       message: `Delete "${label}"? This permanently removes the provider and cannot be undone. Vocabulary sources synced with it will need a different embedding provider before their next sync.`,
     });
     if (!ok) return;
-    const remaining = state.settings.embeddingProviders.filter((p) => p.id !== id);
-    const activeEmbeddingProvider = state.settings.activeEmbeddingProvider === id ? (remaining[0]?.id ?? null) : state.settings.activeEmbeddingProvider;
-    const newSettings: Settings = { ...state.settings, embeddingProviders: remaining, activeEmbeddingProvider };
+    // Persist the deletion immediately, patched onto the reducer's latest
+    // settings and flushed so a card Save landing mid-await composes instead of
+    // being overwritten (mirrors deleteProv).
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => {
+        const remaining = s.embeddingProviders.filter((p) => p.id !== id);
+        return {
+          ...s,
+          embeddingProviders: remaining,
+          activeEmbeddingProvider: s.activeEmbeddingProvider === id ? (remaining[0]?.id ?? null) : s.activeEmbeddingProvider,
+        };
+      });
+      await persist.flush();
       if (state.embProviderDraft) {
         patchEmbProvDraft((d) => ({
           ...d,
@@ -1979,21 +1992,22 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch {
       dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.embProviderDraft, state.settings, state.darkMode, state.zoom, patchEmbProvDraft, dispatch, confirmDelete]);
+  }, [state.embProviderDraft, state.settings, patch, persist, patchEmbProvDraft, dispatch, confirmDelete]);
 
   const setActiveEmbProv = useCallback(async (id: string) => {
-    // "Set Active" persists immediately — see setActiveProv for rationale.
-    const newSettings: Settings = { ...state.settings, activeEmbeddingProvider: id };
+    // "Set Active" persists immediately — patched onto the reducer's latest
+    // settings and flushed so a card Save landing mid-await composes instead of
+    // being overwritten (mirrors setActiveProv).
     try {
-      await saveState(newSettings, state.darkMode, state.zoom);
-      dispatch({ type: "SET_SETTINGS", settings: newSettings });
+      patch((s) => ({ ...s, activeEmbeddingProvider: id }));
+      await persist.flush();
       if (state.embProviderDraft) {
         patchEmbProvDraft((d) => ({ ...d, activeProvider: id }));
       }
     } catch {
       dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
     }
-  }, [state.settings, state.darkMode, state.zoom, state.embProviderDraft, patchEmbProvDraft, dispatch]);
+  }, [state.embProviderDraft, patch, persist, patchEmbProvDraft, dispatch]);
 
   // --- settings: artefact fields ---
   // The required-column config is one deferred draft (mirrors the catalogue-

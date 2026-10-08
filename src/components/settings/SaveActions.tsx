@@ -49,9 +49,10 @@ export type StatusKind = "busy" | "ok" | "err" | null;
  * ConnectionStatus map into (the icon dispatch + status→color mapping). Each
  * domain keeps its own state enum and message text.
  */
-export function StatusIndicator({ state, message, className }: { state: StatusKind; message: string; className?: string }) {
+export function StatusIndicator({ state, message, className, title }: { state: StatusKind; message: string; className?: string; title?: string }) {
   return (
     <div
+      title={title}
       className={cn(
         "inline-flex h-9 items-center gap-2 text-sm",
         state === "ok" && "text-emerald-600 dark:text-emerald-400",

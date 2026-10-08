@@ -173,7 +173,7 @@ export interface AppState {
   // on the tab-level Save. `provStatus` is the one piece kept separate: it is
   // transient per-row Test Connection verification, not part of the draft.
   providerDraft: ProviderDraft | null;
-  provStatus: Record<string, { test: "testing" | "ok" | "err" | null }>;
+  provStatus: Record<string, { test: "testing" | "ok" | "err" | null; error?: string }>;
   /** Persist status for the tab-level Save button. */
   provSaveStatus: "saving" | "ok" | "err" | null;
   /** Per-card save status for a provider card (keyed by provider id). A card's
@@ -191,7 +191,7 @@ export interface AppState {
   // embedding-model list.
   embProviderDraft: EmbeddingProviderDraft | null;
   embProviderExpanded: Record<string, boolean>;
-  embProvStatus: Record<string, { test: "testing" | "ok" | "err" | null }>;
+  embProvStatus: Record<string, { test: "testing" | "ok" | "err" | null; error?: string }>;
   embProvSaveStatus: "saving" | "ok" | "err" | null;
   embProvCardSaveStatus: Record<string, SaveState>;
   embProvCardError: Record<string, string>;
@@ -360,7 +360,7 @@ export type Action =
   | { type: "CLEAR_ALL_VOCAB_TERMS" }
   | { type: "PATCH_PROVIDER_DRAFT"; patch: (d: ProviderDraft) => ProviderDraft }
   | { type: "CLEAR_PROVIDER_DRAFT" }
-  | { type: "SET_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null }
+  | { type: "SET_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null; error?: string }
   | { type: "CLEAR_PROV_STATUS"; id: string }
   | { type: "SET_PROV_SAVE_STATUS"; status: "saving" | "ok" | "err" | null }
   | { type: "SET_PROV_CARD_STATUS"; id: string; status: SaveState }
@@ -369,7 +369,7 @@ export type Action =
   | { type: "TOGGLE_EMB_PROV"; id: string }
   | { type: "PATCH_EMB_PROVIDER_DRAFT"; patch: (d: EmbeddingProviderDraft) => EmbeddingProviderDraft }
   | { type: "CLEAR_EMB_PROVIDER_DRAFT" }
-  | { type: "SET_EMB_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null }
+  | { type: "SET_EMB_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null; error?: string }
   | { type: "CLEAR_EMB_PROV_STATUS"; id: string }
   | { type: "SET_EMB_PROV_SAVE_STATUS"; status: "saving" | "ok" | "err" | null }
   | { type: "SET_EMB_PROV_CARD_STATUS"; id: string; status: SaveState }
@@ -656,8 +656,9 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, providerDraft: null };
     case "SET_PROV_STATUS": {
       // Transient Test Connection outcome for a single row. This is verification,
-      // not config, so it lives outside the draft.
-      const provStatus = { ...state.provStatus, [action.id]: { test: action.test } };
+      // not config, so it lives outside the draft. `error` carries the
+      // provider's actual failure text so the UI can show it verbatim.
+      const provStatus = { ...state.provStatus, [action.id]: { test: action.test, error: action.error } };
       return { ...state, provStatus };
     }
     case "CLEAR_PROV_STATUS": {
@@ -696,8 +697,9 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, embProviderDraft: null };
     case "SET_EMB_PROV_STATUS": {
       // Transient Test Connection outcome for a single row. This is verification,
-      // not config, so it lives outside the draft.
-      const embProvStatus = { ...state.embProvStatus, [action.id]: { test: action.test } };
+      // not config, so it lives outside the draft. `error` carries the
+      // provider's actual failure text so the UI can show it verbatim.
+      const embProvStatus = { ...state.embProvStatus, [action.id]: { test: action.test, error: action.error } };
       return { ...state, embProvStatus };
     }
     case "CLEAR_EMB_PROV_STATUS": {
