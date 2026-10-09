@@ -22,7 +22,7 @@
 - **Import & grouped records** — browse or drop one or more `.xlsx` files and each is validated + parsed on the spot: valid records join the results panel immediately (grouped by source file, deletable per row or whole-file); invalid files fail loudly with a per-file reason card.
 - **Queue controls** — imported records wait as **queued**; **Start** drains them one AI call at a time (rows imported or requeued mid-run merge in), **Stop** transport-cancels in-flight rows (queued rows stay queued — Start resumes), **Retry** requeues every failed row (never runs anything itself), and per-row **Stop** / **Retry** are available on the rows.
 - **Review-friendly results** — expandable rows with status dots, searchable field dropdowns, filter + a column-scoped search over results (pick which artefact-file and catalogue columns the search matches), drag-to-reorder vocab/field lists.
-- **Multiple AI providers** — configure several providers, mark one active, and run a **Test Connection** per provider (fetches the model list).
+- **Multiple AI providers** — configure several providers, drag them into a preferred order, mark one active, and run a **Test Connection** per provider (fetches the model list).
 - **Settings import/export** — round-trip the settings blob as a zod-validated JSON file.
 - **Theme & zoom** — dark mode (default on) and zoom (0.7–1.5), both persisted.
 - **`.xlsx` export** — export the **done** rows as a native Excel workbook via the save dialog. Each artefact-file column toggled on (default all) becomes a leading column, followed by the catalogue fields; an image column embeds its extracted bytes per row. Cells are sanitized against formula injection (OWASP guidance).
