@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-10
+
+### Added
+
+- Distinct components for vocab fields: a partition judge splits each record into its basic-level components (quota-free), retrieval runs per component, and validation allows at most one pick per component; the components cap trims to the best-validated picks and near-duplicates (≥ 0.90 similarity) are dropped.
+- Artefact File columns can be identified by header text or by Excel column letter, chosen per field; files with duplicate header names are rejected.
+- Browsing or dropping `.xlsx` files validates and parses each one on import into grouped, deletable records — there is no separate Parse step, and invalid files fail with a per-file reason card.
+- Providers can be drag-reordered in Settings, with all settings card lists sharing one sortable row.
+- The embedding-model picker only lists image-capable models when inputs include images, and switching models flags vocabulary sources as stale until re-synced.
+- Results can requeue every failed row at once, and pending work can be stopped.
+- Release builds attach a portable Windows exe alongside the installer.
+
+### Changed
+
+- AI requests send only the configured, AI-included columns.
+- The "vision analysis" stage is now called "artefact analysis" across settings and prompts.
+- Exported spreadsheets fit image rows to their height with a small bottom pad and size the image column more snugly.
+- Dependencies refreshed (Tauri API/CLI, React, zod, ESLint, testing libraries).
+
+### Fixed
+
+- Embedding test connections are usable and provider saves no longer overwrite each other.
+- Vocab syncs and search-scope changes are safe against concurrent writes.
+- Resetting the system prompt restores the default prompt text.
+
 ## [1.2.1] - 2026-08-28
 
 ### Fixed
@@ -75,3 +100,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.1.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.1.0
 [1.2.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.0
 [1.2.1]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.1
+[1.3.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.3.0

@@ -7,7 +7,7 @@
 
 **Artefact Cataloguer** is a Tauri 2 desktop app for AI-assisted museum cataloguing — upload an artefact spreadsheet, extract embedded images, run each row through an OpenAI-compatible model for ranked catalogue-field suggestions, review, and export `.xlsx`.
 
-[https://github.com/user-attachments/assets/44502a21-e041-45db-b2d7-03c0ce6a39e3](https://github.com/user-attachments/assets/44502a21-e041-45db-b2d7-03c0ce6a39e3)
+[https://github.com/user-attachments/assets/1b5a5e8b-ea39-4c9c-b2c7-6dfe8bede803](https://github.com/user-attachments/assets/1b5a5e8b-ea39-4c9c-b2c7-6dfe8bede803)
 
 ---
 

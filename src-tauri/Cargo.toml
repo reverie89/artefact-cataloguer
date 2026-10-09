@@ -1,6 +1,6 @@
 [package]
 name = "artefact-cataloguer"
-version = "1.2.1"
+version = "1.3.0"
 description = "AI-assisted museum cataloguing desktop app"
 authors = ["Artefact Cataloguer"]
 edition = "2021"
