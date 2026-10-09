@@ -30,7 +30,9 @@ interface Props {
 export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
   const { settings } = state;
   const q = state.resultsSearch.toLowerCase();
-  const failedCount = state.results.filter((r) => r.status === "error").length;
+  // Retryable = rows that never reached `done`: AI failures plus rows the user
+  // stopped (a stop-all leaves them cancelled; the next retry picks them up).
+  const failedCount = state.results.filter((r) => r.status === "error" || r.status === "cancelled").length;
   const filtered = state.results.filter((r) => {
     if (state.resultsFilter !== "all" && r.status !== state.resultsFilter) return false;
     if (!q) return true;

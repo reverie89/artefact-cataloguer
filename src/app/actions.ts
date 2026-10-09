@@ -82,8 +82,11 @@ export interface AppActions {
    *  sentinel, which the caller turns into a `cancelled` status; the rest of
    *  the run continues. No-op for a row that isn't processing. */
   stopRow(uid: string): Promise<void>;
-  /** Sequentially retryRow() every errored row. Useful after a fail-fast Parse
-   *  marked several never-attempted rows as error. */
+  /** When nothing is pending (no processing/queued row, no running pass):
+   *  requeue every errored/cancelled row at once, then sequentially retryRow()
+   *  each — one AI call in flight, one attempt per row. When work is still
+   *  pending, first offer to stop it all (stop only — never auto-retry, so a
+   *  failing row can't loop); the retry is a separate, manual click. */
   retryAllFailed(): Promise<void>;
   onResizeStart(e: React.MouseEvent): void;
 
@@ -394,6 +397,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // resets both flags), so a previous run's cancel/pause can't bleed into the
   // next one.
   const parseControl = useRef({ paused: false, cancelled: false });
+  // Owns the retry-all pass: `running` is the re-entrancy lock, `cancelled`
+  // breaks the loop between rows (set by an accepted Stop-all click).
+  const retryControl = useRef({ running: false, cancelled: false });
 
   // Helper: dispatch a settings patch then schedule persistence.
   const patch = useCallback(
@@ -686,29 +692,14 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const sheetRowToDataRow = entry.sheetRowToDataRow;
     const file = entry.file;
 
-    // A single active provider catalogues each artefact in one multimodal prompt.
+    const preflightError = parsePreFlightError(state.settings);
+    if (preflightError) {
+      dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
+      return;
+    }
+    // parsePreFlightError guarantees an active provider from here on.
     const prov = activeProvider(state.settings);
-    if (!prov) {
-      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → Model Providers." });
-      return;
-    }
-    // A vocab field whose source hasn't been synced yet resolves to neither
-    // the full list nor a shortlist — it would silently prompt as
-    // unconstrained free text (see findUnsyncedVocabField). Fail the whole
-    // run up front rather than producing quietly-wrong results.
-    const unsynced = findUnsyncedVocabField(state.settings);
-    if (unsynced) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.` });
-      return;
-    }
-    // Vocab fields are resolved purely by embedding search (no LLM), so they
-    // need an active embedding provider — without one they'd silently come
-    // back empty. Fail loudly with a pointer to Settings → Model Providers.
-    const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
-    if (noEmbed) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → Model Providers before parsing.` });
-      return;
-    }
+    if (!prov) return;
 
     // Fresh control flags for this run: a previous run's cancel/pause can't
     // bleed in. Polled at the top of each loop iteration (see below).
@@ -867,27 +858,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
   // Retry a single row's AI call. Reuses catalogueArtefact with the row's own
   // record + imagePath (already on state.results, so no image re-extraction).
-  // Failures stay scoped to the row — no global banner — except a missing
-  // active provider, which is a pre-flight config error like startParse.
+  // Failures stay scoped to the row — no global banner — except pre-flight
+  // config errors (provider / vocab), which surface the same banner as Parse.
   const retryRow = useCallback(async (uid: string) => {
     const row = state.results.find((r) => r.uid === uid);
     if (!row || row.status === "processing") return; // missing or already retrying
 
+    const preflightError = parsePreFlightError(state.settings);
+    if (preflightError) {
+      dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
+      return;
+    }
+    // parsePreFlightError guarantees an active provider from here on.
     const prov = activeProvider(state.settings);
-    if (!prov) {
-      dispatch({ type: "SET_PARSE_ERROR", error: "An active AI provider is required — add one in Settings → Model Providers." });
-      return;
-    }
-    const unsynced = findUnsyncedVocabField(state.settings);
-    if (unsynced) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.` });
-      return;
-    }
-    const noEmbed = findVocabFieldWithoutEmbedding(state.settings);
-    if (noEmbed) {
-      dispatch({ type: "SET_PARSE_ERROR", error: `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → Model Providers before parsing.` });
-      return;
-    }
+    if (!prov) return;
 
     // Clear the stale batch banner from the original Parse; a retry outcome is
     // reflected on the row itself, not the global error.
@@ -945,12 +929,85 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [state.results]);
 
   const retryAllFailed = useCallback(async () => {
-    // Snapshot the failed rows up front so rows that fail again (or newly fail)
-    // during the loop aren't re-queued in the same pass — one attempt each,
-    // sequentially, matching batch pacing.
-    const failed = state.results.filter((r) => r.status === "error");
-    for (const r of failed) await retryRow(r.uid);
-  }, [state.results, retryRow]);
+    // Retryable = every row that never reached `done`: AI failures plus rows
+    // the user stopped (per-row Stop or a previous Stop-all).
+    const retryable = state.results.filter((r) => r.status === "error" || r.status === "cancelled");
+    if (retryable.length === 0) return;
+
+    // Work still pending (in-flight calls or a running pass) is stopped first —
+    // stop only, never auto-retry, so a failing row can't loop.
+    const pending =
+      retryControl.current.running ||
+      state.results.some((r) => r.status === "processing" || r.status === "queued");
+    if (pending) {
+      const ok = await confirmDelete({
+        title: "Stop current work?",
+        message:
+          "Rows are still processing or queued for retry. Stop them all? Nothing is retried automatically — start the retry again when you're ready.",
+        confirmLabel: "Stop all",
+      });
+      if (!ok) return;
+
+      // Re-snapshot live: the dialog paused the user, not the app — rows kept
+      // moving while it was open.
+      const live = getState().results;
+      const processing = live.filter((r) => r.status === "processing");
+      const queued = live.filter((r) => r.status === "queued");
+      retryControl.current.cancelled = true; // break a running pass between rows
+      for (const r of processing) {
+        try {
+          await cancelCatalogue(`row-${r.uid}`);
+        } catch (e) {
+          // Cancelling an already-finished job can fail; the row's own status
+          // is the truth, so keep stopping the rest.
+          pushLog({ status: "fail", label: "Stop failed", detail: String((e as Error)?.message || e) });
+        }
+      }
+      // The awaiting owner (retryRow/startParse catch) is the single writer of
+      // a processing row's terminal status — wait for it, never preempt it.
+      let settled = false;
+      for (let i = 0; i < 100; i++) {
+        if (!getState().results.some((r) => r.status === "processing")) {
+          settled = true;
+          break;
+        }
+        await delay(100);
+      }
+      dispatch({ type: "CANCEL_ROWS", uids: queued.map((r) => r.uid) });
+      if (!settled) {
+        pushLog({ status: "fail", label: "Stop incomplete", detail: "A row is still processing — stop it from its row, then start the retry again." });
+        return;
+      }
+      const stopped = processing.length + queued.length;
+      pushLog({ status: "ok", label: "Stopped pending rows", detail: `${stopped} row${stopped === 1 ? "" : "s"} stopped — nothing requeued` });
+      return;
+    }
+
+    // Nothing pending: requeue every retryable row in one dispatch — the click
+    // visibly requeues all of them — then run them sequentially, one AI call in
+    // flight, matching batch pacing. The work list is snapshotted up front so a
+    // row that fails again mid-pass gets one attempt per click, not a loop.
+    if (retryControl.current.running) return; // same-tick double-click: already starting
+    // Pre-flight before the flip: queueing rows with no usable provider would
+    // strand them queued (each retryRow would bail at its own pre-flight).
+    const preflightError = parsePreFlightError(state.settings);
+    if (preflightError) {
+      dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
+      return;
+    }
+    const work = retryable.map((r) => r.uid);
+    dispatch({ type: "QUEUE_ROWS", uids: work });
+    pushLog({ status: "busy", label: "Retry failed rows", detail: `${work.length} row${work.length === 1 ? "" : "s"} requeued` });
+    retryControl.current = { running: true, cancelled: false };
+    try {
+      for (const uid of work) {
+        if (retryControl.current.cancelled) break;
+        await retryRow(uid);
+      }
+    } finally {
+      retryControl.current.running = false;
+    }
+  }, [state.results, state.settings, retryRow, dispatch, confirmDelete, getState]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -2280,4 +2337,29 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Shared pre-flight for every AI run (Parse, per-row retry, retry-all): the
+// config problems that would otherwise silently produce wrong results mid-run.
+// Returns the banner message to show, or null when the run may proceed.
+export function parsePreFlightError(settings: Settings): string | null {
+  if (!activeProvider(settings)) {
+    return "An active AI provider is required — add one in Settings → Model Providers.";
+  }
+  // A vocab field whose source hasn't been synced yet resolves to neither
+  // the full list nor a shortlist — it would silently prompt as
+  // unconstrained free text (see findUnsyncedVocabField). Fail the whole
+  // run up front rather than producing quietly-wrong results.
+  const unsynced = findUnsyncedVocabField(settings);
+  if (unsynced) {
+    return `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.`;
+  }
+  // Vocab fields are resolved purely by embedding search (no LLM), so they
+  // need an active embedding provider — without one they'd silently come
+  // back empty. Fail loudly with a pointer to Settings → Model Providers.
+  const noEmbed = findVocabFieldWithoutEmbedding(settings);
+  if (noEmbed) {
+    return `Controlled-vocabulary fields (e.g. "${noEmbed.fieldName}") are resolved by embedding search and need an active embedding provider — add one in Settings → Model Providers before parsing.`;
+  }
+  return null;
 }

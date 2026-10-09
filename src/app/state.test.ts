@@ -242,6 +242,38 @@ describe("reducer", () => {
   });
 });
 
+describe("reducer retry queueing", () => {
+  const base: typeof initialState = {
+    ...initialState,
+    results: [
+      { uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } },
+      { uid: "u2", status: "error" as const, record: {} },
+      { uid: "u3", status: "cancelled" as const, record: {} },
+      { uid: "u4", status: "queued" as const, record: {} },
+      { uid: "u5", status: "processing" as const, record: {} },
+    ],
+  };
+  const statuses = (s: typeof base) => s.results.map((r) => r.status);
+
+  it("QUEUE_ROWS flips the listed error/cancelled rows to queued in one pass", () => {
+    // Done rows never requeue; already-queued rows stay queued; an in-flight
+    // row is untouched (its owner owns that status).
+    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u1", "u2", "u3", "u4"] });
+    expect(statuses(next)).toEqual(["done", "queued", "queued", "queued", "processing"]);
+  });
+
+  it("QUEUE_ROWS ignores uids that are missing or in a non-retryable status", () => {
+    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u5", "nope"] });
+    expect(statuses(next)).toEqual(["done", "error", "cancelled", "queued", "processing"]);
+  });
+
+  it("CANCEL_ROWS flips only the listed queued rows to cancelled", () => {
+    // Error rows are not stopped by this action — only queued (pending) work.
+    const next = reducer(base, { type: "CANCEL_ROWS", uids: ["u4", "u2"] });
+    expect(statuses(next)).toEqual(["done", "error", "cancelled", "cancelled", "processing"]);
+  });
+});
+
 describe("reducer search column scope", () => {
   it("TOGGLE_SEARCH_COL_AF removes the last AF column (no 'keep at least one' guard)", () => {
     // Regression: previously the reducer silently no-op'd when the user

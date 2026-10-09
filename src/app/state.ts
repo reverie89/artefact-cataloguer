@@ -319,6 +319,8 @@ export type Action =
   | { type: "SET_UPLOAD_DRAG"; drag: boolean }
   | { type: "START_PARSE"; results: ArtefactRow[] }
   | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, { value: string; similarity?: number }[]> }
+  | { type: "QUEUE_ROWS"; uids: string[] }
+  | { type: "CANCEL_ROWS"; uids: string[] }
   | { type: "SET_ROW_IMAGE"; uid: string; imagePath: string }
   | { type: "SET_PARSE_STATUS"; status: ParseStatus }
   | { type: "SET_PARSE_ERROR"; error: string | null }
@@ -498,6 +500,30 @@ export function reducer(state: AppState, action: Action): AppState {
         }
       }
       return { ...state, results, aiResults, fieldSelections };
+    }
+    // Retry queueing: flip the listed rows to `queued` in one dispatch so a
+    // "Retry failed" click visibly requeues everything at once. Only rows that
+    // actually need a run (error/cancelled) move; done rows never requeue.
+    case "QUEUE_ROWS": {
+      const uids = new Set(action.uids);
+      return {
+        ...state,
+        results: state.results.map((r) =>
+          uids.has(r.uid) && (r.status === "error" || r.status === "cancelled") ? { ...r, status: "queued" } : r
+        ),
+      };
+    }
+    // Stopping the pending work: queued rows aren't in flight, so they can be
+    // flipped straight to `cancelled`. Processing rows keep their owner (the
+    // awaiting retryRow/startParse catch) as the single writer of that status.
+    case "CANCEL_ROWS": {
+      const uids = new Set(action.uids);
+      return {
+        ...state,
+        results: state.results.map((r) =>
+          uids.has(r.uid) && r.status === "queued" ? { ...r, status: "cancelled" } : r
+        ),
+      };
     }
     case "SET_ROW_IMAGE":
       return {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { composeExportTable, computeColumnWidths, csvSafeCell } from "./actions";
+import { composeExportTable, computeColumnWidths, csvSafeCell, parsePreFlightError } from "./actions";
 import { _DEF } from "./defaults";
-import type { AiResults, ArtefactRow, FieldSelection, Settings } from "./types";
+import type { AiResults, ArtefactRow, FieldSelection, Settings, VocabEmbeddingStatus } from "./types";
 
 describe("csvSafeCell", () => {
   // OWASP CSV-formula-injection neutralization: a value whose first char is one
@@ -133,5 +133,67 @@ describe("composeExportTable", () => {
     const sparseRows: ArtefactRow[] = [{ uid: "ux", status: "done", record: {} }];
     const table = composeExportTable(buildSettings(), sparseRows, {}, {})!;
     expect(table.rows[0]).toEqual(["", "", ""]);
+  });
+});
+
+describe("parsePreFlightError", () => {
+  // Base passes every check (active provider, no vocab fields) so each test
+  // adds exactly one failing ingredient.
+  function buildSettings(): Settings {
+    const s = _DEF();
+    s.providers = [{ id: "p1", name: "Prov", baseUrl: "https://a", apiKey: "k", model: "m" }];
+    s.activeProvider = "p1";
+    s.fields = [];
+    return s;
+  }
+  const syncedEmbedding: VocabEmbeddingStatus = { status: "synced", providerId: "e1", model: "m", dimensions: 8, lastSyncedAt: "2026-10-09", rowsEmbedded: 3, lastError: null };
+  const vocabField = { id: "f1", name: "Material", type: "vocab" as const, layout: "row" as const, prompt: "", vocabSources: ["s1"] };
+  const vocabSource = (embedding: VocabEmbeddingStatus) => ({
+    id: "s1", name: "AAT", files: [], fields: [], ingestionField: null, labelField: null, badgeField: null, embedding,
+  });
+
+  it("requires an active provider at all", () => {
+    const s = buildSettings();
+    s.activeProvider = null;
+    expect(parsePreFlightError(s)).toMatch(/active AI provider is required/);
+  });
+
+  it("requires the active provider to still exist in the list", () => {
+    const s = buildSettings();
+    s.providers = [];
+    expect(parsePreFlightError(s)).toMatch(/active AI provider is required/);
+  });
+
+  it("rejects a vocab field whose source has no synced embedding", () => {
+    const s = buildSettings();
+    s.fields = [vocabField];
+    s.vocabSources = [vocabSource({ status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null })];
+    const err = parsePreFlightError(s);
+    expect(err).toMatch(/not yet embedded/);
+    expect(err).toContain("Material");
+    expect(err).toContain("AAT");
+  });
+
+  it("rejects vocab fields when no embedding provider is active", () => {
+    const s = buildSettings();
+    s.fields = [vocabField];
+    s.vocabSources = [vocabSource(syncedEmbedding)];
+    // embeddingProviders stays empty (no active embedding provider).
+    const err = parsePreFlightError(s);
+    expect(err).toMatch(/embedding provider/);
+    expect(err).toContain("Material");
+  });
+
+  it("passes with no vocab fields and an active provider", () => {
+    expect(parsePreFlightError(buildSettings())).toBeNull();
+  });
+
+  it("passes when vocab sources are synced and an embedding provider is active", () => {
+    const s = buildSettings();
+    s.fields = [vocabField];
+    s.vocabSources = [vocabSource(syncedEmbedding)];
+    s.embeddingProviders = [{ id: "e1", name: "Emb", baseUrl: "https://b", apiKey: "k", model: "m" }];
+    s.activeEmbeddingProvider = "e1";
+    expect(parsePreFlightError(s)).toBeNull();
   });
 });
