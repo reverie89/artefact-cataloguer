@@ -94,6 +94,7 @@ pub fn run() {
             ai::test_connection,
             embeddings::test_embedding_connection,
             embeddings::sync_vocab_source,
+            embeddings::vocab_missing_tables,
             embeddings::cancel_vocab_sync,
             embeddings::flush_vocab_source,
             embeddings::flush_all_vocab,

@@ -16,7 +16,7 @@ import { isTabDirty } from "./drafts";
 import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
 import { columnWidthChars, fitWithin, imageDimensions, rowHeightPoints } from "../lib/imageMeta";
-import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
+import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, downgradeKeylessConnOk, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
 import * as vocabLib from "../lib/vocab";
 import type { StagedVocabFile } from "../lib/vocab";
 import { pushLog } from "../lib/logs";
@@ -1249,6 +1249,50 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.loaded, state.settings.vocabSources, ensureVocabTermsLoaded]);
 
+  // A settings.json moved from another install can claim "synced" for vector
+  // tables that live beside the old binary. Ask Rust which of those tables
+  // are missing on this machine and land the sources as stale — the badge
+  // stops claiming "Up to date" and the catalogue pre-flight blocks until the
+  // source re-syncs. Runs once per load against reducer-current settings
+  // (getState), so it can't act on a stale render snapshot.
+  useEffect(() => {
+    if (!state.loaded) return;
+    void (async () => {
+      const ids = getState()
+        .settings.vocabSources.filter((v) => v.embedding.status === "synced")
+        .map((v) => v.id);
+      if (!ids.length) return;
+      try {
+        const missing = await vocabLib.vocabMissingTables(ids);
+        for (const id of missing) {
+          await patchNow((s) =>
+            updateVocabSource(s, id, (v) => ({ ...v, embedding: markStaleIfSynced(v.embedding) }))
+          );
+        }
+      } catch (e) {
+        // Best-effort: a failed reconciliation leaves the persisted claims
+        // alone rather than blocking startup (the sync-time guard still holds).
+        console.error("[artefact] vocab table reconciliation failed:", e);
+      }
+    })();
+  }, [state.loaded, getState, patchNow]);
+
+  // The same moved-settings.json also carries connStatus "ok" whose API keys
+  // didn't come along — keys live in the OS keychain, which doesn't migrate.
+  // The Test Connection button itself refuses a keyless provider, so those
+  // claims are dead on arrival: degrade them to "err" once at startup. The
+  // helper returns the same array references on healthy installs and the
+  // patch skips the write entirely, so this is a no-op after the first run.
+  useEffect(() => {
+    if (!state.loaded) return;
+    void patchNow((s) => {
+      const providers = downgradeKeylessConnOk(s.providers);
+      const embeddingProviders = downgradeKeylessConnOk(s.embeddingProviders);
+      if (providers === s.providers && embeddingProviders === s.embeddingProviders) return s;
+      return { ...s, providers, embeddingProviders };
+    }).catch((e) => console.error("[artefact] provider conn-status reconciliation failed:", e));
+  }, [state.loaded, patchNow]);
+
   // Sync reads its per-source inputs via getState() rather than the render
   // closure: a sync outlives the render that started it (and syncAllVocab
   // chains several), so each pass must start from the reducer's *current*
@@ -1274,7 +1318,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     // space — rebuild drops the table so every row re-embeds (run_sync).
     const rebuild = !!source.embedding.model && source.embedding.model !== provider.model;
     try {
-      const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, rebuild, (ev) => {
+      // expectedFiles is the sync-start snapshot: files added mid-pass aren't
+      // expected, so their absence can't fail the sync (mirrors the tally below).
+      const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, rebuild, source.files.map((f) => f.filename), (ev) => {
         dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: ev.rowsDone, rowsTotal: ev.rowsTotal, fileProgress: ev.fileProgress });
       });
       await patchNow((s) =>

@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-use crate::vocab_files::{list_source_files, parse_source_file, VocabSourceField};
+use crate::vocab_files::{
+    find_missing_staged, list_source_files, parse_source_file, VocabSourceField,
+};
 
 use super::provider::{embed_texts, EmbeddingProvider, EMBED_BATCH_SIZE};
 use super::store::{
@@ -100,6 +102,13 @@ struct DiffedRows {
 /// re-embed even though the source bytes didn't change), and dedupe by
 /// term_key across files (last file wins).
 ///
+/// `expected_files` is the source's settings-declared file list, snapshotted
+/// by the renderer at sync start. Before diffing, every expected filename
+/// must be present in the staging directory: a settings.json moved to a fresh
+/// install arrives with the list but not the staged bytes, and treating that
+/// as "no files" would either produce a vacuous "successful" sync or — when
+/// the table survived but the bytes didn't — delete every embedded row.
+///
 /// `term_field` doesn't need folding into `fields_config_hash`: changing it
 /// changes which column supplies `term` *and* which column is excluded from
 /// `columns`/`columns_json` (see `vocab_files::parse_source_file`), so every
@@ -107,10 +116,19 @@ struct DiffedRows {
 /// treats the old term_keys as deleted and the new ones as fresh.
 fn diff_rows(
     source_id: &str,
+    expected_files: &[String],
     fields: &[VocabSourceField],
     term_field: Option<&str>,
 ) -> Result<DiffedRows, String> {
     let files = list_source_files(source_id)?;
+    let staged: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
+    let missing = find_missing_staged(expected_files, &staged);
+    if !missing.is_empty() {
+        return Err(format!(
+            "staged files missing: {} — re-add the source's files in Settings, then sync again",
+            missing.join(", ")
+        ));
+    }
     let fields_config_hash = {
         let mut sorted: Vec<(&str, bool)> = fields
             .iter()
@@ -199,17 +217,19 @@ fn diff_rows(
 /// so the table is dropped and every row re-embedded fresh. The staged files
 /// are untouched, so a failed or cancelled rebuild just rebuilds again next
 /// sync.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_sync(
     app: &AppHandle,
     source_id: &str,
     provider: &EmbeddingProvider,
     fields: &[VocabSourceField],
     term_field: Option<&str>,
+    expected_files: &[String],
     rebuild: bool,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<SyncResult, String> {
     let name = table_name(source_id);
-    let diffed = diff_rows(source_id, fields, term_field)?;
+    let diffed = diff_rows(source_id, expected_files, fields, term_field)?;
     let fresh = diffed.rows;
     let db = connect_db().await?;
     if rebuild {

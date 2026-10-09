@@ -92,12 +92,15 @@ export async function downloadVocabFile(sourceId: string, filename: string): Pro
 /**
  * Run (or resume) an incremental sync: stream-parse every staged file, hash
  * each row, embed only new/changed rows via `provider`, upsert into the
- * source's LanceDB table, and delete rows for removed content. `rebuild`
- * (set when the embedding model changed since the last sync) drops the table
- * first so every row re-embeds in the new model's vector space. `onProgress`
- * is called once per completed batch; the returned promise resolves with the
- * final tally. Cancellable via {@link cancelVocabSync} with the same
- * `sourceId`.
+ * source's LanceDB table, and delete rows for removed content. `expectedFiles`
+ * is the source's settings-declared file list at sync start — any expected
+ * filename missing from staging fails the sync outright, so a settings.json
+ * moved to a fresh install (staged bytes gone) can't diff against zero rows
+ * and report success. `rebuild` (set when the embedding model changed since
+ * the last sync) drops the table first so every row re-embeds in the new
+ * model's vector space. `onProgress` is called once per completed batch; the
+ * returned promise resolves with the final tally. Cancellable via
+ * {@link cancelVocabSync} with the same `sourceId`.
  */
 export async function syncVocabSource(
   sourceId: string,
@@ -105,6 +108,7 @@ export async function syncVocabSource(
   fields: VocabSourceField[],
   termField: string | null,
   rebuild: boolean,
+  expectedFiles: string[],
   onProgress?: (ev: VocabSyncEvent) => void
 ): Promise<VocabSyncResult> {
   let unlisten: UnlistenFn | undefined;
@@ -119,6 +123,7 @@ export async function syncVocabSource(
       provider: toRustProvider(provider),
       fields,
       termField,
+      expectedFiles,
       rebuild,
     });
   } finally {
@@ -130,6 +135,14 @@ export async function syncVocabSource(
  *  committed — the next sync resumes from where this one left off. */
 export async function cancelVocabSync(sourceId: string): Promise<void> {
   await invoke("cancel_vocab_sync", { sourceId });
+}
+
+/** Ids from `sourceIds` whose LanceDB table doesn't exist in `vocab_db` —
+ *  the startup reconciliation probe for a settings.json carried over from
+ *  another install: a "synced" claim whose table lives beside the old
+ *  binary. */
+export async function vocabMissingTables(sourceIds: string[]): Promise<string[]> {
+  return invoke<string[]>("vocab_missing_tables", { sourceIds });
 }
 
 /** Drop just this source's LanceDB table (files + settings metadata are left

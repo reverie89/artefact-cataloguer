@@ -37,7 +37,7 @@ pub use store::CandidateTerm;
 pub use store::{drop_table_best_effort, search_similar};
 
 use provider::{check_connection, EmbeddingConnectionTest};
-use store::{flush_source, list_terms, VocabTermRow};
+use store::{connect_db, flush_source, list_terms, table_exists, table_name, VocabTermRow};
 use sync::{run_sync, SyncResult};
 
 const VOCAB_DB_DIR: &str = "vocab_db";
@@ -94,9 +94,14 @@ pub async fn test_embedding_connection(
 /// `cancel_vocab_sync` — already-upserted batches stay committed, so a
 /// cancelled sync safely resumes from the diff next time.
 ///
+/// `expected_files` is the source's settings-declared file list; any expected
+/// filename absent from the staging directory fails the sync outright instead
+/// of diffing against zero rows — see `run_sync`/`diff_rows`.
+///
 /// `rebuild` (set by the renderer when the embedding model changed since the
 /// last sync) drops the table first so every row re-embeds in the new model's
 /// vector space — see `run_sync`.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn sync_vocab_source(
     app: AppHandle,
@@ -105,6 +110,7 @@ pub async fn sync_vocab_source(
     provider: EmbeddingProvider,
     fields: Vec<VocabSourceField>,
     term_field: Option<String>,
+    expected_files: Vec<String>,
     rebuild: Option<bool>,
 ) -> Result<SyncResult, String> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -120,6 +126,7 @@ pub async fn sync_vocab_source(
         &provider,
         &fields,
         term_field.as_deref(),
+        &expected_files,
         rebuild.unwrap_or(false),
         &cancel_flag,
     )
@@ -129,6 +136,22 @@ pub async fn sync_vocab_source(
         .map_err(|e| format!("cancel registry poisoned: {e}"))?
         .remove(&source_id);
     result
+}
+
+/// Which of `source_ids` have no LanceDB table in `vocab_db`. Startup
+/// reconciliation probe: a settings.json carried over from another install
+/// can claim `status: "synced"` for tables that live beside the old binary —
+/// the renderer lands those sources as stale instead of trusting the claim.
+#[tauri::command]
+pub async fn vocab_missing_tables(source_ids: Vec<String>) -> Result<Vec<String>, String> {
+    let db = connect_db().await?;
+    let mut missing = Vec::new();
+    for id in &source_ids {
+        if !table_exists(&db, &table_name(id)).await? {
+            missing.push(id.clone());
+        }
+    }
+    Ok(missing)
 }
 
 /// Drop just this source's table (keeps its staged files). No-op if the table

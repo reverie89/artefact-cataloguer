@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  downgradeKeylessConnOk,
   embeddingModelOptions,
   findUnsyncedVocabField,
   findVocabFieldWithoutEmbedding,
@@ -8,7 +9,7 @@ import {
   selectedModelLacksImageInput,
 } from "./ai";
 import { _DEF } from "../app/defaults";
-import type { ArtefactField, CatalogueField, EmbeddingProvider, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
+import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
 
 function baseSettings(fields: CatalogueField[], vocabSources: VocabSource[], overrides: Partial<Settings> = {}): Settings {
   return { ..._DEF(), fields, vocabSources, ...overrides };
@@ -202,5 +203,43 @@ describe("findVocabFieldWithoutEmbedding", () => {
     // embedding provider any more than an open field does.
     const s = baseSettings([vocabField("f1", "Material", [])], []);
     expect(findVocabFieldWithoutEmbedding(s)).toBeNull();
+  });
+});
+
+describe("downgradeKeylessConnOk", () => {
+  // A settings.json moved from another install arrives with connStatus "ok"
+  // whose API key didn't come along (keys live in the OS keychain). The Test
+  // Connection button itself refuses a keyless provider, so those claims are
+  // dead on arrival — degrade to "err" at startup.
+  function chatProvider(opts: Partial<Provider>): Provider {
+    return { id: "p", name: "", baseUrl: "https://example.test/v1", apiKey: "k", model: "m", ...opts };
+  }
+
+  it("degrades a keyless provider's persisted ok to err", () => {
+    const out = downgradeKeylessConnOk([chatProvider({ apiKey: "", connStatus: "ok" })]);
+    expect(out).toEqual([chatProvider({ apiKey: "", connStatus: "err" })]);
+  });
+
+  it("downgrades only the offending entries in a mixed list", () => {
+    const keyed = chatProvider({ id: "a", connStatus: "ok" });
+    const keyless = chatProvider({ id: "b", apiKey: "", connStatus: "ok" });
+    const out = downgradeKeylessConnOk([keyed, keyless]);
+    expect(out[0]).toBe(keyed);
+    expect(out[1].connStatus).toBe("err");
+  });
+
+  it("returns the same array reference when nothing needs downgrading", () => {
+    const providers = [
+      chatProvider({ connStatus: "ok" }),
+      chatProvider({ id: "b", apiKey: "", connStatus: "err" }),
+      chatProvider({ id: "c" }), // connStatus undefined
+    ];
+    expect(downgradeKeylessConnOk(providers)).toBe(providers);
+  });
+
+  it("works on embedding providers through the same structural shape", () => {
+    const emb = { id: "e", name: "", baseUrl: "https://example.test/v1", apiKey: "", model: "m", imageInputModels: null, connStatus: "ok" } as const;
+    const out = downgradeKeylessConnOk([emb]);
+    expect(out[0].connStatus).toBe("err");
   });
 });

@@ -397,3 +397,20 @@ export function activeProvider(settings: Settings): Provider | undefined {
   if (!settings.activeProvider) return undefined;
   return settings.providers.find((p) => p.id === settings.activeProvider);
 }
+
+/**
+ * A settings.json moved to another install arrives with `connStatus: "ok"`
+ * claims whose API keys didn't come along — keys live in the OS keychain,
+ * which doesn't migrate, and rehydration on a miss silently yields an empty
+ * key. The Test Connection button itself refuses to verify a keyless
+ * provider, so such a claim is dead on arrival: degrade it to "err" once at
+ * startup instead of letting the badge keep saying success. Returns the same
+ * array reference when nothing needs downgrading, so callers can skip
+ * no-op persistence. `err`/`untested` always pass through unchanged.
+ */
+export function downgradeKeylessConnOk<P extends { apiKey: string; connStatus?: "ok" | "err" | "untested" }>(providers: P[]): P[] {
+  if (!providers.some((p) => p.connStatus === "ok" && !p.apiKey)) return providers;
+  return providers.map((p) =>
+    p.connStatus === "ok" && !p.apiKey ? { ...p, connStatus: "err" as const } : p,
+  );
+}

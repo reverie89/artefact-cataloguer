@@ -11,6 +11,7 @@
 
 use calamine::{open_workbook_auto, Reader};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -362,6 +363,21 @@ pub fn list_source_files(source_id: &str) -> Result<Vec<(String, PathBuf)>, Stri
     Ok(out)
 }
 
+/// Which of `expected` filenames are absent from `staged`. `expected` is the
+/// source's settings-declared file list, the only record that survives a
+/// settings.json moved to a fresh install — without it, a missing staging
+/// directory reads as "no files", the diff sees zero rows, and the sync
+/// either no-ops "successfully" or (table present, files gone) deletes every
+/// embedded row.
+pub fn find_missing_staged(expected: &[String], staged: &[String]) -> Vec<String> {
+    let have: HashSet<&str> = staged.iter().map(|s| s.as_str()).collect();
+    expected
+        .iter()
+        .filter(|e| !have.contains(e.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn today_date() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -385,4 +401,28 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_missing_staged;
+
+    #[test]
+    fn missing_lists_only_expected_files_absent_from_staging() {
+        let missing = find_missing_staged(
+            &["a.csv".into(), "b.xlsx".into(), "c.csv".into()],
+            &["b.xlsx".into(), "extra.csv".into(), "c.csv".into()],
+        );
+        assert_eq!(missing, vec!["a.csv".to_string()]);
+    }
+
+    #[test]
+    fn nothing_missing_when_staging_covers_expectations() {
+        assert!(find_missing_staged(&["a.csv".into()], &["a.csv".into()]).is_empty());
+    }
+
+    #[test]
+    fn empty_expectations_never_report_missing() {
+        assert!(find_missing_staged(&[], &[]).is_empty());
+    }
 }
