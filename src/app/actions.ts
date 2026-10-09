@@ -309,10 +309,11 @@ function rowLabel(row: ArtefactRow, index?: number): string {
 
 /** Breathing room around embedded images on the exported sheet. The px→chars
  *  width formula is font-approximate, so an exact-fit column lets landscape
- *  photos bleed into the next column; the row pad keeps photos off the
- *  gridlines instead of flush against them. */
-const IMAGE_COL_PAD_CHARS = 3;
-const IMAGE_ROW_PAD_PT = 6;
+ *  photos bleed into the next column; the row pad gives each photo clear air
+ *  below before the next row's photo — the photo itself stays flush with the
+ *  row's top edge, matching the top-aligned text beside it. */
+const IMAGE_COL_PAD_CHARS = 1;
+const IMAGE_ROW_PAD_PX = 12;
 
 /** Pure composition of an export table from current state. Returns the headers
  *  and per-row values (strings only — image bytes are embedded separately by
@@ -921,8 +922,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           ws.addImage(id, { tl: { col: colIdx, row: rowIdx + 1 }, ext: { width, height }, editAs: "oneCell" });
           // Default ~20px rows would leave a 200px photo spilling over the
           // rows below — give the row an explicit height fitting the photo
-          // (and the wrapped text beside it). Imageless rows keep auto-height.
-          ws.getRow(rowIdx + 2).height = rowHeightPoints(height) + IMAGE_ROW_PAD_PT;
+          // plus bottom pad (and the wrapped text beside it). The photo
+          // anchors flush to the row's top, like the text. Imageless rows
+          // keep auto-height.
+          ws.getRow(rowIdx + 2).height = rowHeightPoints(height + IMAGE_ROW_PAD_PX);
           if (width > maxImageWidth) maxImageWidth = width;
         } catch (e) {
           // Missing/unreadable image — leave the cell empty rather than abort
