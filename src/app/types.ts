@@ -186,8 +186,17 @@ export interface ArtefactRow {
    *  reducer matching, and the expandedRows/fieldSelections/aiResults map keys.
    *  Never empty, never duplicated. */
   uid: string;
-  /** Set at parse time. `cancelled` = skipped because the user cancelled the
-   *  run before this row was reached (terminal, like `done`/`error`). */
+  /** Import provenance: the id of the import batch (one file browse/drop) this
+   *  row came from. The results panel groups rows by it and delete-all-of-file
+   *  removes every row carrying it. */
+  fileId: string;
+  /** Source file's name at import time — the results group header label. Kept
+   *  on the row (not looked up from the file list) because file entries are
+   *  transient: valid files leave the upload list as soon as they're imported. */
+  sourceName: string;
+  /** Set at import time (`queued`); the catalogue queue owns every later
+   *  transition. `cancelled` = stopped before this row was reached (terminal,
+   *  like `done`/`error`). */
   status?: "queued" | "processing" | "done" | "error" | "cancelled";
   /** Arbitrary source columns from the sheet (key → value) — every non-image
    *  column the parser found, in the sheet's own header casing. */
@@ -195,6 +204,11 @@ export interface ArtefactRow {
   /** Absolute path to the extracted image beside the binary, if any. */
   imagePath?: string;
 }
+
+/** A row as the spreadsheet parser produces it — no import provenance yet.
+ *  The parser doesn't know which browse/drop batch a row belongs to; addFiles
+ *  stamps `fileId`/`sourceName` when promoting rows into the results panel. */
+export type ParsedArtefactRow = Omit<ArtefactRow, "fileId" | "sourceName">;
 
 export interface AiSuggestion {
   value: string;
@@ -224,13 +238,6 @@ export interface FieldSelection {
 
 export type Screen = "main" | "settings";
 export type SettingsTab = "about" | "artefactFile" | "fields" | "vocab" | "modelProviders";
-
-/** Lifecycle of the current parse run. `idle` = nothing has run yet for the
- *  current upload; `running`/`paused` = the loop is alive; `completed`/
- *  `cancelled` = terminal (loop has exited). Replaces the former
- *  `parseStarted: boolean`, which couldn't distinguish an active run from a
- *  finished one. */
-export type ParseStatus = "idle" | "running" | "paused" | "cancelled" | "completed";
 
 /** Shape written to / read from <exe_dir>/settings.json. */
 export interface StateBundle {

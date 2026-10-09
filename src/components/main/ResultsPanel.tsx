@@ -1,9 +1,13 @@
-import { Download, Package, RotateCcw, Search, SearchX, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, Ban, Download, FileSpreadsheet, Package, RotateCcw, Search, SearchX, SlidersHorizontal, Trash2, X, Zap } from "lucide-react";
+import { useState } from "react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
+import type { ArtefactRow } from "../../app/types";
+import { recordValueFor } from "../../lib/spreadsheet";
 import { ResultRow } from "./ResultRow";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -20,6 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 interface Props {
   state: AppState;
@@ -31,9 +36,10 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
   const { settings } = state;
   const q = state.resultsSearch.toLowerCase();
   // Retryable = rows that never reached `done`: AI failures plus rows the user
-  // stopped (a stop-all leaves them cancelled; the next retry picks them up).
+  // stopped (a stop leaves them cancelled; Retry sends them back to the queue).
   const failedCount = state.results.filter((r) => r.status === "error" || r.status === "cancelled").length;
-  const filtered = state.results.filter((r) => {
+  const queuedCount = state.results.filter((r) => r.status === "queued").length;
+  const matches = (r: ArtefactRow) => {
     if (state.resultsFilter !== "all" && r.status !== state.resultsFilter) return false;
     if (!q) return true;
     // Search the user-selected columns only: AF columns read from the parsed
@@ -44,10 +50,7 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
     const record = r.record ?? {};
     const afHit = settings.artefactFields
       .filter((f) => state.searchColsAf.includes(f.id))
-      .some((f) => {
-        const k = Object.keys(record).find((kk) => kk.toLowerCase() === f.name.toLowerCase());
-        return !!k && record[k].toLowerCase().includes(q);
-      });
+      .some((f) => recordValueFor(record, f.name).toLowerCase().includes(q));
     const catHit = settings.fields
       .filter((f) => state.searchColsCat.includes(f.id))
       .some((f) => {
@@ -56,7 +59,32 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
         return (sel?.value || ai).toLowerCase().includes(q);
       });
     return afHit || catHit;
-  });
+  };
+
+  // Rows grouped by source file, in import order (rows of one import are
+  // contiguous in `results`, so consecutive-run grouping is exact). Filtering
+  // applies within groups; a group nothing matches disappears from the list.
+  const groups: { fileId: string; sourceName: string; rows: ArtefactRow[] }[] = [];
+  for (const r of state.results) {
+    if (!matches(r)) continue;
+    const last = groups[groups.length - 1];
+    if (last && last.fileId === r.fileId) last.rows.push(r);
+    else groups.push({ fileId: r.fileId, sourceName: r.sourceName, rows: [r] });
+  }
+  const visibleCount = groups.reduce((n, g) => n + g.rows.length, 0);
+
+  // fileId whose delete-all confirmation is currently open: the whole group
+  // tints so the target stays identifiable behind the dialog. deleteFileRows
+  // resolves exactly when the dialog closes (either answer).
+  const [confirmingDeleteFileId, setConfirmingDeleteFileId] = useState<string | null>(null);
+  const handleDeleteGroup = async (fileId: string) => {
+    setConfirmingDeleteFileId(fileId);
+    try {
+      await actions.deleteFileRows(fileId);
+    } finally {
+      setConfirmingDeleteFileId(null);
+    }
+  };
 
   const afAll = settings.artefactFields.length > 0 && state.searchColsAf.length === settings.artefactFields.length;
   const catAll = settings.fields.length > 0 && state.searchColsCat.length === settings.fields.length;
@@ -72,7 +100,7 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
       {hasResults && (
       <div className="bg-card border-b sticky top-0 z-10 flex shrink-0 items-center gap-2 px-5 py-2.25">
         <span className="text-muted-foreground text-xs font-semibold uppercase tracking-[0.12em]">Results</span>
-        <Badge variant="secondary" className="text-[13px]">{filtered.length}</Badge>
+        <Badge variant="secondary" className="text-[13px]">{visibleCount}</Badge>
         {/* Column picker — multi-select across AF and catalogue columns, scoped
             to the search box. The trigger shows a count of active columns so
             the scope is visible without opening the popover. */}
@@ -154,10 +182,23 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
             <SelectItem value="cancelled">Cancelled</SelectItem>
           </SelectContent>
         </Select>
+        {state.queueRunning ? (
+          <Button onClick={() => void actions.stopQueue()} variant="outline" size="sm">
+            <Ban className="size-3" />
+            <span>Stop</span>
+          </Button>
+        ) : queuedCount > 0 && (
+          /* Pulses while rows wait for a start, so a fresh import draws the
+             eye to the one control needed next. */
+          <Button onClick={() => void actions.startQueue()} size="sm" className="animate-pulse">
+            <Zap className="size-3" />
+            <span>Start</span>
+          </Button>
+        )}
         {failedCount > 0 && (
-          <Button onClick={() => void actions.retryAllFailed()} variant="secondary" size="sm">
+          <Button onClick={actions.retryFailed} variant="secondary" size="sm">
             <RotateCcw className="size-3" />
-            <span>Retry failed</span>
+            <span>Retry</span>
             <Badge variant="secondary" className="text-[12px]">{failedCount}</Badge>
           </Button>
         )}
@@ -166,6 +207,14 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           <span>Export</span>
         </Button>
       </div>
+      )}
+      {/* Run/export feedback lives here, next to the controls that trigger it:
+          queue pre-flight failures (Start) and blocked exports (Export). */}
+      {hasResults && state.parseError && (
+        <AlertBanner message={state.parseError} onDismiss={actions.dismissParseError} />
+      )}
+      {hasResults && state.exportWarning && (
+        <AlertBanner message={state.exportWarning} onDismiss={actions.dismissExportWarning} />
       )}
       {/* Column header — table chrome for the rows above; hidden alongside it. */}
       {hasResults && (
@@ -176,14 +225,14 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
       </div>
       )}
 
-      {state.parseStatus === "idle" ? (
+      {!hasResults ? (
         <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 px-5 py-20 text-center">
           <Package className="size-7" />
           <div className="text-base leading-relaxed">
-            Upload files and click <strong className="text-muted-foreground font-medium">Parse</strong><br />to see AI-generated results here
+            Import an artefact file above —<br />its records will appear here, grouped by file
           </div>
         </div>
-      ) : filtered.length === 0 ? (
+      ) : visibleCount === 0 ? (
         <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 px-5 py-20 text-center">
           <SearchX className="size-7" />
           <div className="text-base leading-relaxed">
@@ -193,10 +242,50 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           </div>
         </div>
       ) : (
-        filtered.map((row, i) => (
-          <ResultRow key={row.uid} row={row} index={i + 1} state={state} actions={actions} convertFileSrc={convertFileSrc} />
+        groups.map((g) => (
+          <div key={g.fileId} className={cn(confirmingDeleteFileId === g.fileId && "bg-destructive/10")}>
+            <div className="bg-muted/30 border-border/60 flex shrink-0 items-center gap-2 border-b px-5 py-1.5">
+              <FileSpreadsheet className="text-primary size-3.5 shrink-0" />
+              <span className="text-muted-foreground min-w-0 truncate text-[13px] font-medium">{g.sourceName}</span>
+              <Badge variant="secondary" className="text-[11px]">{g.rows.length} record{g.rows.length === 1 ? "" : "s"}</Badge>
+              <span className="flex-1" />
+              <Button
+                onClick={() => void handleDeleteGroup(g.fileId)}
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`Delete all records from ${g.sourceName}`}
+                className={cn("text-muted-foreground hover:text-destructive", confirmingDeleteFileId === g.fileId && "text-destructive")}
+              >
+                <Trash2 className="size-3" />
+              </Button>
+            </div>
+            {g.rows.map((row, i) => (
+              <ResultRow key={row.uid} row={row} index={i + 1} state={state} actions={actions} convertFileSrc={convertFileSrc} />
+            ))}
+          </div>
         ))
       )}
     </div>
+  );
+}
+
+/** Blocking, dismissible, destructive notice — the shared treatment for the
+    queue pre-flight error and the export warning. */
+function AlertBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <Card className="bg-destructive/10 border-destructive/20 mx-5 my-2 rounded-md py-2.5">
+      <div className="flex items-start gap-1.25 px-3">
+        <AlertCircle className="text-destructive mt-0.5 size-3 shrink-0" />
+        <div className="text-destructive flex-1 text-sm">{message}</div>
+        <Button
+          onClick={onDismiss}
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-destructive -mt-1 -mr-1 size-6"
+        >
+          <X className="size-3" />
+        </Button>
+      </div>
+    </Card>
   );
 }

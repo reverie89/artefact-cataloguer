@@ -1,10 +1,11 @@
-import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Plus, RotateCcw, Search, X, XCircle, Zap } from "lucide-react";
+import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Plus, RotateCcw, Search, Trash2, X, XCircle, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import type { ArtefactRow } from "../../app/types";
 import { _ST } from "../../app/defaults";
 import { vterms } from "../../app/styles";
+import { isImageRoleName, recordValueFor } from "../../lib/spreadsheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -30,16 +31,36 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
   // Transient per-row lightbox open state — local, not in global AppState.
   const [lightboxOpen, setLightboxOpen] = useState(false);
 
-  // Source record columns: parsed rows expose every configured column via
-  // `row.record` (already excluding the image column). A row with no record
-  // (e.g. a queued row before parse completed) renders an empty source panel.
-  const sourceFields =
-    row.record && Object.keys(row.record).length
-      ? Object.entries(row.record).map(([k, v]) => ({ key: k, value: String(v) }))
-      : [];
+  // True while this row's delete confirmation is open: the row tints so the
+  // user can still tell which record they're deciding about behind the dialog.
+  // deleteRow resolves exactly when the dialog closes (either answer).
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const handleDelete = async () => {
+    setConfirmingDelete(true);
+    try {
+      await actions.deleteRow(row.uid);
+    } finally {
+      setConfirmingDelete(false);
+    }
+  };
+
+  // Source Record shows every configured column, in configured order — an
+  // em-dash marks a cell that is empty in this row's sheet (records are
+  // sparse: the parser omits empty cells). The image-role column is excluded
+  // (its text never enters the record; the extracted drawing renders in the
+  // Image pane), and unconfigured sheet columns don't render at all.
+  // Matching mirrors the parser: record keys are the sheet's own header text,
+  // compared case-insensitively with whitespace runs collapsed
+  // (recordValueFor).
+  const record = row.record ?? {};
+  const afs = state.settings.artefactFields || [];
+  const imageIdx = afs.findIndex((f) => isImageRoleName(f.name));
+  const sourceFields = afs
+    .filter((_, i) => i !== imageIdx)
+    .map((f) => ({ key: f.name || "Untitled column", value: recordValueFor(record, f.name), forAI: f.includeForAI }));
 
   return (
-    <div className="border-border/60 border-b">
+    <div className={cn("border-border/60 border-b", confirmingDelete && "bg-destructive/10")}>
       <div
         onClick={() => actions.toggleRow(row.uid)}
         className="grid min-w-0 cursor-pointer grid-cols-[80px_1fr] items-center overflow-hidden px-5 py-2.5"
@@ -52,6 +73,15 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
           />
           <span className="text-muted-foreground text-[13px]">{st.label}</span>
           <span className="ml-auto flex items-center">
+            <Button
+              onClick={(e) => { e.stopPropagation(); void handleDelete(); }}
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Delete record"
+              className={cn("text-muted-foreground hover:text-destructive mr-0.5", confirmingDelete && "text-destructive")}
+            >
+              <Trash2 className="size-3" />
+            </Button>
             {expanded ? <ChevronUp className="size-3 text-primary" /> : <ChevronDown className="text-muted-foreground size-3" />}
           </span>
         </div>
@@ -84,7 +114,7 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
             <div className="text-muted-foreground flex items-center gap-2 px-4.5 py-3.5 text-sm">
               <span>Cancelled</span>
               <Button
-                onClick={(e) => { e.stopPropagation(); void actions.retryRow(row.uid); }}
+                onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
                 variant="outline"
                 size="xs"
                 className="ml-1"
@@ -99,7 +129,7 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
               <XCircle className="size-3.5" />
               <span>Processing failed — check Logs Viewer</span>
               <Button
-                onClick={(e) => { e.stopPropagation(); void actions.retryRow(row.uid); }}
+                onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
                 variant="outline"
                 size="xs"
                 className="ml-1"
@@ -115,9 +145,17 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
             <div className="border-border/60 p-3 pr-4.5 border-r">
               <div className="text-muted-foreground mb-2 text-[11px] font-semibold uppercase tracking-[0.12em]">Source Record</div>
               {sourceFields.map((sf) => (
-                <div key={sf.key} className="border-border/60 grid grid-cols-[110px_1fr] gap-1.5 border-b py-1">
-                  <span className="text-muted-foreground pt-0.25 text-[11px] uppercase tracking-[0.05em]">{sf.key}</span>
-                  <span className="text-foreground text-sm [overflow-wrap:anywhere] [word-break:break-word]">{sf.value}</span>
+                <div key={sf.key} className="border-border/60 grid grid-cols-[130px_1fr] gap-1.5 border-b py-1">
+                  <span className="text-muted-foreground flex min-w-0 items-center gap-1.25 pt-0.25 text-[11px] uppercase tracking-[0.05em]">
+                    <span className="truncate" title={sf.key}>{sf.key}</span>
+                    {!sf.forAI && (
+                      <Badge variant="secondary" title="Not sent to AI" className="flex shrink-0 select-none items-center gap-1 px-1.5 text-[10px] font-normal normal-case tracking-[0.04em]">
+                        <X className="size-2.5" />
+                        <span>AI</span>
+                      </Badge>
+                    )}
+                  </span>
+                  <span className={cn("text-sm [overflow-wrap:anywhere] [word-break:break-word]", sf.value ? "text-foreground" : "text-muted-foreground")}>{sf.value || "—"}</span>
                 </div>
               ))}
             </div>
@@ -176,7 +214,7 @@ function CatalogueFields({ row, state, actions }: { row: ArtefactRow; state: App
             <span className="text-muted-foreground text-[11px] font-normal">{activeProvName}</span>
           </div>
           <Button
-            onClick={(e) => { e.stopPropagation(); void actions.retryRow(row.uid); }}
+            onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
             variant="outline"
             size="xs"
           >

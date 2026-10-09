@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 
-import { columnLetterToIndex, parseArtefactFile } from "./spreadsheet";
+import { columnLetterToIndex, parseArtefactFile, recordValueFor } from "./spreadsheet";
 import { _DEF } from "../app/defaults";
 import type { Settings } from "../app/types";
 
@@ -50,6 +50,15 @@ async function xlsxFile(rows: unknown[][], filename = "test.xlsx"): Promise<File
   const buf = await wb.xlsx.writeBuffer();
   return new File([buf], filename);
 }
+
+describe("recordValueFor", () => {
+  it("matches keys case-insensitively with whitespace runs collapsed; missing → empty string", () => {
+    const record = { "Curator's\nObj. Type": "bronze", "ACCESSION  NO": "X.1" };
+    expect(recordValueFor(record, "Curator's Obj. Type")).toBe("bronze");
+    expect(recordValueFor(record, "accession no")).toBe("X.1");
+    expect(recordValueFor(record, "Material")).toBe("");
+  });
+});
 
 describe("parseArtefactFile", () => {
   it("assigns unique, non-empty uids and records every non-image column", async () => {

@@ -1,28 +1,28 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { ResultsPanel } from "./ResultsPanel";
 import { initialState } from "../../app/state";
 import type { AppState } from "../../app/state";
 import type { AppActions } from "../../app/actions";
 
-// Minimal no-op actions — the empty-scope behaviour is driven entirely by
-// state, so the action callbacks only need to exist with the right shape.
+// Minimal no-op actions — the tested behaviour is driven entirely by state, so
+// the action callbacks only need to exist with the right shape.
 const noopActions = new Proxy<AppActions>(
   {} as AppActions,
   { get: () => () => vi.fn() },
 );
 
-function renderWith(overrides: Partial<AppState>) {
+function renderWith(overrides: Partial<AppState>, actions: AppActions = noopActions) {
   const state: AppState = { ...initialState, ...overrides };
-  return render(<ResultsPanel state={state} actions={noopActions} convertFileSrc={(p) => `asset://${p}`} />);
+  return render(<ResultsPanel state={state} actions={actions} convertFileSrc={(p) => `asset://${p}`} />);
 }
 
 afterEach(cleanup);
 
 describe("ResultsPanel header visibility", () => {
   it("hides the search/columns/filter row and the S/N|Status header when there are no result items", () => {
-    renderWith({ parseStatus: "idle", results: [] });
+    renderWith({ results: [] });
 
     // The whole sticky toolbar (search box, column picker, status filter,
     // export) and the table column-header row are gated on having rows.
@@ -31,14 +31,109 @@ describe("ResultsPanel header visibility", () => {
     expect(screen.queryByText("S/N")).not.toBeInTheDocument();
   });
 
+  it("shows the import hint when there are no records", () => {
+    renderWith({ results: [] });
+    expect(screen.getByText(/import an artefact file above/i)).toBeInTheDocument();
+  });
+
   it("shows the header row as soon as there is at least one result item", () => {
     renderWith({
-      parseStatus: "completed",
-      results: [{ uid: "u1", status: "done", record: { "Object Name": "Cup" } }],
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Cup" } }],
     });
 
     expect(screen.getByPlaceholderText("Search artefacts…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /columns/i })).toBeInTheDocument();
+  });
+});
+
+describe("ResultsPanel file groups", () => {
+  it("renders one group header per source file with its record count and delete affordances", () => {
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "survey.xlsx", status: "done", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "survey.xlsx", status: "queued", record: {} },
+        { uid: "u3", fileId: "f2", sourceName: "loans.xlsx", status: "error", record: {} },
+      ],
+    });
+
+    expect(screen.getByText("survey.xlsx")).toBeInTheDocument();
+    expect(screen.getByText("loans.xlsx")).toBeInTheDocument();
+    expect(screen.getByText("2 records")).toBeInTheDocument();
+    expect(screen.getByText("1 record")).toBeInTheDocument();
+    // Delete-all per group, per-row delete per record.
+    expect(screen.getByRole("button", { name: /delete all records from survey\.xlsx/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /delete all records from loans\.xlsx/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Delete record" })).toHaveLength(3);
+  });
+
+  it("highlights the whole group while its delete-all confirmation is open", async () => {
+    let resolveDelete: (v: void) => void = () => {};
+    const deleteFileRows = vi.fn(() => new Promise<void>((res) => { resolveDelete = res; }));
+    const actions = new Proxy<AppActions>({} as AppActions, {
+      get: (_t, prop) => (prop === "deleteFileRows" ? deleteFileRows : () => vi.fn()),
+    });
+    const { container } = renderWith({
+      results: [{ uid: "u1", fileId: "f1", sourceName: "survey.xlsx", status: "queued", record: {} }],
+    }, actions);
+
+    fireEvent.click(screen.getByRole("button", { name: /delete all records from survey\.xlsx/i }));
+    // The confirmation is "open" (deleteFileRows pending): the group wrapper —
+    // header + its rows — tints so the target stays identifiable behind the
+    // modal. The other group would stay untouched.
+    expect(screen.getByText("survey.xlsx").closest('[class*="bg-destructive/10"]')).not.toBeNull();
+
+    await act(async () => { resolveDelete(); });
+    expect(screen.getByText("survey.xlsx").closest('[class*="bg-destructive/10"]')).toBeNull();
+    expect(container.querySelector('[class*="bg-destructive/10"]')).toBeNull();
+  });
+
+  it("hides a group whose rows all fail the search, keeping visible groups", () => {
+    renderWith({
+      resultsSearch: "cup",
+      searchColsAf: ["af2"], // Object Name
+      searchColsCat: [],
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "survey.xlsx", status: "done", record: { "Object Name": "Cup" } },
+        { uid: "u2", fileId: "f2", sourceName: "loans.xlsx", status: "done", record: { "Object Name": "Bowl" } },
+      ],
+    });
+
+    expect(screen.getByText("survey.xlsx")).toBeInTheDocument();
+    expect(screen.queryByText("loans.xlsx")).not.toBeInTheDocument();
+  });
+});
+
+describe("ResultsPanel queue controls", () => {
+  it("shows a pulsing Start (and no Stop) when rows are queued and the queue is idle", () => {
+    renderWith({
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} }],
+    });
+
+    const start = screen.getByRole("button", { name: /start/i });
+    expect(start.className).toContain("animate-pulse");
+    expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
+  });
+
+  it("swaps Start for Stop while the queue is running", () => {
+    renderWith({
+      queueRunning: true,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing", record: {} }],
+    });
+
+    expect(screen.getByRole("button", { name: /stop/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
+  });
+
+  it("shows Retry with the failed count when error/cancelled rows exist", () => {
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "error", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "cancelled", record: {} },
+      ],
+    });
+
+    const retry = screen.getByRole("button", { name: /retry/i });
+    expect(within(retry).getByText("2")).toBeInTheDocument();
   });
 });
 
@@ -48,13 +143,12 @@ describe("ResultsPanel empty-scope search", () => {
     // but the scope is empty so the filter returns nothing. Collapsed rows
     // render only their index + status label ("Done"), so assert on those.
     renderWith({
-      parseStatus: "completed",
       resultsSearch: "cup",
       searchColsAf: [],
       searchColsCat: [],
       results: [
-        { uid: "u1", status: "done", record: { "Object Name": "Cup" } },
-        { uid: "u2", status: "done", record: { "Object Name": "Bowl" } },
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Cup" } },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Bowl" } },
       ],
     });
 
@@ -65,11 +159,10 @@ describe("ResultsPanel empty-scope search", () => {
 
   it("matches rows when an AF column is in scope and the query hits it", () => {
     renderWith({
-      parseStatus: "completed",
       resultsSearch: "cup",
       searchColsAf: ["af2"], // Object Name
       searchColsCat: [],
-      results: [{ uid: "u1", status: "done", record: { "Object Name": "Cup" } }],
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Cup" } }],
     });
 
     expect(screen.queryByText(/select at least one column/i)).not.toBeInTheDocument();
@@ -80,11 +173,10 @@ describe("ResultsPanel empty-scope search", () => {
 
   it("shows all rows when the scope is empty but no query is typed (the !q short-circuit)", () => {
     renderWith({
-      parseStatus: "completed",
       resultsSearch: "",
       searchColsAf: [],
       searchColsCat: [],
-      results: [{ uid: "u1", status: "done", record: { "Object Name": "Cup" } }],
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Cup" } }],
     });
 
     // No empty-scope hint, no "no matches" hint — the row renders.
@@ -94,11 +186,10 @@ describe("ResultsPanel empty-scope search", () => {
 
   it("shows the generic 'no matches' hint (not the empty-scope one) when scope is set but nothing matches", () => {
     renderWith({
-      parseStatus: "completed",
       resultsSearch: "nonexistent",
       searchColsAf: ["af2"], // Object Name
       searchColsCat: [],
-      results: [{ uid: "u1", status: "done", record: { "Object Name": "Cup" } }],
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Object Name": "Cup" } }],
     });
 
     expect(screen.getByText(/try a different search or filter/i)).toBeInTheDocument();

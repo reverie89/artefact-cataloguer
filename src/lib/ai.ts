@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
 import { embeddingModelStale } from "../app/vocabSettings";
+import { normalizeHeader } from "./spreadsheet";
 
 interface RawCatalogueResult {
   fieldResults: Record<string, { value: string; similarity?: number }[]>;
@@ -89,17 +90,19 @@ interface RustArtefact {
 
 /**
  * The record the AI sees: only configured Artefact File columns with
- * `includeForAI` on, matched case-insensitively against the sheet's headers.
- * Unconfigured columns — and configured columns toggled off — still appear in
- * the source record panel; this bound applies only to the AI payload. The
- * Image column never appears in `record` (the parser excludes it; its bytes
- * travel separately).
+ * `includeForAI` on, matched against the sheet's headers with the parser's
+ * normalization (normalizeHeader — case-insensitive, whitespace runs
+ * collapsed). Unconfigured columns appear nowhere (not displayed, exported,
+ * or sent to the AI); configured columns toggled off still appear in the
+ * source record panel — this bound applies only to the AI payload. The Image
+ * column never appears in `record` (the parser excludes it; its bytes travel
+ * separately).
  */
 export function recordForAI(record: Record<string, string>, artefactFields: ArtefactField[]): Record<string, string> {
-  const include = new Set(artefactFields.filter((f) => f.includeForAI).map((f) => f.name.trim().toLowerCase()));
+  const include = new Set(artefactFields.filter((f) => f.includeForAI).map((f) => normalizeHeader(f.name)));
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(record)) {
-    if (include.has(k.trim().toLowerCase())) out[k] = v;
+    if (include.has(normalizeHeader(k))) out[k] = v;
   }
   return out;
 }

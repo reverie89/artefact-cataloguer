@@ -13,7 +13,7 @@ import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, provider
 import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
 import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
-import { parseArtefactFile } from "../lib/spreadsheet";
+import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
 import { columnWidthChars, fitWithin, imageDimensions, rowHeightPoints } from "../lib/imageMeta";
 import { catalogueArtefact, cancelCatalogue, CANCEL_ERROR, testConnection, testEmbeddingConnection, activeProvider, activeEmbeddingProvider, findUnsyncedVocabField, findVocabFieldWithoutEmbedding } from "../lib/ai";
@@ -51,43 +51,39 @@ export interface AppActions {
 
   // files
   onUploadClick(): void;
-  addAnotherFile(e: React.MouseEvent): void;
   onDragOver(e: React.DragEvent): void;
   onDragLeave(): void;
   onDrop(e: React.DragEvent): void;
+  /** Dismiss a rejected file's error card from the upload panel. */
   removeFile(id: string): void;
-  startParse(): void;
-  /** Pause scheduling of further rows. The in-flight AI call (if any) finishes;
-   *  no new rows start while paused. No-op unless a run is active. */
-  pauseParse(): void;
-  /** Resume scheduling from where a pause halted it. No-op unless paused. */
-  resumeParse(): void;
-  /** Stop the whole run: the in-flight row finishes, then every not-yet-started
-   *  row is marked `cancelled` and the loop exits. Terminal — re-running needs
-   *  Reset + Parse. Gives instant button feedback via parseStatus. */
-  cancelParse(): void;
   dismissParseError(): void;
-  /** Clear the whole upload + parse + results flow back to a fresh state:
-   *  uploaded files, parsed rows, AI suggestions, per-field selections and the
-   *  in-memory parsed cache (window.__acParsed) are all dropped. Prompts to
-   *  confirm first, mirroring removeField/deleteProv. */
-  resetUpload(): Promise<void>;
-  /** Re-run the AI cataloguing call for a single failed row. No re-extraction:
-   *  the row already carries its `record` + `imagePath`. Failures stay scoped
-   *  to the row (no global banner) except a missing active provider. */
-  retryRow(uid: string): Promise<void>;
+  /** Run the catalogue queue: drain every `queued` row in the results panel,
+   *  one AI call in flight. Fail-soft — a failing row marks only itself
+   *  `error` and the queue continues. Rows imported or requeued mid-run merge
+   *  in naturally (the drainer re-reads live state each iteration). */
+  startQueue(): Promise<void>;
+  /** Stop the queue: cancel every in-flight AI call at the transport level
+   *  and exit the drainer. Queued rows stay queued so Start can resume. */
+  stopQueue(): Promise<void>;
+  /** Requeue every errored/cancelled row at once. Never runs anything — the
+    * queue is started separately, so a failing row can't loop. */
+  retryFailed(): void;
+  /** Put a single row back into the queue (even a `done` one — a manual
+   *  re-run). Picked up by the next Start. */
+  requeueRow(uid: string): void;
   /** Stop an in-flight `processing` row by cancelling its AI call at the
    *  transport level (the Rust side drops the reqwest future, closing the
-   *  socket). The row's awaiting `catalogueArtefact` rejects with the cancel
-   *  sentinel, which the caller turns into a `cancelled` status; the rest of
-   *  the run continues. No-op for a row that isn't processing. */
+   *  socket). The row's awaiting runRow catch turns the cancel sentinel into
+   *  a `cancelled` status; the rest of the queue continues. No-op for a row
+   *  that isn't processing. */
   stopRow(uid: string): Promise<void>;
-  /** When nothing is pending (no processing/queued row, no running pass):
-   *  requeue every errored/cancelled row at once, then sequentially retryRow()
-   *  each — one AI call in flight, one attempt per row. When work is still
-   *  pending, first offer to stop it all (stop only — never auto-retry, so a
-   *  failing row can't loop); the retry is a separate, manual click. */
-  retryAllFailed(): Promise<void>;
+  /** Delete one record from the results panel: confirms first, cancels the
+   *  row's in-flight AI call if any, then removes the row and all of its
+   *  per-row state (selections, AI results, expansion). */
+  deleteRow(uid: string): Promise<void>;
+  /** Delete every record imported from one artefact file (the results group).
+   *  Confirms first, cancels in-flight rows, then removes them all. */
+  deleteFileRows(fileId: string): Promise<void>;
   onResizeStart(e: React.MouseEvent): void;
 
   // results
@@ -276,8 +272,7 @@ type Dispatch = (action: Action) => void;
  *  structural vocab ops use it so per-card save status reflects reality. */
 type Persist = DebouncedSaver;
 type ConfirmDelete = (opts: ConfirmDeleteOptions) => Promise<boolean>;
-type ParsedStore = Record<string, { rows: ArtefactRow[]; imageRowIndices: number[]; sheetRowToDataRow: number[]; discardedColumns: Record<string, string>; file: File }>;
-type AppWindow = Window & { __acFi?: HTMLInputElement; __acParsed?: ParsedStore };
+type AppWindow = Window & { __acFi?: HTMLInputElement };
 
 /**
  * Neutralize CSV formula injection (OWASP guidance). Spreadsheet apps treat a
@@ -312,11 +307,6 @@ function rowLabel(row: ArtefactRow, index?: number): string {
   return index != null ? `Row ${index + 1}` : "row";
 }
 
-/** The image role column name regex — kept here (and re-checked against export
- *  settings) so export doesn't have to import from spreadsheet.ts. Mirrors the
- *  parser's canonical image-column match (IMAGE_NAME_RE). */
-const IMAGE_COL_RE = /^images?$/;
-
 /** Breathing room around embedded images on the exported sheet. The px→chars
  *  width formula is font-approximate, so an exact-fit column lets landscape
  *  photos bleed into the next column; the row pad keeps photos off the
@@ -346,19 +336,13 @@ export function composeExportTable(
   const afHeaders = exportAf.map((f) => f.name);
   const fieldHeaders = settings.fields.map((f) => f.name);
   const headers = [...afHeaders, ...fieldHeaders];
-  const imageCol = exportAf.find((f) => IMAGE_COL_RE.test(f.name.trim().toLowerCase()));
+  const imageCol = exportAf.find((f) => isImageRoleName(f.name));
   const rows = results
     .filter((r) => r.status === "done")
     .map((r) => {
       const ai = aiResults[r.uid] || {};
       const record = r.record ?? {};
-      const afVals = exportAf.map((f) => {
-        // Case-insensitive lookup against the sheet's actual header casing,
-        // mirroring parseArtefactFile's reader — record keys come from the
-        // sheet's headers, af.name is the configured casing.
-        const k = Object.keys(record).find((kk) => kk.toLowerCase() === f.name.toLowerCase());
-        return k ? record[k] : "";
-      });
+      const afVals = exportAf.map((f) => recordValueFor(record, f.name));
       const fieldVals = settings.fields.map((f) => {
         const sel = fieldSelections[`${r.uid}_${f.id}`];
         return sel ? sel.value : ai[f.name]?.[0]?.value || "";
@@ -387,16 +371,10 @@ export function computeColumnWidths(headers: string[], rows: string[][]): number
 }
 
 export function useActions(state: AppState, dispatch: Dispatch, persist: Persist, confirmDelete: ConfirmDelete, getState: () => AppState): AppActions {
-  // Coarse control flags polled by the startParse loop. One shared ref is safe
-  // because only one loop can ever be alive: startParse early-returns unless
-  // parseStatus === "idle", and the loop drives parseStatus to a terminal state
-  // before exiting. A fresh ref is created at the start of each run (startParse
-  // resets both flags), so a previous run's cancel/pause can't bleed into the
-  // next one.
-  const parseControl = useRef({ paused: false, cancelled: false });
-  // Owns the retry-all pass: `running` is the re-entrancy lock, `cancelled`
-  // breaks the loop between rows (set by an accepted Stop-all click).
-  const retryControl = useRef({ running: false, cancelled: false });
+  // Owns the catalogue queue: `running` is the re-entrancy lock (only one
+  // drainer can ever be alive), `cancelled` breaks the drainer between rows
+  // (set by stopQueue). Mirrored to state.queueRunning for the UI.
+  const queueControl = useRef({ running: false, cancelled: false });
 
   // Helper: dispatch a settings patch then schedule persistence.
   const patch = useCallback(
@@ -569,317 +547,103 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     []
   );
 
-  // --- files ---
+  // --- files (import = validate + parse in one step) ---
+  // A valid file's records land in the results panel immediately (status
+  // "queued", grouped by the file they came from); an invalid one fails loudly
+  // with a per-file error card. There is no separate Parse click.
   const addFiles = useCallback(
     async (list: FileList | File[]) => {
-      const ok = Array.from(list).filter((f) => /\.xlsx$/i.test(f.name));
-      if (!ok.length) {
-        return;
+      const all = Array.from(list);
+      // Fail loudly on non-.xlsx files — silently skipping them left users
+      // guessing why nothing appeared.
+      for (const f of all.filter((cand) => !/\.xlsx$/i.test(cand.name))) {
+        dispatch({
+          type: "SET_FILES",
+          files: [{ id: gid(), name: f.name, size: f.size, sizeLabel: fmt(f.size), status: "invalid" as const, errors: [{ message: "Not an .xlsx file — only .xlsx artefact files can be imported." }] }],
+        });
+        pushLog({ status: "fail", label: "File rejected", detail: `${f.name}: only .xlsx artefact files can be imported` });
       }
 
-      const items = ok.map((f) => ({ id: gid(), file: f }));
-      const stored = items.map(({ file }) => ({
-        id: items.find((i) => i.file === file)!.id,
-        name: file.name,
-        size: file.size,
-        sizeLabel: fmt(file.size),
-        status: "validating" as const,
-        errors: [] as { message: string }[],
-      }));
-      dispatch({ type: "SET_FILES", files: stored });
-      pushLog({
-        status: "ok",
-        label: "Artefact file uploaded",
-        detail: stored.map((f) => f.name).join(", "),
-        verbose: { record: Object.fromEntries(stored.map((f) => [f.name, f.sizeLabel])) },
-      });
-
-      // Validate each file by actually parsing it; stash only the valid
-      // results for parse().
-      const appWindow = window as AppWindow;
-      const store = appWindow.__acParsed ?? {};
-      appWindow.__acParsed = store;
-
-      // Verdicts accumulate into the panel's shared "Validation errors" banner,
-      // so with several files queued each reason is prefixed with its file's
-      // name for attribution.
-      const multi = items.length > 1;
-      const panelErrors: { message: string }[] = [];
-      const missingColumns: string[] = [];
-      const columnProblems: string[] = [];
-      const readErrors: string[] = [];
-      const validEntries: ParsedStore[string][] = [];
-
-      for (const it of items) {
-        const tag = multi ? `${it.file.name}: ` : "";
+      for (const file of all.filter((f) => /\.xlsx$/i.test(f.name))) {
+        const id = gid();
+        dispatch({ type: "SET_FILES", files: [{ id, name: file.name, size: file.size, sizeLabel: fmt(file.size), status: "validating" as const, errors: [] }] });
         try {
-          const parsed = await parseArtefactFile(it.file, state.settings);
+          const parsed = await parseArtefactFile(file, state.settings);
           const errs = [
-            ...parsed.missingColumns.map((c) => ({ message: `${tag}Missing required column: ${c}` })),
-            ...parsed.columnProblems.map((m) => ({ message: `${tag}${m}` })),
+            ...parsed.missingColumns.map((c) => ({ message: `Missing required column: ${c}` })),
+            ...parsed.columnProblems.map((m) => ({ message: m })),
           ];
           if (errs.length) {
-            panelErrors.push(...errs);
-            missingColumns.push(...parsed.missingColumns);
-            columnProblems.push(...parsed.columnProblems);
-            dispatch({ type: "SET_FILE_STATUS", id: it.id, status: "invalid", errors: errs, validationErrors: [...panelErrors] });
-          } else {
-            store[it.id] = { rows: parsed.rows, imageRowIndices: parsed.imageRowIndices, sheetRowToDataRow: parsed.sheetRowToDataRow, discardedColumns: parsed.discardedColumns, file: it.file };
-            validEntries.push(store[it.id]);
-            dispatch({ type: "SET_FILE_STATUS", id: it.id, status: "valid", errors: [], validationErrors: [...panelErrors] });
+            dispatch({ type: "SET_FILE_STATUS", id, status: "invalid", errors: errs });
+            pushLog({
+              status: "fail",
+              label: "Import failed",
+              detail: `${file.name}: ${errs.length} column problem${errs.length === 1 ? "" : "s"}`,
+              verbose: { error: errs.map((e) => e.message).join("; ") },
+            });
+            continue;
+          }
+
+          // Valid — promote straight into the results panel as queued rows.
+          const rows = parsed.rows.map((r) => ({ ...r, status: "queued" as const, fileId: id, sourceName: file.name }));
+          dispatch({ type: "REMOVE_FILE", id });
+          dispatch({ type: "PARSE_FILES", rows });
+          const discarded = Object.keys(parsed.discardedColumns);
+          pushLog({
+            status: "ok",
+            label: `Imported ${rows.length} record${rows.length === 1 ? "" : "s"}`,
+            detail: `${file.name}${discarded.length ? ` · ${discarded.length} discarded field${discarded.length === 1 ? "" : "s"}` : ""}`,
+            verbose: { discardedColumns: parsed.discardedColumns },
+          });
+
+          // Extract embedded images to disk beside the binary, then attach
+          // paths. Best-effort: a row without an image continues imageless (the
+          // failure is logged so it's diagnosable rather than silent).
+          try {
+            const res = await extractImagesFromXlsx(file, parsed.imageRowIndices, parsed.sheetRowToDataRow, gid());
+            res.rowIndexToFileId.forEach((absPath, rowIdx) => {
+              const row = rows[rowIdx];
+              if (row) dispatch({ type: "SET_ROW_IMAGE", uid: row.uid, imagePath: absPath });
+            });
+          } catch (e) {
+            pushLog({
+              status: "fail",
+              jobId: "extract",
+              label: "Image extraction failed",
+              detail: `${file.name}: rows will catalogue without an embedded image.`,
+              verbose: { error: String((e as Error)?.message || e) },
+            });
           }
         } catch (e) {
-          const errs = [{ message: `${tag}Could not read file: ${(e as Error).message}` }];
-          panelErrors.push(...errs);
-          readErrors.push(errs[0].message);
-          dispatch({ type: "SET_FILE_STATUS", id: it.id, status: "invalid", errors: errs, validationErrors: [...panelErrors] });
+          const message = String((e as Error)?.message || e);
+          dispatch({ type: "SET_FILE_STATUS", id, status: "invalid", errors: [{ message: `Could not read file: ${message}` }] });
+          pushLog({ status: "fail", label: "Import failed", detail: file.name, verbose: { error: message } });
         }
       }
-
-      const anyValid = validEntries.length > 0;
-      const dataRows = validEntries.reduce((n, e) => n + e.rows.length, 0);
-      const discarded = validEntries.reduce<Record<string, string>>((acc, e) => {
-        for (const [k, v] of Object.entries(e.discardedColumns)) acc[k] = v;
-        return acc;
-      }, {});
-      const problems = [...readErrors, ...columnProblems];
-      pushLog({
-        status: anyValid ? "ok" : "fail",
-        label: "Fields validated, ready to parse",
-        detail: anyValid ? `${dataRows} data row${dataRows === 1 ? "" : "s"}${Object.keys(discarded).length ? ` · ${Object.keys(discarded).length} discarded field${Object.keys(discarded).length === 1 ? "" : "s"}` : ""}` : undefined,
-        verbose: {
-          ...(anyValid ? { discardedColumns: discarded } : {}),
-          ...(missingColumns.length ? { missingColumns } : {}),
-          ...(problems.length ? { error: problems.join("; ") } : {}),
-        },
-      });
     },
     [dispatch, state.settings]
   );
 
   const onUploadClick = useCallback(() => ensureInput(".xlsx", (fl) => void addFiles(fl)), [ensureInput, addFiles]);
 
-  const addAnotherFile = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    ensureInput(".xlsx", (fl) => void addFiles(fl));
-  }, [ensureInput, addFiles]);
-
   const setUploadDrag = useCallback((drag: boolean) => dispatch({ type: "SET_UPLOAD_DRAG", drag }), [dispatch]);
   const { onDragOver, onDragLeave, onDrop } = useDropZone(setUploadDrag, (fl) => void addFiles(fl));
 
   const removeFile = useCallback((id: string) => dispatch({ type: "REMOVE_FILE", id }), [dispatch]);
 
-  // --- parse ---
-  const startParse = useCallback(async () => {
-    if (!state.files.some((f) => f.status === "valid")) return;
-    // Defense-in-depth: UploadPanel already gates Parse on parseStatus === "idle",
-    // but startParse is on the public AppActions surface, so guard here too — a
-    // run is already active (or terminal; Reset re-enables Parse).
-    if (state.parseStatus !== "idle") return;
-
-    // Take the first valid file's parsed rows (one batch per parse).
-    const store = (window as AppWindow).__acParsed ?? {};
-    const firstValid = state.files.find((f) => f.status === "valid");
-    const entry = firstValid ? store[firstValid.id] : undefined;
-    if (!entry) return; // nothing to catalogue without a real spreadsheet
-
-    const rows = entry.rows.map((r) => ({ ...r, status: "queued" as const }));
-    const imageRowIndices = entry.imageRowIndices;
-    const sheetRowToDataRow = entry.sheetRowToDataRow;
-    const file = entry.file;
-
-    const preflightError = parsePreFlightError(state.settings);
-    if (preflightError) {
-      dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
-      return;
-    }
-    // parsePreFlightError guarantees an active provider from here on.
-    const prov = activeProvider(state.settings);
-    if (!prov) return;
-
-    // Fresh control flags for this run: a previous run's cancel/pause can't
-    // bleed in. Polled at the top of each loop iteration (see below).
-    parseControl.current = { paused: false, cancelled: false };
-
-    dispatch({ type: "START_PARSE", results: rows });
-
-    // Extract embedded images to disk beside the binary, then attach paths.
-    if (file) {
-      try {
-        const sessionId = gid();
-        const res = await extractImagesFromXlsx(file, imageRowIndices, sheetRowToDataRow, sessionId);
-        res.rowIndexToFileId.forEach((absPath, rowIdx) => {
-          const row = rows[rowIdx];
-          if (row) {
-            row.imagePath = absPath;
-            dispatch({ type: "SET_ROW_IMAGE", uid: row.uid, imagePath: absPath });
-          }
-        });
-      } catch (e) {
-        // Image extraction is best-effort; rows without an image continue. Log
-        // the failure so a missing image is diagnosable in the Logs Viewer
-        // rather than failing silently to the "no image" placeholder.
-        pushLog({
-          status: "fail",
-          jobId: "extract",
-          label: "Image extraction failed",
-          detail: "Rows will catalogue without an embedded image.",
-          verbose: { error: String((e as Error)?.message || e) },
-        });
-      }
-    }
-
-    // Fail-fast: on the first AI error, abort the whole batch and surface it.
-    // Remaining rows (current + queued) are marked errored; no demo data.
-    let cancelled = false;
-    for (let i = 0; i < rows.length; i++) {
-      // Pause/Cancel gate, checked at the top of each iteration — so the
-      // in-flight row always finishes before either takes effect (there is no
-      // transport-level abort on the Rust side). Pause holds here cheaply;
-      // cancel overrides pause and drops straight through to the cancel break.
-      while (parseControl.current.paused && !parseControl.current.cancelled) await delay(100);
-      if (parseControl.current.cancelled) {
-        // Mark every not-yet-started row as cancelled. By construction rows
-        // 0..i-1 are done/error and rows[i..] are all still queued here, so no
-        // status filter is needed. Cancel is terminal: re-running needs Reset.
-        const remaining = rows.slice(i);
-        for (const r of remaining) dispatch({ type: "SET_ROW_STATUS", uid: r.uid, status: "cancelled" });
-        if (remaining.length) {
-          pushLog({
-            status: "fail",
-            jobId: "cancel",
-            label: "Parse cancelled",
-            detail: `${remaining.length} row${remaining.length > 1 ? "s" : ""} skipped`,
-          });
-        }
-        cancelled = true;
-        break;
-      }
-
-      const row = rows[i];
-      // One group per row so the "now parsing" busy dot resolves to this row's
-      // terminal outcome (populated/failed).
-      const jobId = `row-${row.uid}`;
-      dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
-      const record = row.record ?? {};
-      pushLog({
-        status: "busy",
-        jobId,
-        label: `Now parsing row ID ${i + 1}`,
-        detail: rowLabel(row, i),
-        verbose: { record },
-      });
-      await delay(200); // brief tick so the UI shows processing
-
-      const rowStart = performance.now();
-      let ai: Record<string, { value: string; similarity?: number }[]>;
-      try {
-        ai = await catalogueArtefact(prov, state.settings.fields, record, row.imagePath, state.settings, `row-${row.uid}`);
-      } catch (e) {
-        const message = String((e as Error)?.message || e);
-        // A per-row Stop cancels only this row: mark it cancelled and carry on
-        // to the remaining queued rows. (Distinct from a whole-run cancel, which
-        // is fail-stop on the loop itself.) Any other error stays fail-fast.
-        if (message === CANCEL_ERROR) {
-          dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "cancelled" });
-          pushLog({ status: "ok", jobId, label: `Row ${i + 1} cancelled`, detail: rowLabel(row, i), elapsedMs: Math.round(performance.now() - rowStart) });
-          continue;
-        }
-        pushLog({ status: "fail", jobId, label: `Row ${i + 1} failed`, detail: message, elapsedMs: Math.round(performance.now() - rowStart), verbose: { error: message } });
-        // Mark this row and all not-yet-processed rows as errored.
-        for (let j = i; j < rows.length; j++) {
-          dispatch({ type: "SET_ROW_STATUS", uid: rows[j].uid, status: "error" });
-        }
-        dispatch({ type: "SET_PARSE_ERROR", error: message });
-        // The run terminated (via error); the parseError banner carries the why.
-        dispatch({ type: "SET_PARSE_STATUS", status: "completed" });
-        return;
-      }
-
-      dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "done", ai });
-      const rowElapsed = Math.round(performance.now() - rowStart);
-      pushLog({
-        status: "ok",
-        jobId,
-        label: "Populated into cataloguing fields",
-        detail: `${i + 1}/${rows.length} · ${Object.keys(ai).length} fields`,
-        elapsedMs: rowElapsed,
-        verbose: {
-          record: Object.fromEntries(
-            Object.entries(ai).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
-          ),
-        },
-      });
-      if (i < rows.length - 1) await delay(300 + Math.random() * 300);
-    }
-    // Normal end of the run. parseStatus is already "cancelled" when the user
-    // cancelled (cancelParse sets it for instant feedback) — don't clobber it.
-    if (!cancelled) dispatch({ type: "SET_PARSE_STATUS", status: "completed" });
-  }, [state.files, state.settings, state.parseStatus, dispatch]);
-
-  // Pause/Resume/Cancel flip the shared control ref that startParse polls at
-  // the top of each iteration, and update parseStatus so the button row
-  // reflects the new state immediately (independent of where the loop is in
-  // its current await). No-ops outside an active run are guarded on the caller
-  // side (UploadPanel only renders Pause/Resume/Cancel while active/paused).
-  const pauseParse = useCallback(() => {
-    parseControl.current.paused = true;
-    dispatch({ type: "SET_PARSE_STATUS", status: "paused" });
-  }, [dispatch]);
-  const resumeParse = useCallback(() => {
-    parseControl.current.paused = false;
-    dispatch({ type: "SET_PARSE_STATUS", status: "running" });
-  }, [dispatch]);
-  const cancelParse = useCallback(() => {
-    parseControl.current.cancelled = true;
-    dispatch({ type: "SET_PARSE_STATUS", status: "cancelled" });
-  }, [dispatch]);
-
-  const dismissParseError = useCallback(() => dispatch({ type: "SET_PARSE_ERROR", error: null }), [dispatch]);
-
-  // Clear the whole upload + parse + results flow. Confirms first (mirrors the
-  // settings delete flow), then drops the in-memory parsed cache so stale rows
-  // can't leak into a subsequent parse, and dispatches the reset.
-  const resetUpload = useCallback(async () => {
-    const ok = await confirmDelete({
-      title: "Reset upload?",
-      message: "This clears all uploaded files, parsed results and selections. This cannot be undone.",
-      confirmLabel: "Reset",
-    });
-    if (!ok) return;
-    delete (window as AppWindow).__acParsed;
-    dispatch({ type: "RESET_UPLOAD" });
-    pushLog({ status: "ok", label: "Upload reset", detail: "Cleared files, results and selections" });
-  }, [confirmDelete, dispatch]);
-
-  // Retry a single row's AI call. Reuses catalogueArtefact with the row's own
-  // record + imagePath (already on state.results, so no image re-extraction).
-  // Failures stay scoped to the row — no global banner — except pre-flight
-  // config errors (provider / vocab), which surface the same banner as Parse.
-  const retryRow = useCallback(async (uid: string) => {
-    const row = state.results.find((r) => r.uid === uid);
-    if (!row || row.status === "processing") return; // missing or already retrying
-
-    const preflightError = parsePreFlightError(state.settings);
-    if (preflightError) {
-      dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
-      return;
-    }
-    // parsePreFlightError guarantees an active provider from here on.
-    const prov = activeProvider(state.settings);
-    if (!prov) return;
-
-    // Clear the stale batch banner from the original Parse; a retry outcome is
-    // reflected on the row itself, not the global error.
-    dispatch({ type: "SET_PARSE_ERROR", error: null });
-
+  // --- catalogue queue ---
+  // Run one row's AI call and write its terminal status. Fail-soft: an error
+  // marks only this row and the drainer continues (the row's log entry carries
+  // the reason); a transport cancel (per-row Stop or queue Stop) marks it
+  // `cancelled`.
+  const runRow = useCallback(async (row: ArtefactRow, prov: Provider) => {
     const jobId = `row-${row.uid}`;
     dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "processing" });
     const record = row.record ?? {};
     pushLog({
       status: "busy",
       jobId,
-      label: "Retrying row",
+      label: "Now cataloguing",
       detail: rowLabel(row),
       verbose: { record },
     });
@@ -896,7 +660,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         elapsedMs: Math.round(performance.now() - start),
         verbose: {
           record: Object.fromEntries(
-            (Object.entries(ai) as [string, { value: string; similarity?: number }[]][]).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
+            Object.entries(ai).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
           ),
         },
       });
@@ -906,111 +670,152 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       // stay quiet in the logs (Stop has no error to surface).
       if (message === CANCEL_ERROR) {
         dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "cancelled" });
-        pushLog({ status: "ok", jobId, label: "Row cancelled", detail: rowLabel(row) });
+        pushLog({ status: "ok", jobId, label: "Row cancelled", detail: rowLabel(row), elapsedMs: Math.round(performance.now() - start) });
         return;
       }
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "error" });
-      pushLog({ status: "fail", jobId, label: "Retry failed", detail: message, elapsedMs: Math.round(performance.now() - start), verbose: { error: message } });
+      pushLog({ status: "fail", jobId, label: "Row failed", detail: message, elapsedMs: Math.round(performance.now() - start), verbose: { error: message } });
     }
-  }, [state.results, state.settings, dispatch]);
+  }, [state.settings, dispatch]);
 
-  // Stop a single in-flight row by cancelling its transport-level AI call. The
-  // awaiting retryRow/startParse catch then transitions the row to `cancelled`.
-  // No status change here: the row is `processing`, and flipping it preemptively
-  // would race the catch (which is the single owner of the terminal status).
-  const stopRow = useCallback(async (uid: string) => {
-    const row = state.results.find((r) => r.uid === uid);
-    if (!row || row.status !== "processing") return; // nothing to stop
-    await cancelCatalogue(`row-${uid}`);
-  }, [state.results]);
-
-  const retryAllFailed = useCallback(async () => {
-    // Retryable = every row that never reached `done`: AI failures plus rows
-    // the user stopped (per-row Stop or a previous Stop-all).
-    const retryable = state.results.filter((r) => r.status === "error" || r.status === "cancelled");
-    if (retryable.length === 0) return;
-
-    // Work still pending (in-flight calls or a running pass) is stopped first —
-    // stop only, never auto-retry, so a failing row can't loop.
-    const pending =
-      retryControl.current.running ||
-      state.results.some((r) => r.status === "processing" || r.status === "queued");
-    if (pending) {
-      const ok = await confirmDelete({
-        title: "Stop current work?",
-        message:
-          "Rows are still processing or queued for retry. Stop them all? Nothing is retried automatically — start the retry again when you're ready.",
-        confirmLabel: "Stop all",
-      });
-      if (!ok) return;
-
-      // Re-snapshot live: the dialog paused the user, not the app — rows kept
-      // moving while it was open.
-      const live = getState().results;
-      const processing = live.filter((r) => r.status === "processing");
-      const queued = live.filter((r) => r.status === "queued");
-      retryControl.current.cancelled = true; // break a running pass between rows
-      for (const r of processing) {
-        try {
-          await cancelCatalogue(`row-${r.uid}`);
-        } catch (e) {
-          // Cancelling an already-finished job can fail; the row's own status
-          // is the truth, so keep stopping the rest.
-          pushLog({ status: "fail", label: "Stop failed", detail: String((e as Error)?.message || e) });
-        }
-      }
-      // The awaiting owner (retryRow/startParse catch) is the single writer of
-      // a processing row's terminal status — wait for it, never preempt it.
-      let settled = false;
-      for (let i = 0; i < 100; i++) {
-        if (!getState().results.some((r) => r.status === "processing")) {
-          settled = true;
-          break;
-        }
-        await delay(100);
-      }
-      dispatch({ type: "CANCEL_ROWS", uids: queued.map((r) => r.uid) });
-      if (!settled) {
-        pushLog({ status: "fail", label: "Stop incomplete", detail: "A row is still processing — stop it from its row, then start the retry again." });
-        return;
-      }
-      const stopped = processing.length + queued.length;
-      pushLog({ status: "ok", label: "Stopped pending rows", detail: `${stopped} row${stopped === 1 ? "" : "s"} stopped — nothing requeued` });
-      return;
-    }
-
-    // Nothing pending: requeue every retryable row in one dispatch — the click
-    // visibly requeues all of them — then run them sequentially, one AI call in
-    // flight, matching batch pacing. The work list is snapshotted up front so a
-    // row that fails again mid-pass gets one attempt per click, not a loop.
-    if (retryControl.current.running) return; // same-tick double-click: already starting
-    // Pre-flight before the flip: queueing rows with no usable provider would
-    // strand them queued (each retryRow would bail at its own pre-flight).
+  // Drain every `queued` row, one AI call in flight. The next row is taken
+  // from live state each iteration, so rows imported or requeued mid-run
+  // merge into the drain naturally.
+  const startQueue = useCallback(async () => {
+    if (queueControl.current.running) return;
     const preflightError = parsePreFlightError(state.settings);
     if (preflightError) {
       dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
       return;
     }
-    const work = retryable.map((r) => r.uid);
-    dispatch({ type: "QUEUE_ROWS", uids: work });
-    pushLog({ status: "busy", label: "Retry failed rows", detail: `${work.length} row${work.length === 1 ? "" : "s"} requeued` });
-    retryControl.current = { running: true, cancelled: false };
+    // parsePreFlightError guarantees an active provider from here on.
+    const prov = activeProvider(state.settings);
+    if (!prov) return;
+    // A previous run's banner is stale once Start succeeds.
+    dispatch({ type: "SET_PARSE_ERROR", error: null });
+
+    queueControl.current = { running: true, cancelled: false };
+    dispatch({ type: "SET_QUEUE_RUNNING", running: true });
     try {
-      for (const uid of work) {
-        if (retryControl.current.cancelled) break;
-        await retryRow(uid);
+      for (;;) {
+        if (queueControl.current.cancelled) break;
+        const row = getState().results.find((r) => r.status === "queued");
+        if (!row) break;
+        await runRow(row, prov);
+        await delay(300 + Math.random() * 300);
       }
     } finally {
-      retryControl.current.running = false;
+      queueControl.current.running = false;
+      dispatch({ type: "SET_QUEUE_RUNNING", running: false });
     }
-  }, [state.results, state.settings, retryRow, dispatch, confirmDelete, getState]);
+  }, [state.settings, dispatch, getState, runRow]);
+
+  const stopQueue = useCallback(async () => {
+    if (!queueControl.current.running) return;
+    queueControl.current.cancelled = true;
+    // Transport-cancel every in-flight row; the awaiting runRow catch is the
+    // single writer of the resulting `cancelled` status.
+    for (const r of getState().results.filter((r) => r.status === "processing")) {
+      try {
+        await cancelCatalogue(`row-${r.uid}`);
+      } catch (e) {
+        // Cancelling an already-finished job can fail; the row's own status is
+        // the truth, so keep stopping the rest.
+        pushLog({ status: "fail", label: "Stop failed", detail: String((e as Error)?.message || e) });
+      }
+    }
+    // Wait briefly for settlement so the header doesn't flip back to Start
+    // while a row is still finishing.
+    for (let i = 0; i < 100; i++) {
+      if (!getState().results.some((r) => r.status === "processing")) break;
+      await delay(100);
+    }
+    pushLog({ status: "ok", label: "Queue stopped", detail: "Queued rows remain queued — press Start to resume" });
+  }, [getState]);
+
+  // Pure requeue: Retry never runs anything itself, so a failing row can't
+  // loop — the user starts the queue again when ready.
+  const retryFailed = useCallback(() => {
+    const uids = getState().results.filter((r) => r.status === "error" || r.status === "cancelled").map((r) => r.uid);
+    if (uids.length === 0) return;
+    dispatch({ type: "REQUEUE_ROWS", uids });
+    pushLog({ status: "busy", label: "Retry failed rows", detail: `${uids.length} row${uids.length === 1 ? "" : "s"} requeued` });
+  }, [dispatch, getState]);
+
+  const requeueRow = useCallback((uid: string) => {
+    dispatch({ type: "REQUEUE_ROWS", uids: [uid] });
+  }, [dispatch]);
+
+  const dismissParseError = useCallback(() => dispatch({ type: "SET_PARSE_ERROR", error: null }), [dispatch]);
+
+  // Delete one record: confirm, cancel any in-flight AI call, then remove the
+  // row plus all of its per-row state (REMOVE_ROWS prunes the uid-keyed maps).
+  const deleteRow = useCallback(async (uid: string) => {
+    const row = getState().results.find((r) => r.uid === uid);
+    if (!row) return;
+    const ok = await confirmDelete({
+      title: "Delete record?",
+      message: "This removes the record and its AI results from the list. This cannot be undone.",
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
+    // Re-check live: the dialog paused the user, not the app.
+    if (getState().results.find((r) => r.uid === uid)?.status === "processing") {
+      try {
+        await cancelCatalogue(`row-${uid}`);
+      } catch {
+        // The removal below is authoritative; a failed cancel on an
+        // already-settled job doesn't block the delete.
+      }
+    }
+    dispatch({ type: "REMOVE_ROWS", uids: [uid] });
+    pushLog({ status: "ok", label: "Record deleted", detail: rowLabel(row) });
+  }, [confirmDelete, dispatch, getState]);
+
+  // Stop a single in-flight row by cancelling its transport-level AI call. The
+  // awaiting runRow catch then transitions the row to `cancelled`.
+  // No status change here: the row is `processing`, and flipping it preemptively
+  // would race the catch (which is the single owner of the terminal status).
+  const stopRow = useCallback(async (uid: string) => {
+    const row = getState().results.find((r) => r.uid === uid);
+    if (!row || row.status !== "processing") return; // nothing to stop
+    await cancelCatalogue(`row-${uid}`);
+  }, [getState]);
+
+  // Delete every record imported from one artefact file (a results group):
+  // confirm, cancel any in-flight calls, then remove them all.
+  const deleteFileRows = useCallback(async (fileId: string) => {
+    const rows = getState().results.filter((r) => r.fileId === fileId);
+    if (rows.length === 0) return;
+    const name = rows[0].sourceName;
+    const ok = await confirmDelete({
+      title: "Delete all records from this file?",
+      message: `This removes all ${rows.length} record${rows.length === 1 ? "" : "s"} imported from "${name}", including their AI results. This cannot be undone.`,
+      confirmLabel: "Delete all",
+    });
+    if (!ok) return;
+    // Re-snapshot live: rows kept moving while the dialog was open.
+    const live = getState().results.filter((r) => r.fileId === fileId);
+    if (live.length === 0) return;
+    for (const r of live) {
+      if (r.status === "processing") {
+        try {
+          await cancelCatalogue(`row-${r.uid}`);
+        } catch {
+          // The removal below is authoritative.
+        }
+      }
+    }
+    dispatch({ type: "REMOVE_ROWS", uids: live.map((r) => r.uid) });
+    pushLog({ status: "ok", label: "Records deleted", detail: `${live.length} record${live.length === 1 ? "" : "s"} from ${name}` });
+  }, [confirmDelete, dispatch, getState]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
-    const startH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--split-h")) || 250;
+    const startH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--split-h")) || 180;
     const mv = (ev: MouseEvent) =>
-      document.documentElement.style.setProperty("--split-h", Math.max(120, Math.min(520, startH + (ev.clientY - startY))) + "px");
+      document.documentElement.style.setProperty("--split-h", Math.max(120, Math.min(420, startH + (ev.clientY - startY))) + "px");
     const up = () => {
       document.removeEventListener("mousemove", mv);
       document.removeEventListener("mouseup", up);
@@ -1050,6 +855,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const ws = wb.addWorksheet("Catalogue");
     ws.columns = headers.map((h) => ({ header: h, key: h }));
     ws.getRow(1).font = { bold: true };
+    // Light indigo shade over the catalogue-field header cells so the leading
+    // artefact-file columns read as a distinct block in the exported sheet.
+    // Concrete ARGB (indigo-50) — a workbook artifact, like the status-dot hex.
+    const afCount = headers.length - settings.fields.length;
+    for (let c = afCount + 1; c <= headers.length; c++) {
+      ws.getRow(1).getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEF2FF" } };
+    }
     rows.forEach((vals) => {
       // Prefix formula-injection triggers (= + - @ \t \r) with a single quote
       // so spreadsheet apps render these as text — same guard the old CSV
@@ -2318,7 +2130,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   return {
     setAllExpanded,
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
-    onUploadClick, addAnotherFile, onDragOver, onDragLeave, onDrop, removeFile, startParse, pauseParse, resumeParse, cancelParse, dismissParseError, resetUpload, retryRow, stopRow, retryAllFailed, onResizeStart,
+    onUploadClick, onDragOver, onDragLeave, onDrop, removeFile, dismissParseError, startQueue, stopQueue, retryFailed, requeueRow, stopRow, deleteRow, deleteFileRows, onResizeStart,
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,

@@ -83,9 +83,9 @@ describe("composeExportTable", () => {
     return s;
   }
   const rows: ArtefactRow[] = [
-    { uid: "u1", status: "done", record: { Material: "bronze", Place: "ignored-in-record" } },
-    { uid: "u2", status: "done", record: { material: "Ceramic" } }, // different casing key
-    { uid: "u3", status: "queued", record: { Material: "gold" } }, // not done — excluded
+    { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { Material: "bronze", Place: "ignored-in-record" } },
+    { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { material: "Ceramic" } }, // different casing key
+    { uid: "u3", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: { Material: "gold" } }, // not done — excluded
   ];
   const aiResults: AiResults = {
     u1: { Place: [{ value: "Java" }] },
@@ -113,6 +113,19 @@ describe("composeExportTable", () => {
     expect(table.rows[1]).toEqual(["Ceramic", "", "Bali"]);
   });
 
+  it("matches record keys with collapsed whitespace (wrapped multiline headers)", () => {
+    const s = buildSettings();
+    s.artefactFields = [...(s.artefactFields || []), { id: "af-n", name: "Curator's Note", description: "", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" }];
+    const wrapped: ArtefactRow[] = [
+      { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: { "Curator's\nNote": "ivory inlay" } },
+    ];
+    const table = composeExportTable(s, wrapped, {}, {})!;
+    // Record key is the sheet's wrapped header; the configured name is
+    // single-line. normalizeHeader matching (the parser's) resolves it.
+    // headers = [Material, Image, Curator's Note, Place].
+    expect(table.rows[0]).toEqual(["", "", "ivory inlay", ""]);
+  });
+
   it("excludes only the AF columns toggled off (opt-out)", () => {
     const table = composeExportTable(buildSettings({ materialExport: false }), rows, aiResults, fieldSelections)!;
     expect(table.headers).toEqual(["Image", "Place"]);
@@ -130,7 +143,7 @@ describe("composeExportTable", () => {
   });
 
   it("falls back to empty string when a record value or AI suggestion is missing", () => {
-    const sparseRows: ArtefactRow[] = [{ uid: "ux", status: "done", record: {} }];
+    const sparseRows: ArtefactRow[] = [{ uid: "ux", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} }];
     const table = composeExportTable(buildSettings(), sparseRows, {}, {})!;
     expect(table.rows[0]).toEqual(["", "", ""]);
   });

@@ -39,9 +39,9 @@
   /* Split-pane dimension: the upload panel's fixed height, resized by the
      drag handle in MainScreen. Kept as a token so the runtime zoom and the
      layout height resolve from one value. Default sized to fit the panel's
-     idle content (label + 144px drop zone + Parse/Reset bar) without an inner
-     scrollbar, so the results panel beneath doesn't start taller than needed. */
-  --split-h: 270px;
+     idle content (label + compact 96px drop zone) without an inner scrollbar,
+     so the results panel beneath doesn't start taller than needed. */
+  --split-h: 180px;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);

@@ -12,11 +12,11 @@
 // value is only a hint; drawing anchors remain the source of truth.
 
 import ExcelJS from "exceljs";
-import type { ArtefactField, ArtefactRow, Settings } from "../app/types";
+import type { ArtefactField, ParsedArtefactRow, Settings } from "../app/types";
 import { gid } from "../app/defaults";
 
 export interface ParsedArtefactFile {
-  rows: ArtefactRow[];
+  rows: ParsedArtefactRow[];
   /** Row indices (0-based data rows) that carry an Image cell value hint. */
   imageRowIndices: number[];
   /** Names of configured columns that matched no header. Fields with a
@@ -37,11 +37,19 @@ export interface ParsedArtefactFile {
 }
 
 /** Canonical name of the image role column, matched against configured field
- *  names (case-insensitive). This is the *only* role the parser still resolves
- *  — id/title/category used to be resolved here too, but with those structured
- *  fields dropped from `ArtefactRow`, the search filter and export both read
- *  `record` directly. */
+ *  names (case-insensitive) by isImageRoleName. This is the *only* role the
+ *  parser still resolves — id/title/category used to be resolved here too, but
+ *  with those structured fields dropped from `ArtefactRow`, the search filter
+ *  and export both read `record` directly. */
 const IMAGE_NAME_RE = /^images?$/;
+
+/** Whether a configured column name is the image role ("Image"/"Images",
+ *  case-insensitive). The image column is claimed at parse time: its bytes are
+ *  extracted and attached to the row, and its cell text never enters the
+ *  record — so display and export treat it as an image, not a value column. */
+export function isImageRoleName(name: string): boolean {
+  return IMAGE_NAME_RE.test(name.trim().toLowerCase());
+}
 
 /** Collapse an ExcelJS cell value to its display string. ExcelJS returns
  *  primitives for plain cells but a `{ text, richText, result, hyperlink }`
@@ -71,6 +79,25 @@ export function columnLetterToIndex(letter: string): number | null {
   return n;
 }
 
+/** Normalize a column header/name for matching: case-insensitive, whitespace
+ *  runs collapsed to single spaces, trimmed. Museum exports wrap header text
+ *  across lines inside the cell ("Curator's\nObj. Type"), so everything that
+ *  matches a configured column against a record key must compare normalized
+ *  forms — the parser does, and so do display/search/export. */
+export function normalizeHeader(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** A parsed row's value for a configured column. Record keys are the sheet's
+ *  own header text (or the configured name for letter-bound columns), so the
+ *  lookup mirrors parseArtefactFile's matching (see normalizeHeader). Missing
+ *  → "" — records are sparse by design: the parser omits empty cells. */
+export function recordValueFor(record: Record<string, string>, name: string): string {
+  const target = normalizeHeader(name);
+  const k = Object.keys(record).find((kk) => normalizeHeader(kk) === target);
+  return k ? record[k] : "";
+}
+
 /** Parse a .xlsx artefact workbook into artefact rows. Each configured column
  *  is identified by its Header Text matching the header row, or — when its
  *  useColumnLetter toggle is on — positionally by its Column Letter. */
@@ -94,7 +121,7 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
   // Header comparisons collapse whitespace runs (spaces, newlines, NBSP):
   // source headers wrap inside the cell ("Curator's\nObj. Type") while
   // configured names may be entered single-line.
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const norm = normalizeHeader;
 
   // A repeated header would silently corrupt the keyed record (the later
   // column overwrites the earlier one), so it is rejected in both modes.
@@ -119,7 +146,7 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
   // 1-based by column; index 0 unused. 0 imageColIndex = no image column.
   const colKeys: (string | null)[] = [];
   let imageColIndex = 0;
-  const imageField = afFields.find((f) => IMAGE_NAME_RE.test(f.name.trim().toLowerCase()));
+  const imageField = afFields.find((f) => isImageRoleName(f.name));
 
   // Column Letter bindings first — they claim their columns positionally.
   const bound = new Map<number, string>();
@@ -203,7 +230,7 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
     json.push(obj);
   }
 
-  const rows: ArtefactRow[] = [];
+  const rows: ParsedArtefactRow[] = [];
   const imageRowIndices: number[] = [];
 
   json.forEach((obj) => {

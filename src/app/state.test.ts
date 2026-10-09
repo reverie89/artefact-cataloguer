@@ -36,93 +36,56 @@ describe("reducer", () => {
     expect(next).not.toBe(initialState);
   });
 
-  it("clears parse-specific state when files change", () => {
+  it("appends imported file chips without touching results", () => {
     const populated = {
       ...initialState,
-      parseStatus: "completed" as const,
-      results: [{ uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } }],
-      aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
-      expandedRows: { u1: true },
+      results: [{ uid: "u1", fileId: "f0", sourceName: "old.xlsx", status: "done" as const, record: { "Object Name": "Cup" } }],
     };
 
-    const next = reducer(populated, { type: "SET_FILES", files: [] });
+    const next = reducer(populated, {
+      type: "SET_FILES",
+      files: [{ id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "validating" as const, errors: [] }],
+    });
 
-    expect(next.parseStatus).toBe("idle");
-    expect(next.results).toEqual([]);
-    expect(next.aiResults).toEqual({});
-    expect(next.expandedRows).toEqual({});
+    expect(next.files.map((f) => f.id)).toEqual(["f1"]);
+    expect(next.results).toBe(populated.results);
   });
 
-  it("stores a file's validation verdict with per-file errors and the shared banner errors", () => {
+  it("stores a file's validation verdict with per-file errors", () => {
     const populated = {
       ...initialState,
-      files: [
-        { id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "validating" as const, errors: [] },
-        { id: "f2", name: "b.xlsx", size: 20, sizeLabel: "20 B", status: "validating" as const, errors: [] },
-      ],
+      files: [{ id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "validating" as const, errors: [] }],
     };
 
-    // addFiles accumulates the banner list across files and re-passes it on
-    // every verdict, so a later valid file must not wipe earlier reasons.
-    const errs = [{ message: "a.xlsx: Missing required column: Obj. Number" }];
-    let next = reducer(populated, { type: "SET_FILE_STATUS", id: "f1", status: "invalid", errors: errs, validationErrors: errs });
+    const errs = [{ message: "Missing required column: Obj. Number" }];
+    const next = reducer(populated, { type: "SET_FILE_STATUS", id: "f1", status: "invalid", errors: errs });
     expect(next.files[0]).toMatchObject({ status: "invalid", errors: errs });
-    expect(next.files[1]).toMatchObject({ status: "validating" });
-    expect(next.validationErrors).toEqual(errs);
-
-    next = reducer(next, { type: "SET_FILE_STATUS", id: "f2", status: "valid", errors: [], validationErrors: errs });
-    expect(next.files[1]).toMatchObject({ status: "valid", errors: [] });
-    expect(next.validationErrors).toEqual(errs);
   });
 
-  it("clears the whole upload + parse lifecycle on RESET_UPLOAD", () => {
-    const populated: typeof initialState = {
+  it("appends imported rows via PARSE_FILES, keeping earlier rows and selections", () => {
+    const populated = {
       ...initialState,
-      files: [{ id: "f1", name: "a.xlsx", size: 10, sizeLabel: "10 B", status: "valid", errors: [] }],
-      parseStatus: "completed",
-      results: [{ uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } }],
-      aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] } },
-      expandedRows: { u1: true },
-      fieldSelections: { u1_material: { source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 } },
-      fieldDropdownOpen: { u1_material: true },
-      fieldDropdownSearch: { u1_material: "cl" },
-      resultsFilter: "done",
-      resultsSearch: "cup",
-      validationErrors: [{ message: "Missing column: Obj. Number" }],
-      parseError: "AI provider missing",
+      results: [{ uid: "u1", fileId: "f0", sourceName: "old.xlsx", status: "done" as const, record: {} }],
+      fieldSelections: { u1_m1: { source: "ai" as const, value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 } },
     };
 
-    const next = reducer(populated, { type: "RESET_UPLOAD" });
+    const next = reducer(populated, {
+      type: "PARSE_FILES",
+      rows: [
+        { uid: "u2", fileId: "f1", sourceName: "new.xlsx", status: "queued" as const, record: { "Object Name": "Bowl" } },
+        { uid: "u3", fileId: "f1", sourceName: "new.xlsx", status: "queued" as const, record: {} },
+      ],
+    });
 
-    expect(next.files).toEqual([]);
-    expect(next.uploadDragOver).toBe(false);
-    expect(next.parseStatus).toBe("idle");
-    expect(next.results).toEqual([]);
-    expect(next.aiResults).toEqual({});
-    expect(next.expandedRows).toEqual({});
-    expect(next.fieldSelections).toEqual({});
-    expect(next.fieldDropdownOpen).toEqual({});
-    expect(next.fieldDropdownSearch).toEqual({});
-    expect(next.resultsFilter).toBe("all");
-    expect(next.resultsSearch).toBe("");
-    expect(next.validationErrors).toEqual([]);
-    expect(next.parseError).toBeNull();
-    // Settings and unrelated UI state are left untouched.
-    expect(next.settings).toBe(populated.settings);
+    expect(next.results.map((r) => r.uid)).toEqual(["u1", "u2", "u3"]);
+    expect(next.fieldSelections.u1_m1).toBeDefined();
   });
 
-  it("transitions the run lifecycle via SET_PARSE_STATUS", () => {
-    // idle → running → paused → running → completed mirrors a normal run plus a
-    // pause/resume. parseStatus is the only field touched; everything else
-    // (results, parseError, settings) is left as-is.
-    let next = reducer(initialState, { type: "SET_PARSE_STATUS", status: "running" });
-    expect(next.parseStatus).toBe("running");
-    next = reducer(next, { type: "SET_PARSE_STATUS", status: "paused" });
-    expect(next.parseStatus).toBe("paused");
-    next = reducer(next, { type: "SET_PARSE_STATUS", status: "cancelled" });
-    expect(next.parseStatus).toBe("cancelled");
-    next = reducer(next, { type: "SET_PARSE_STATUS", status: "completed" });
-    expect(next.parseStatus).toBe("completed");
+  it("mirrors the queue drainer's liveness via SET_QUEUE_RUNNING", () => {
+    let next = reducer(initialState, { type: "SET_QUEUE_RUNNING", running: true });
+    expect(next.queueRunning).toBe(true);
+    next = reducer(next, { type: "SET_QUEUE_RUNNING", running: false });
+    expect(next.queueRunning).toBe(false);
   });
 
   it("appends a catalogue field to the draft via PATCH_FIELD_DRAFT", () => {
@@ -227,10 +190,9 @@ describe("reducer", () => {
     // every row show the last image. They differ only by their uid.
     const populated: typeof initialState = {
       ...initialState,
-      parseStatus: "completed",
       results: [
-        { uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } },
-        { uid: "u2", status: "done" as const, record: { "Object Name": "Bowl" } },
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: { "Object Name": "Cup" } },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: { "Object Name": "Bowl" } },
       ],
     };
 
@@ -242,35 +204,74 @@ describe("reducer", () => {
   });
 });
 
-describe("reducer retry queueing", () => {
+describe("reducer requeueing", () => {
   const base: typeof initialState = {
     ...initialState,
     results: [
-      { uid: "u1", status: "done" as const, record: { "Object Name": "Cup" } },
-      { uid: "u2", status: "error" as const, record: {} },
-      { uid: "u3", status: "cancelled" as const, record: {} },
-      { uid: "u4", status: "queued" as const, record: {} },
-      { uid: "u5", status: "processing" as const, record: {} },
+      { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: {} },
+      { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "error" as const, record: {} },
+      { uid: "u3", fileId: "f1", sourceName: "a.xlsx", status: "cancelled" as const, record: {} },
+      { uid: "u4", fileId: "f1", sourceName: "a.xlsx", status: "queued" as const, record: {} },
+      { uid: "u5", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} },
     ],
   };
   const statuses = (s: typeof base) => s.results.map((r) => r.status);
 
-  it("QUEUE_ROWS flips the listed error/cancelled rows to queued in one pass", () => {
-    // Done rows never requeue; already-queued rows stay queued; an in-flight
-    // row is untouched (its owner owns that status).
-    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u1", "u2", "u3", "u4"] });
-    expect(statuses(next)).toEqual(["done", "queued", "queued", "queued", "processing"]);
+  it("REQUEUE_ROWS flips terminal rows to queued in one pass", () => {
+    // Done rows only ever arrive here from an explicit single-row requeue
+    // (re-run); Retry-failed never collects them. Already-queued rows stay
+    // queued; an in-flight row is untouched (its owner owns that status).
+    const next = reducer(base, { type: "REQUEUE_ROWS", uids: ["u1", "u2", "u3", "u4", "nope"] });
+    expect(statuses(next)).toEqual(["queued", "queued", "queued", "queued", "processing"]);
+  });
+});
+
+describe("reducer row removal", () => {
+  it("REMOVE_ROWS drops the rows and every per-row map entry (bare uid and ${uid}_ keys)", () => {
+    const populated: typeof initialState = {
+      ...initialState,
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: {} },
+        { uid: "u2", fileId: "f2", sourceName: "b.xlsx", status: "queued" as const, record: {} },
+      ],
+      aiResults: { u1: { material: [{ value: "clay", similarity: 0.8 }] }, u2: { material: [{ value: "stone" }] } },
+      expandedRows: { u1: true, u2: true },
+      fieldSelections: {
+        u1_m1: { source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 },
+        u2_m1: { source: "ai", value: "stone", values: ["stone"], listName: "AI", similarity: 0.7 },
+      },
+      fieldDropdownOpen: { u1_m1: true, u2_m1: true },
+      fieldDropdownSearch: { u1_m1: "cl", u2_m1: "st" },
+    };
+
+    const next = reducer(populated, { type: "REMOVE_ROWS", uids: ["u1"] });
+
+    expect(next.results.map((r) => r.uid)).toEqual(["u2"]);
+    expect(next.aiResults.u1).toBeUndefined();
+    expect(next.aiResults.u2).toBeDefined();
+    expect(next.expandedRows.u1).toBeUndefined();
+    expect(next.fieldSelections.u1_m1).toBeUndefined();
+    expect(next.fieldSelections.u2_m1).toBeDefined();
+    expect(next.fieldDropdownOpen.u1_m1).toBeUndefined();
+    expect(next.fieldDropdownSearch.u1_m1).toBeUndefined();
   });
 
-  it("QUEUE_ROWS ignores uids that are missing or in a non-retryable status", () => {
-    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u5", "nope"] });
-    expect(statuses(next)).toEqual(["done", "error", "cancelled", "queued", "processing"]);
+  it("REMOVE_ROWS no-ops (same state) when no uid matches", () => {
+    const populated: typeof initialState = {
+      ...initialState,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: {} }],
+    };
+    const next = reducer(populated, { type: "REMOVE_ROWS", uids: ["nope"] });
+    expect(next).toBe(populated);
   });
 
-  it("CANCEL_ROWS flips only the listed queued rows to cancelled", () => {
-    // Error rows are not stopped by this action — only queued (pending) work.
-    const next = reducer(base, { type: "CANCEL_ROWS", uids: ["u4", "u2"] });
-    expect(statuses(next)).toEqual(["done", "error", "cancelled", "cancelled", "processing"]);
+  it("SET_ROW_STATUS ignores a row that was deleted mid-run", () => {
+    const populated: typeof initialState = {
+      ...initialState,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, { type: "SET_ROW_STATUS", uid: "gone", status: "done", ai: { material: [{ value: "clay" }] } });
+    expect(next).toBe(populated);
   });
 });
 

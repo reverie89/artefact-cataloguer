@@ -82,7 +82,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
             The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
           <div className="text-muted-foreground text-[13px] leading-relaxed">
-            Every column configured here must resolve to a spreadsheet column when the file is parsed — by its Header Text matching the header row, or by the Column Letter set on it — even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. The AI receives every configured column when it examines each artefact, unless you turn a column&apos;s Include for AI toggle off.
+            Every column configured here must resolve to a spreadsheet column when the file is parsed — by its Header Text matching the header row, or by the Column Letter set on it — even if some cells are empty. Only columns configured here appear in the source record panel and the export — unconfigured spreadsheet columns are ignored entirely. The AI receives every configured column when it examines each artefact, unless you turn a column&apos;s Include for AI toggle off.
           </div>
         </div>
       </Card>
@@ -282,7 +282,7 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
               omitted. */}
           <Field
             label="Include for AI"
-            desc="Send this column's values to the AI when it examines each artefact. Turn off to keep the column for export only — its values still appear in the source record panel but never reach the model."
+            desc="Send this column's values to the AI when it examines each artefact. Turn off to keep the column out of the AI's view — its values still appear in the source record panel, and in the export when Include in Export is on."
           >
             <Segmented
               value={af.includeForAI ? "true" : "false"}

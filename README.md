@@ -19,7 +19,8 @@
 - **Configurable retrieval** — set the candidate "net" count (default 20) and the final "shortlist" count (default 3) per vocab field, and toggle validation (the vision-validation backstop) on or off, all in the Vocabulary Lists tab.
 - **Embedded-image extraction** — `.xlsx` drawing anchors are mapped to media files and snapped to the nearest data row; images are served via the Tauri asset protocol.
 - **Image lightbox** — full-screen viewer with zoom-in/out/reset and a live percentage readout (local `useImageZoom` hook).
-- **Run lifecycle** — Pause / Resume / Cancel a batch; per-row Stop (transport-level cancel of the in-flight call — only that row stops, the run continues) and per-row Retry / Retry-all-failed; first error fail-fasts the batch.
+- **Import & grouped records** — browse or drop one or more `.xlsx` files and each is validated + parsed on the spot: valid records join the results panel immediately (grouped by source file, deletable per row or whole-file); invalid files fail loudly with a per-file reason card.
+- **Queue controls** — imported records wait as **queued**; **Start** drains them one AI call at a time (rows imported or requeued mid-run merge in), **Stop** transport-cancels in-flight rows (queued rows stay queued — Start resumes), **Retry** requeues every failed row (never runs anything itself), and per-row **Stop** / **Retry** are available on the rows.
 - **Review-friendly results** — expandable rows with status dots, searchable field dropdowns, filter + a column-scoped search over results (pick which artefact-file and catalogue columns the search matches), drag-to-reorder vocab/field lists.
 - **Multiple AI providers** — configure several providers, mark one active, and run a **Test Connection** per provider (fetches the model list).
 - **Settings import/export** — round-trip the settings blob as a zod-validated JSON file.
@@ -49,23 +50,23 @@ npm run tauri:dev     # full app (Rust backend + renderer + window); HMR
 
 ## How to Use
 
-### Step 1: Upload an artefact spreadsheet
+### Step 1: Import an artefact spreadsheet
 
-Drag-and-drop one or more `.xlsx` files (or use the file picker). Each file is validated against the configured required columns, with per-file status
-(`validating` / `valid` / `invalid`) and problems surfaced inline. Each configured column is identified by its Header Text matching the header row
-(case- and whitespace-insensitive) — or, when the column's Identify By toggle is set to Column Letter in Settings → Artefact File, read positionally
-from that Excel column regardless of the header text. A header name repeated across two columns is rejected. Embedded images are extracted automatically.
+Drag-and-drop one or more `.xlsx` files (or use the file picker). Each file is validated and parsed on import — there is no separate Parse or Reset
+button. A valid file's records join the results panel immediately as **queued** rows, grouped under the file's name, with embedded images extracted
+automatically; an invalid file fails loudly with a dismissible per-file card listing the problems. Each configured column is identified by its Header
+Text matching the header row (case- and whitespace-insensitive) — or, when the column's Identify By toggle is set to Column Letter in Settings →
+Artefact File, read positionally from that Excel column regardless of the header text. A header name repeated across two columns is rejected.
 
 ### Step 2: Configure an AI provider
 
-An active provider is required before cataloguing — without one, parsing the spreadsheet is blocked with a clear prompt to add one. See **Configuring an AI provider** below.
+An active provider is required before cataloguing — without one, starting the queue is blocked with a clear prompt to add one. See **Configuring an AI provider** below.
 
 ### Step 3: Run and review
 
-Click **Start** to run the active provider over every row. Results stream in live: each row shows per-field suggestions (controlled-vocab fields ranked by cosine similarity; open-ended fields with the model's free-text answer). For each field, accept an AI pick, choose from its controlled-vocabulary dropdown, or type a value manually. A vocab field with no matching candidate stays empty — the model can only pick from the source's terms. Use the image lightbox to inspect the artefact.
+Click **Start** to drain the queued rows through the active provider. Results stream in live: each row shows per-field suggestions (controlled-vocab fields ranked by cosine similarity; open-ended fields with the model's free-text answer). For each field, accept an AI pick, choose from its controlled-vocabulary dropdown, or type a value manually. A vocab field with no matching candidate stays empty — the model can only pick from the source's terms. Use the image lightbox to inspect the artefact. Records are grouped by the file they were imported from — delete a single record with its row's delete button, or all of a file's records with the group's delete button (both confirm first).
 
-During a run, **Pause** / **Resume** / **Cancel** controls are available. A **processing** row offers **Stop** (cancels just that row's in-flight call — the
-rest of the run continues); a **done**/**errored**/**cancelled** row offers **Retry**, and all failed rows can be retried at once via **Retry all failed**.
+While the queue runs, **Stop** cancels the in-flight rows (queued rows stay queued — **Start** resumes). A **processing** row offers **Stop** (cancels just that row's in-flight call — the rest of the queue continues); an **errored**/**cancelled** row offers **Retry**, and all failed rows can be requeued at once via **Retry** in the header. A failing row marks only itself as errored — the queue continues.
 
 ### Step 4: Export
 

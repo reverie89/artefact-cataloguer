@@ -5,7 +5,7 @@
 import { _DEF, _DEF_AF } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
 import type { VocabTermEntry } from "../lib/vocab";
-import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, ParseStatus, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
+import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
 
 /** One editable provider row in the unified providers draft. Mirrors a
  *  persisted Provider, plus the model list discovered by a successful Test
@@ -101,14 +101,13 @@ export interface AppState {
   settingsTab: SettingsTab;
   loaded: boolean;
 
-  // Files / parse
+  // Files / import + results
+  /** Transient import surface only: files currently being parsed ("validating")
+   *  and rejected files ("invalid", until dismissed). Valid files never linger —
+   *  their records move straight into `results` (grouped by fileId there). */
   files: UploadFile[];
   uploadDragOver: boolean;
-  /** Lifecycle of the current parse run (idle → running ⇄ paused → completed/
-   *  cancelled). Source of truth for whether the loop is alive; replaces the
-   *  former boolean `parseStarted`, which couldn't distinguish active from
-   *  finished. */
-  parseStatus: ParseStatus;
+  /** The parsed records — also the catalogue queue (rows carry a `status`). */
   results: ArtefactRow[];
   expandedRows: Record<string, boolean>;
   fieldSelections: Record<string, FieldSelection>;
@@ -124,14 +123,16 @@ export interface AppState {
   /** Which catalogue-field ids the results search matches against — mirrors
    *  `searchColsAf` for the FieldsTab columns. */
   searchColsCat: string[];
-  validationErrors: { message: string }[];
   aiResults: AiResults;
-  /** Fatal catalogue error that aborted the run, if any. */
+  /** Fatal catalogue-config error that blocked starting the queue, if any. */
   parseError: string | null;
   /** Transient warning surfaced when export can't proceed (e.g. no artefact
-   *  columns selected for export). Rendered beside `parseError` in the upload
+   *  columns selected for export). Rendered beside `parseError` in the results
    *  panel; dismissed by the user or cleared on a successful export. */
   exportWarning: string | null;
+  /** Whether the catalogue queue drainer (startQueue) is alive. Drives the
+   *  header Stop button; queued rows survive a stop so Start can resume. */
+  queueRunning: boolean;
 
   // Settings
   settings: Settings;
@@ -234,7 +235,7 @@ export interface UploadFile {
   name: string;
   size: number;
   sizeLabel: string;
-  status: "validating" | "valid" | "invalid";
+  status: "validating" | "invalid";
   errors: { message: string }[];
 }
 
@@ -246,7 +247,6 @@ export const initialState: AppState = {
 
   files: [],
   uploadDragOver: false,
-  parseStatus: "idle",
   results: [],
   expandedRows: {},
   fieldSelections: {},
@@ -258,10 +258,10 @@ export const initialState: AppState = {
   // ids via reconcileSearchCols (every column searchable by default).
   searchColsAf: [],
   searchColsCat: [],
-  validationErrors: [],
   aiResults: {},
   parseError: null,
   exportWarning: null,
+  queueRunning: false,
 
   settings: _DEF(),
   settingsFieldExpanded: {},
@@ -310,16 +310,15 @@ export type Action =
   | { type: "SET_ZOOM"; zoom: number }
   | { type: "SET_LOGS_OPEN"; open: boolean }
   | { type: "SET_FILES"; files: UploadFile[] }
-  | { type: "SET_FILE_STATUS"; id: string; status: UploadFile["status"]; errors: { message: string }[]; validationErrors: { message: string }[] }
+  | { type: "SET_FILE_STATUS"; id: string; status: UploadFile["status"]; errors: { message: string }[] }
   | { type: "REMOVE_FILE"; id: string }
-  | { type: "RESET_UPLOAD" }
   | { type: "SET_UPLOAD_DRAG"; drag: boolean }
-  | { type: "START_PARSE"; results: ArtefactRow[] }
+  | { type: "PARSE_FILES"; rows: ArtefactRow[] }
   | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, { value: string; similarity?: number }[]> }
-  | { type: "QUEUE_ROWS"; uids: string[] }
-  | { type: "CANCEL_ROWS"; uids: string[] }
+  | { type: "REMOVE_ROWS"; uids: string[] }
+  | { type: "REQUEUE_ROWS"; uids: string[] }
+  | { type: "SET_QUEUE_RUNNING"; running: boolean }
   | { type: "SET_ROW_IMAGE"; uid: string; imagePath: string }
-  | { type: "SET_PARSE_STATUS"; status: ParseStatus }
   | { type: "SET_PARSE_ERROR"; error: string | null }
   | { type: "TOGGLE_ROW"; uid: string }
   | { type: "SET_FILTER"; filter: string }
@@ -400,6 +399,22 @@ function reconcileSearchCols(state: AppState): AppState {
   return { ...state, searchColsAf, searchColsCat };
 }
 
+/** Drop every entry belonging to the given rows from a per-row map. Keys are
+ *  either the bare uid (expandedRows, aiResults) or `${uid}_<fieldId>`
+ *  (fieldSelections, fieldDropdownOpen/Search). */
+function pruneRowEntries<T>(rec: Record<string, T>, uids: Set<string>): Record<string, T> {
+  const owned = (k: string) => {
+    if (uids.has(k)) return true;
+    for (const uid of uids) if (k.startsWith(`${uid}_`)) return true;
+    return false;
+  };
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (!owned(k)) out[k] = v;
+  }
+  return out;
+}
+
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "INIT":
@@ -419,61 +434,35 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, logsOpen: action.open };
 
     case "SET_FILES":
-      return {
-        ...state,
-        files: action.files,
-        parseStatus: "idle",
-        results: [],
-        aiResults: {},
-        expandedRows: {},
-        fieldSelections: {},
-        fieldDropdownOpen: {},
-        fieldDropdownSearch: {},
-      };
+      // Additive: imported/rejected file chips join whatever is already listed
+      // (a dropped batch must not clobber a batch still parsing, and nothing
+      // here may wipe results — rows are only ever removed explicitly).
+      return { ...state, files: [...state.files, ...action.files] };
     case "SET_FILE_STATUS": {
       const files = state.files.map((f) =>
         f.id === action.id ? { ...f, status: action.status, errors: action.errors } : f
       );
-      return { ...state, files, validationErrors: action.validationErrors };
+      return { ...state, files };
     }
+    // Drops the file's chip/error card only. Rows are never removed here —
+    // their lifecycle is owned by REMOVE_ROWS (per-row delete / delete-all-
+    // of-file from the results panel), so an import that removed its own chip
+    // can't cascade its freshly added rows away.
     case "REMOVE_FILE":
       return { ...state, files: state.files.filter((f) => f.id !== action.id) };
-    case "RESET_UPLOAD":
-      // Clear the whole upload + parse + results lifecycle back to a fresh
-      // state (the in-memory parsed cache at window.__acParsed is dropped by
-      // the action). Settings/screen/zoom/drafts/logs are left untouched.
-      return {
-        ...state,
-        files: [],
-        uploadDragOver: false,
-        parseStatus: "idle",
-        results: [],
-        expandedRows: {},
-        fieldSelections: {},
-        fieldDropdownOpen: {},
-        fieldDropdownSearch: {},
-        resultsFilter: "all",
-        resultsSearch: "",
-        validationErrors: [],
-        aiResults: {},
-        parseError: null,
-      };
     case "SET_UPLOAD_DRAG":
       return { ...state, uploadDragOver: action.drag };
 
-    case "START_PARSE":
-      return {
-        ...state,
-        parseStatus: "running",
-        results: action.results,
-        aiResults: {},
-        expandedRows: {},
-        fieldSelections: {},
-        fieldDropdownOpen: {},
-        fieldDropdownSearch: {},
-        parseError: null,
-      };
+    // Imported rows join the results panel as-is (already stamped queued with
+    // fileId/sourceName). Append-only: earlier imports' rows, selections and
+    // AI results are never touched. A stale queue pre-flight banner doesn't
+    // survive an import — Start re-surfaces it if the config problem persists.
+    case "PARSE_FILES":
+      return { ...state, results: [...state.results, ...action.rows], parseError: null };
     case "SET_ROW_STATUS": {
+      // A row deleted mid-run (per-row delete / delete-all-of-file) must not be
+      // resurrected in the per-row maps by its in-flight AI call's write.
+      if (!state.results.some((r) => r.uid === action.uid)) return state;
       const results = state.results.map((r) =>
         r.uid === action.uid ? { ...r, status: action.status } : r
       );
@@ -496,38 +485,45 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       return { ...state, results, aiResults, fieldSelections };
     }
-    // Retry queueing: flip the listed rows to `queued` in one dispatch so a
-    // "Retry failed" click visibly requeues everything at once. Only rows that
-    // actually need a run (error/cancelled) move; done rows never requeue.
-    case "QUEUE_ROWS": {
+    // Per-row delete / delete-all-of-file: drop the rows and every per-row map
+    // entry (expandedRows/aiResults keyed by uid; fieldSelections/fieldDropdown*
+    // keyed `${uid}_<fieldId>`).
+    case "REMOVE_ROWS": {
+      const uids = new Set(action.uids);
+      const results = state.results.filter((r) => !uids.has(r.uid));
+      if (results.length === state.results.length) return state;
+      return {
+        ...state,
+        results,
+        aiResults: pruneRowEntries(state.aiResults, uids),
+        expandedRows: pruneRowEntries(state.expandedRows, uids),
+        fieldSelections: pruneRowEntries(state.fieldSelections, uids),
+        fieldDropdownOpen: pruneRowEntries(state.fieldDropdownOpen, uids),
+        fieldDropdownSearch: pruneRowEntries(state.fieldDropdownSearch, uids),
+      };
+    }
+    // Requeueing: flip the listed rows to `queued` in one dispatch so a Retry
+    // click visibly requeues everything at once. Terminal rows move (done rows
+    // only ever arrive here from an explicit single-row requeue); a queued or
+    // in-flight row is untouched (its owner owns that status).
+    case "REQUEUE_ROWS": {
       const uids = new Set(action.uids);
       return {
         ...state,
         results: state.results.map((r) =>
-          uids.has(r.uid) && (r.status === "error" || r.status === "cancelled") ? { ...r, status: "queued" } : r
+          uids.has(r.uid) && (r.status === "error" || r.status === "cancelled" || r.status === "done")
+            ? { ...r, status: "queued" }
+            : r
         ),
       };
     }
-    // Stopping the pending work: queued rows aren't in flight, so they can be
-    // flipped straight to `cancelled`. Processing rows keep their owner (the
-    // awaiting retryRow/startParse catch) as the single writer of that status.
-    case "CANCEL_ROWS": {
-      const uids = new Set(action.uids);
-      return {
-        ...state,
-        results: state.results.map((r) =>
-          uids.has(r.uid) && r.status === "queued" ? { ...r, status: "cancelled" } : r
-        ),
-      };
-    }
+    case "SET_QUEUE_RUNNING":
+      return { ...state, queueRunning: action.running };
     case "SET_ROW_IMAGE":
       return {
         ...state,
         results: state.results.map((r) => (r.uid === action.uid ? { ...r, imagePath: action.imagePath } : r)),
       };
-
-    case "SET_PARSE_STATUS":
-      return { ...state, parseStatus: action.status };
 
     case "SET_PARSE_ERROR":
       return { ...state, parseError: action.error };
