@@ -1,7 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { useSortable } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { AlertTriangle, GripVertical, Plus, X } from "lucide-react";
+import { AlertTriangle, Plus, X } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
@@ -24,12 +22,17 @@ import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
 import { SortableList } from "./SortableList";
+import { SortableRow } from "./SortableRow";
 import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
   actions: AppActions;
 }
+
+/** Grid template shared by the header row and each field row (via SortableRow)
+ *  so columns align exactly: grip / Name / Type. */
+const GRID = "grid-cols-[24px_1fr_130px] gap-2.5 px-3.5";
 
 export function CataloguingFieldsTab({ state, actions }: Props) {
   const { settings, settingsFieldExpanded } = state;
@@ -59,7 +62,7 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
       />
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className="bg-muted/30 grid grid-cols-[24px_1fr_130px] gap-2.5 border-b px-3.5 py-1.75">
+        <div className={cn("bg-muted/30 grid border-b py-1.75", GRID)}>
           <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Type</span>
@@ -94,8 +97,8 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
   );
 }
 
-/** A single reorderable catalogue-field row. The GripVertical handle is the
- *  drag anchor; clicking anywhere else on the row toggles the editor. */
+/** A single reorderable catalogue-field row (shared SortableRow shell).
+ *  Clicking anywhere on the row toggles the editor; the grip is drag-only. */
 interface SortableFieldRowProps {
   field: CatalogueField;
   lists: VocabSource[];
@@ -110,33 +113,25 @@ interface SortableFieldRowProps {
 }
 
 function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRef, actions }: SortableFieldRowProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: f.id });
   return (
-    <div
-      ref={(node) => { setNodeRef(node); cardRef?.(node); }}
-      className="border-border/60 border-b"
-      style={{
-        transform: CSS.Transform.toString(transform) || undefined,
-        transition,
-        opacity: isDragging ? 0.4 : 1,
-      }}
-    >
-      <div onClick={() => actions.toggleSF(f.id)} className="grid cursor-pointer grid-cols-[24px_1fr_130px] items-center gap-2.5 px-3.5 py-2.25">
-        <div
-          className={cn("text-muted-foreground flex items-center", isDragging ? "cursor-grabbing" : "cursor-grab")}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="size-3.5" />
-        </div>
-        <div className="flex min-w-0 items-center gap-2">
+    <SortableRow
+      id={f.id}
+      expanded={expanded}
+      onToggle={() => actions.toggleSF(f.id)}
+      grid={GRID}
+      cardRef={cardRef}
+      label={
+        <>
           <span className="truncate text-[15px] font-semibold">{f.name || "Untitled field"}</span>
           <UnsavedBadge dirty={dirty} />
-        </div>
+        </>
+      }
+      cells={
         <Badge variant={f.type === "vocab" ? "default" : "secondary"} className="w-fit tracking-[0.04em]">
-          {f.type === "vocab" ? "Controlled Vocab" : "Open-ended"}
+          {f.type === "vocab" ? "Controlled vocab" : "Open-ended"}
         </Badge>
-      </div>
+      }
+    >
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <FieldEditor
@@ -160,7 +155,7 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
           />
         </div>
       )}
-    </div>
+    </SortableRow>
   );
 }
 

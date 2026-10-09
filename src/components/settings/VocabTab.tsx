@@ -1,7 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { useSortable } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { AlertTriangle, BookOpen, CheckCircle2, Download, GripVertical, Loader2, Plus, Upload, X, XCircle } from "lucide-react";
+import { AlertTriangle, BookOpen, CheckCircle2, Download, Loader2, Plus, Upload, X, XCircle } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { displayName } from "../../app/styles";
@@ -19,11 +17,16 @@ import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
 import { SortableList } from "./SortableList";
+import { SortableRow } from "./SortableRow";
 
 interface Props {
   state: AppState;
   actions: AppActions;
 }
+
+/** Grid template shared by the header row and each source row (via SortableRow)
+ *  so columns align exactly: grip / Name / Status / delete. */
+const GRID = "grid-cols-[24px_1fr_170px_36px] gap-2.5 px-3.5";
 
 export function VocabTab({ state, actions }: Props) {
   const { settings } = state;
@@ -124,7 +127,7 @@ export function VocabTab({ state, actions }: Props) {
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className="bg-muted/30 grid grid-cols-[24px_1fr_170px_36px] gap-2.5 border-b px-3.5 py-1.75">
+        <div className={cn("bg-muted/30 grid border-b py-1.75", GRID)}>
           <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Status</span>
@@ -183,7 +186,6 @@ interface SortableVocabRowProps {
 }
 
 function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProgress, liveFields, hasEmbeddingProvider, activeModel, actions }: SortableVocabRowProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: vs.id });
   const usedBy = liveFields.filter((f) => (f.vocabSources || []).includes(vs.id)).map((f) => f.name).join(", ") || null;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncing = !!syncProgress;
@@ -193,28 +195,13 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
   const { onDragOver, onDragLeave, onDrop } = useDropZone(setIsDropTarget, addFiles);
 
   return (
-    <div
-      ref={setNodeRef}
-      className="border-border/60 border-b"
-      style={{
-        transform: CSS.Transform.toString(transform) || undefined,
-        transition,
-        opacity: isDragging ? 0.4 : 1,
-      }}
-    >
-      <div
-        onClick={() => actions.toggleVocab(vs.id)}
-        className="grid cursor-pointer grid-cols-[24px_1fr_170px_36px] items-center gap-2.5 px-3.5 py-2.25"
-      >
-        <div
-          className={cn("text-muted-foreground flex items-center", isDragging ? "cursor-grabbing" : "cursor-grab")}
-          onClick={(e) => e.stopPropagation()}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="size-3.5" />
-        </div>
-        <div className="flex min-w-0 items-center gap-1.75">
+    <SortableRow
+      id={vs.id}
+      expanded={expanded}
+      onToggle={() => actions.toggleVocab(vs.id)}
+      grid={GRID}
+      label={
+        <>
           <BookOpen className="size-3.5 shrink-0" />
           <div className="min-w-0">
             <div className="truncate text-[15px] font-medium">{displayName(vs)}</div>
@@ -223,19 +210,23 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
             </div>
           </div>
           <UnsavedBadge dirty={dirty} />
-        </div>
-        <EmbeddingStatusBadge source={vs} progress={syncProgress} activeModel={activeModel} />
-        <Button
-          onClick={(e) => { e.stopPropagation(); void actions.removeVocabSource(vs.id); }}
-          variant="ghost"
-          size="icon"
-          className="text-muted-foreground hover:text-destructive size-6"
-          title="Delete"
-        >
-          <span className="text-[13px] leading-none">×</span>
-        </Button>
-      </div>
-
+        </>
+      }
+      cells={
+        <>
+          <EmbeddingStatusBadge source={vs} progress={syncProgress} activeModel={activeModel} />
+          <Button
+            onClick={(e) => { e.stopPropagation(); void actions.removeVocabSource(vs.id); }}
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:text-destructive size-6"
+            title="Delete"
+          >
+            <span className="text-[13px] leading-none">×</span>
+          </Button>
+        </>
+      }
+    >
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-3 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <FieldInput
@@ -452,7 +443,7 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
           />
         </div>
       )}
-    </div>
+    </SortableRow>
   );
 }
 

@@ -18,9 +18,8 @@ interface Props {
 }
 
 /** Vertical drag-to-reorder list shared by the settings card-list tabs
- *  (Fields, Artefact File, Vocab). Owns the DndContext/sensors wiring and the
- *  drop→reorder guard; rows themselves call `useSortable` and apply the drag
- *  transform inline (the sanctioned runtime-computed exception). The 5px
+ *  (Fields, Artefact File, Vocab, Providers). Owns the DndContext/sensors wiring and the
+ *  drop→reorder guard; rows themselves use the shared SortableRow shell. The 5px
  *  PointerSensor activation distance keeps a normal row click a click, not a
  *  drag. */
 export function SortableList({ items, onReorder, children }: Props) {

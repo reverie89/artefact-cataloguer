@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { ChevronDown, ChevronRight, AlertTriangle, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
+import { AlertTriangle, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { embeddingProviderDraftFromSettings, type AppState, type EmbeddingProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
@@ -9,6 +9,8 @@ import { CardActions } from "./CardActions";
 import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
 import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
 import { UnsavedBadge } from "./UnsavedBadge";
+import { SortableList } from "./SortableList";
+import { SortableRow } from "./SortableRow";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -45,6 +47,11 @@ function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: Embeddi
   );
 }
 
+/** Grid template shared by the header row and each provider row (via
+ *  SortableRow) so columns align exactly: grip / Provider / Model / Status /
+ *  Active. */
+const GRID = "grid-cols-[24px_1fr_1fr_120px_104px] gap-2.5 px-3.5";
+
 /** Embedding-model provider list, rendered as a second card-list within the
  *  same "modelProviders" tab, below the vision VisionProvidersSection.
  *  Structurally a near-copy of VisionProvidersSection.tsx — same
@@ -61,8 +68,6 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
     live.providers[live.providers.length - 1]?.id
   );
 
-  const GRID = "grid grid-cols-[1fr_1fr_120px_104px] gap-2.5 px-3.5";
-
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
@@ -74,7 +79,8 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className={cn("bg-muted/30 border-b py-1.75", GRID)}>
+        <div className={cn("grid bg-muted/30 border-b py-1.75", GRID)}>
+          <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em] flex items-center gap-1.5">
             Embedding Provider
           </span>
@@ -83,32 +89,36 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Active</span>
         </div>
 
-        {live.providers.map((entry) => {
-          const isActive = entry.id === live.activeProvider;
-          const saved = settings.embeddingProviders.find((p) => p.id === entry.id);
-          const cardDirty = !!state.embProviderDraft && (
-            !saved || entryDiffers(entry, saved)
-          );
-          const transient = state.embProvStatus[entry.id]?.test ?? null;
-          const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
-          return (
-            <EmbeddingProviderRow
-              key={entry.id}
-              entry={entry}
-              grid={GRID}
-              testStatus={testStatus}
-              testError={state.embProvStatus[entry.id]?.error}
-              showEmbProvKey={showEmbProvKey}
-              isActive={isActive}
-              dirty={cardDirty}
-              cardStatus={state.embProvCardSaveStatus[entry.id] ?? null}
-              cardError={state.embProvCardError[entry.id]}
-              expanded={!!state.embProviderExpanded[entry.id]}
-              cardRef={(node) => { cardRefs.current[entry.id] = node; }}
-              actions={actions}
-            />
-          );
-        })}
+        <SortableList
+          items={live.providers.map((e) => e.id)}
+          onReorder={(ids) => void actions.reorderEmbProv(ids)}
+        >
+          {live.providers.map((entry) => {
+            const isActive = entry.id === live.activeProvider;
+            const saved = settings.embeddingProviders.find((p) => p.id === entry.id);
+            const cardDirty = !!state.embProviderDraft && (
+              !saved || entryDiffers(entry, saved)
+            );
+            const transient = state.embProvStatus[entry.id]?.test ?? null;
+            const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
+            return (
+              <EmbeddingProviderRow
+                key={entry.id}
+                entry={entry}
+                testStatus={testStatus}
+                testError={state.embProvStatus[entry.id]?.error}
+                showEmbProvKey={showEmbProvKey}
+                isActive={isActive}
+                dirty={cardDirty}
+                cardStatus={state.embProvCardSaveStatus[entry.id] ?? null}
+                cardError={state.embProvCardError[entry.id]}
+                expanded={!!state.embProviderExpanded[entry.id]}
+                cardRef={(node) => { cardRefs.current[entry.id] = node; }}
+                actions={actions}
+              />
+            );
+          })}
+        </SortableList>
 
         {live.providers.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">
@@ -124,9 +134,10 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
   );
 }
 
+/** A single reorderable embedding-provider row (shared SortableRow shell).
+ *  Clicking anywhere on the row toggles the editor; the grip is drag-only. */
 interface RowProps {
   entry: EmbeddingProviderDraft["providers"][number];
-  grid: string;
   testStatus: TestStatus;
   testError?: string;
   showEmbProvKey: boolean;
@@ -139,7 +150,7 @@ interface RowProps {
   actions: AppActions;
 }
 
-function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
+function EmbeddingProviderRow({ entry, testStatus, testError, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
   // Strict image-capable filter (empty stays empty — see embeddingModelOptions),
   // then keep a drifted saved model visible so the warning below can explain it.
   const usable = embeddingModelOptions(entry.modelOptions, entry.imageInputModels);
@@ -161,37 +172,43 @@ function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvK
   const nameDisplay = entry.name || "Untitled provider";
 
   return (
-    <div ref={cardRef} className="border-border/60 border-b">
-      <div onClick={() => actions.toggleEmbProv(id)} className={cn("grid cursor-pointer items-center py-2.25", grid)}>
-        <div className="flex min-w-0 items-center gap-2">
-          {expanded ? <ChevronDown className="text-muted-foreground size-3" /> : <ChevronRight className="text-muted-foreground size-3" />}
-          {expanded ? (
-            <Input
-              value={entry.name}
-              onChange={(e) => actions.setEmbProvF(id, "name", e)}
-              onClick={(e) => e.stopPropagation()}
-              placeholder="Provider name"
-              aria-label="Provider name"
-              className="h-7 min-w-0"
-            />
-          ) : (
-            <>
-              <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
-              <UnsavedBadge dirty={dirty} />
-            </>
-          )}
-        </div>
-        <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
-        <StatusBadge status={testStatus} error={testError} />
-        <div onClick={(e) => e.stopPropagation()}>
-          {isActive ? (
-            <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
-          ) : (
-            <Button onClick={() => void actions.setActiveEmbProv(id)} variant="outline" size="sm">Set Active</Button>
-          )}
-        </div>
-      </div>
-
+    <SortableRow
+      id={entry.id}
+      expanded={expanded}
+      onToggle={() => actions.toggleEmbProv(id)}
+      grid={GRID}
+      cardRef={cardRef}
+      label={
+        expanded ? (
+          <Input
+            value={entry.name}
+            onChange={(e) => actions.setEmbProvF(id, "name", e)}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="Provider name"
+            aria-label="Provider name"
+            className="h-7 min-w-0"
+          />
+        ) : (
+          <>
+            <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
+            <UnsavedBadge dirty={dirty} />
+          </>
+        )
+      }
+      cells={
+        <>
+          <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
+          <StatusBadge status={testStatus} error={testError} />
+          <div onClick={(e) => e.stopPropagation()}>
+            {isActive ? (
+              <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
+            ) : (
+              <Button onClick={() => void actions.setActiveEmbProv(id)} variant="outline" size="sm">Set Active</Button>
+            )}
+          </div>
+        </>
+      }
+    >
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
@@ -266,6 +283,6 @@ function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvK
           />
         </div>
       )}
-    </div>
+    </SortableRow>
   );
 }

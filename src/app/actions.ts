@@ -201,9 +201,9 @@ export interface AppActions {
   /** Whether validation runs. */
   setValidationEnabled(on: boolean): void;
 
-  // settings: providers — edits accumulate in a unified draft and persist only
-  // on the tab-level Save (see saveProviders). Test Connection is the one
-  // exception: it runs immediately as transient verification.
+  // settings: providers — content edits accumulate per card and persist on the
+  // card's own Save; structural changes (delete, set-active, reorder) persist
+  // immediately. Test Connection runs immediately as transient verification.
   startAddProv(): void;
   setProvF(id: string, k: keyof Provider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>): void;
   setProvModel(id: string, model: string): void;
@@ -212,12 +212,11 @@ export interface AppActions {
   setProvThinking(id: string, effort: ThinkingEffort | null): void;
   toggleProvKey(): void;
   testConn(id: string): Promise<void>;
-  saveProviders(): Promise<void>;
-  discardProviders(): void;
   deleteProv(id: string): Promise<void>;
   setActiveProv(id: string): Promise<void>;
-  /** Persist only this provider card's content edits to disk (independent of
-   *  any pending structural changes buffered for the tab-level Apply). */
+  /** Reorder providers to the given id sequence (result of a drag). Persists immediately. */
+  reorderProv(ids: string[]): Promise<void>;
+  /** Persist only this provider card's content edits to disk. */
   saveProvCard(id: string): Promise<void>;
   /** Revert only this provider card's content edits back to its persisted value. */
   discardProvCard(id: string): void;
@@ -234,6 +233,8 @@ export interface AppActions {
   testEmbConn(id: string): Promise<void>;
   deleteEmbProv(id: string): Promise<void>;
   setActiveEmbProv(id: string): Promise<void>;
+  /** Reorder embedding providers to the given id sequence (result of a drag). Persists immediately. */
+  reorderEmbProv(ids: string[]): Promise<void>;
   saveEmbProvCard(id: string): Promise<void>;
   discardEmbProvCard(id: string): void;
 
@@ -495,8 +496,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       case "fields": dispatch({ type: "CLEAR_FIELD_DRAFT" }); break;
       case "vocab": dispatch({ type: "CLEAR_VOCAB_DRAFT" }); break;
       case "modelProviders":
-        dispatch({ type: "CLEAR_PROVIDER_DRAFT" }); dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
-        dispatch({ type: "CLEAR_EMB_PROVIDER_DRAFT" }); dispatch({ type: "SET_EMB_PROV_SAVE_STATUS", status: null });
+        dispatch({ type: "CLEAR_PROVIDER_DRAFT" });
+        dispatch({ type: "CLEAR_EMB_PROVIDER_DRAFT" });
         break;
       case "artefactFile": dispatch({ type: "CLEAR_ARTEFACT_DRAFT" }); break;
       case "about": break;
@@ -1653,12 +1654,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [patch]);
 
   // --- settings: providers ---
-  // The whole providers config is one deferred draft: field edits, add, delete,
-  // and active-selection changes all accumulate in `providerDraft` and persist
-  // only on the tab-level Save. Test Connection is the lone exception — it runs
-  // immediately as transient verification (stored in `provStatus`).
+  // Per-card content edits accumulate in `providerDraft` and persist on the
+  // card's own Save; structural changes (delete, set-active, reorder) persist
+  // immediately. Test Connection runs as transient verification (stored in
+  // `provStatus`), not part of the draft.
   const startAddProv = useCallback(() => {
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
     // Generate the id once so the new card can be auto-expanded (and scrolled
     // into view by ProvidersTab) the moment it's added.
     const id = gid();
@@ -1674,7 +1674,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // so any prior successful connection test is no longer valid.
   // Editing name/model is downstream and must NOT clear the test/model list.
   const setProvF = useCallback((id: string, k: keyof Provider, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     const value = e.target.value;
@@ -1690,7 +1689,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [patchProvDraft, mapDraftEntry, dispatch, state.settings.providers]);
 
   const setProvApiFormat = useCallback((id: string, format: ApiFormat) => {
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, apiFormat: format, connStatus: "untested" })));
@@ -1702,7 +1700,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // status or model list. Takes a string value directly (the shadcn Select
   // exposes onValueChange(value) rather than a change event).
   const setProvModel = useCallback((id: string, model: string) => {
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, model })));
@@ -1712,7 +1709,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // model edits — it must NOT clear the test status or model list. `null` = off
   // (the Segmented control's "Off" pill; no thinking fields are sent).
   const setProvThinking = useCallback((id: string, effort: ThinkingEffort | null) => {
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, thinking: effort })));
@@ -1752,63 +1748,18 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.providerDraft, state.settings, patchProvDraft, mapDraftEntry, dispatch]);
 
-  /** Validates draft entries before Save. Only the truly required fields are
-   *  gated: a provider must have a name, base URL, and API key. A model is NOT
-   *  required to save — it can be populated later via Test Connection, and the
-   *  catalogue run independently verifies a usable provider exists. Blocking
-   *  save on a missing model prevented persisting otherwise-valid edits. */
-  const validateProviders = useCallback((draft: ProviderDraft): string | null => {
-    for (const e of draft.providers) {
-      if (!e.name.trim()) return "Every provider needs a name.";
-      if (!e.baseUrl.trim()) return `Provider "${e.name}" needs a base URL.`;
-      if (!e.apiKey.trim()) return `Provider "${e.name}" needs an API key.`;
-    }
-    return null;
-  }, []);
-
-  const saveProviders = useCallback(async () => {
-    const draft = state.providerDraft;
-    if (!draft) return;
-    const validationError = validateProviders(draft);
-    if (validationError) {
-      dispatch({ type: "SET_PROV_SAVE_STATUS", status: "err" });
-      return;
-    }
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: "saving" });
-    try {
-      // The draft supplies the providers slice; the base is reducer-current so
-      // any write that landed since the draft opened (vocab files, syncs,
-      // other tabs' saves) survives the tab-level Save.
-      await patchNow((s) => ({
-        ...s,
-        providers: draft.providers.map((e) => ({ id: e.id, name: e.name, baseUrl: e.baseUrl, apiKey: e.apiKey, model: e.model, apiFormat: e.apiFormat, modelOptions: e.modelOptions, connStatus: e.connStatus, thinking: e.thinking ?? undefined })),
-        activeProvider: draft.activeProvider,
-      }));
-      dispatch({ type: "CLEAR_PROVIDER_DRAFT" });
-      dispatch({ type: "SET_PROV_SAVE_STATUS", status: "ok" });
-    } catch {
-      dispatch({ type: "SET_PROV_SAVE_STATUS", status: "err" });
-    }
-  }, [state.providerDraft, patchNow, validateProviders, dispatch]);
-
-  const discardProviders = useCallback(() => {
-    dispatch({ type: "CLEAR_PROVIDER_DRAFT" });
-    dispatch({ type: "SET_PROV_SAVE_STATUS", status: null });
-  }, [dispatch]);
-
   // --- per-card save/discard (providers) ---
   // One provider's content (name/baseUrl/apiKey/model/format) persists or
-  // reverts on its own. "Set Active" is buffered into the draft and committed
-  // by the active card's own Save; delete persists immediately (after its confirm).
+  // reverts on its own; delete, set-active, and reorder persist immediately
+  // (delete after its confirm).
   const saveProvCard = useCallback(async (id: string) => {
     const draft = state.providerDraft;
     if (!draft) return;
     const entry = draft.providers.find((e) => e.id === id);
     if (!entry) return;
     // Validate just this entry — a missing name/url/key blocks its own Save
-    // without affecting other cards (mirrors validateProviders per row). Surface
-    // the specific reason via the card's status so the failure isn't a vague
-    // "Not saved".
+    // without affecting other cards. Surface the specific reason via the
+    // card's status so the failure isn't a vague "Not saved".
     let validationError: string | null = null;
     if (!entry.name.trim()) validationError = "Needs a name";
     else if (!entry.baseUrl.trim()) validationError = "Needs a base URL";
@@ -1933,6 +1884,26 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
     }
   }, [state.providerDraft, patchNow, patchProvDraft, dispatch]);
+
+  const reorderProv = useCallback(async (ids: string[]) => {
+    // Only reorder persisted rows; skip any draft-only ids (new unsaved rows).
+    // The guard runs inside the functional updater so it judges the reducer's
+    // current providers, not this render's snapshot.
+    try {
+      await patchNow((s) => {
+        const savedById = new Map(s.providers.map((p) => [p.id, p] as const));
+        const reorderedSavedIds = ids.filter((id) => savedById.has(id));
+        if (reorderedSavedIds.length !== s.providers.length) return s;
+        return { ...s, providers: reorderedSavedIds.map((id) => savedById.get(id)!) };
+      });
+      // Mirror reorder into draft using draft values, preserving content edits.
+      patchProvDraft((d) => {
+        const draftById = new Map(d.providers.map((p) => [p.id, p] as const));
+        const reorderedDraft = ids.map((id) => draftById.get(id)).filter((p): p is (typeof d.providers)[number] => !!p);
+        return reorderedDraft.length === d.providers.length ? { ...d, providers: reorderedDraft } : d;
+      });
+    } catch { console.error("[artefact] reorderProv: save failed"); }
+  }, [patchNow, patchProvDraft]);
 
   // --- settings: embedding providers ---
   // Same per-card draft/save/discard shape as chat providers above, just a
@@ -2127,6 +2098,26 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({ type: "SET_EMB_PROV_CARD_STATUS", id, status: "err" });
     }
   }, [state.embProviderDraft, patchNow, patchEmbProvDraft, dispatch]);
+
+  const reorderEmbProv = useCallback(async (ids: string[]) => {
+    // Only reorder persisted rows; skip any draft-only ids (new unsaved rows).
+    // The guard runs inside the functional updater so it judges the reducer's
+    // current embedding providers, not this render's snapshot.
+    try {
+      await patchNow((s) => {
+        const savedById = new Map(s.embeddingProviders.map((p) => [p.id, p] as const));
+        const reorderedSavedIds = ids.filter((id) => savedById.has(id));
+        if (reorderedSavedIds.length !== s.embeddingProviders.length) return s;
+        return { ...s, embeddingProviders: reorderedSavedIds.map((id) => savedById.get(id)!) };
+      });
+      // Mirror reorder into draft using draft values, preserving content edits.
+      patchEmbProvDraft((d) => {
+        const draftById = new Map(d.providers.map((p) => [p.id, p] as const));
+        const reorderedDraft = ids.map((id) => draftById.get(id)).filter((p): p is (typeof d.providers)[number] => !!p);
+        return reorderedDraft.length === d.providers.length ? { ...d, providers: reorderedDraft } : d;
+      });
+    } catch { console.error("[artefact] reorderEmbProv: save failed"); }
+  }, [patchNow, patchEmbProvDraft]);
 
   // --- settings: artefact fields ---
   // The required-column config is one deferred draft (mirrors the catalogue-
@@ -2331,8 +2322,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
-    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
-    toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
+    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, reorderProv, deleteProv, setActiveProv, saveProvCard, discardProvCard,
+    toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, reorderEmbProv, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
     toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
   };

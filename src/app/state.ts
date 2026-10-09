@@ -170,17 +170,15 @@ export interface AppState {
    *  `ensureVocabTermsLoaded` doesn't fire a duplicate concurrent request. */
   vocabTermCacheLoading: Record<string, boolean>;
 
-  // Providers form — a single unified draft (mirrors fieldDraft): edits, adds,
-  // deletes, and active-selection changes all accumulate here and persist only
-  // on the tab-level Save. `provStatus` is the one piece kept separate: it is
-  // transient per-row Test Connection verification, not part of the draft.
+  // Providers form — a single unified draft (mirrors fieldDraft): per-card
+  // content edits accumulate here and persist on the card's own Save, while
+  // structural changes (delete, set-active, reorder) persist immediately.
+  // `provStatus` is the one piece kept separate: it is transient per-row Test
+  // Connection verification, not part of the draft.
   providerDraft: ProviderDraft | null;
   provStatus: Record<string, { test: "testing" | "ok" | "err" | null; error?: string }>;
-  /** Persist status for the tab-level Save button. */
-  provSaveStatus: "saving" | "ok" | "err" | null;
   /** Per-card save status for a provider card (keyed by provider id). A card's
-   *  own Save persists only that provider; its outcome surfaces here while the
-   *  tab-level `provSaveStatus` stays reserved for the structural Apply. */
+   *  own Save persists only that provider; its outcome surfaces here. */
   provCardSaveStatus: Record<string, SaveState>;
   /** Specific reason a provider card's Save failed (keyed by provider id), shown
    *  in place of the generic "Not saved". Cleared on the next successful/again
@@ -194,7 +192,6 @@ export interface AppState {
   embProviderDraft: EmbeddingProviderDraft | null;
   embProviderExpanded: Record<string, boolean>;
   embProvStatus: Record<string, { test: "testing" | "ok" | "err" | null; error?: string }>;
-  embProvSaveStatus: "saving" | "ok" | "err" | null;
   embProvCardSaveStatus: Record<string, SaveState>;
   embProvCardError: Record<string, string>;
   showEmbProvKey: boolean;
@@ -279,7 +276,6 @@ export const initialState: AppState = {
 
   providerDraft: null,
   provStatus: {},
-  provSaveStatus: null,
   provCardSaveStatus: {},
   provCardError: {},
   showProvKey: false,
@@ -287,7 +283,6 @@ export const initialState: AppState = {
   embProviderDraft: null,
   embProviderExpanded: {},
   embProvStatus: {},
-  embProvSaveStatus: null,
   embProvCardSaveStatus: {},
   embProvCardError: {},
   showEmbProvKey: false,
@@ -365,7 +360,6 @@ export type Action =
   | { type: "CLEAR_PROVIDER_DRAFT" }
   | { type: "SET_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null; error?: string }
   | { type: "CLEAR_PROV_STATUS"; id: string }
-  | { type: "SET_PROV_SAVE_STATUS"; status: "saving" | "ok" | "err" | null }
   | { type: "SET_PROV_CARD_STATUS"; id: string; status: SaveState }
   | { type: "SET_PROV_CARD_ERROR"; id: string; error: string | null }
   | { type: "SET_SHOW_PROV_KEY"; show: boolean }
@@ -374,7 +368,6 @@ export type Action =
   | { type: "CLEAR_EMB_PROVIDER_DRAFT" }
   | { type: "SET_EMB_PROV_STATUS"; id: string; test: "testing" | "ok" | "err" | null; error?: string }
   | { type: "CLEAR_EMB_PROV_STATUS"; id: string }
-  | { type: "SET_EMB_PROV_SAVE_STATUS"; status: "saving" | "ok" | "err" | null }
   | { type: "SET_EMB_PROV_CARD_STATUS"; id: string; status: SaveState }
   | { type: "SET_EMB_PROV_CARD_ERROR"; id: string; error: string | null }
   | { type: "SET_SHOW_EMB_PROV_KEY"; show: boolean }
@@ -703,8 +696,6 @@ export function reducer(state: AppState, action: Action): AppState {
       delete provStatus[action.id];
       return { ...state, provStatus };
     }
-    case "SET_PROV_SAVE_STATUS":
-      return { ...state, provSaveStatus: action.status };
     case "SET_PROV_CARD_STATUS":
       return { ...state, provCardSaveStatus: { ...state.provCardSaveStatus, [action.id]: action.status } };
     case "SET_PROV_CARD_ERROR": {
@@ -744,8 +735,6 @@ export function reducer(state: AppState, action: Action): AppState {
       delete embProvStatus[action.id];
       return { ...state, embProvStatus };
     }
-    case "SET_EMB_PROV_SAVE_STATUS":
-      return { ...state, embProvSaveStatus: action.status };
     case "SET_EMB_PROV_CARD_STATUS":
       return { ...state, embProvCardSaveStatus: { ...state.embProvCardSaveStatus, [action.id]: action.status } };
     case "SET_EMB_PROV_CARD_ERROR": {

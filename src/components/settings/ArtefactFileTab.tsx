@@ -1,7 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { useSortable } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { Eye, FileText, GripVertical, Plus } from "lucide-react";
+import { Eye, FileText, Plus } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
@@ -20,12 +18,17 @@ import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { ExpandCollapseAll } from "./ExpandCollapseAll";
 import { SortableList } from "./SortableList";
+import { SortableRow } from "./SortableRow";
 import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";
 
 interface Props {
   state: AppState;
   actions: AppActions;
 }
+
+/** Grid template shared by the header row and each column row (via SortableRow)
+ *  so columns align exactly: grip / Name / Description. */
+const GRID = "grid-cols-[24px_1fr_1fr] gap-2.5 px-3.5";
 
 export function ArtefactFileTab({ state, actions }: Props) {
   const { settings } = state;
@@ -142,7 +145,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
       />
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className="bg-muted/30 grid grid-cols-[24px_1fr_1fr] gap-2.5 border-b px-3.5 py-1.75">
+        <div className={cn("bg-muted/30 grid border-b py-1.75", GRID)}>
           <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Description</span>
@@ -214,34 +217,21 @@ interface ArtefactColumnRowProps {
 }
 
 function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, actions }: ArtefactColumnRowProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: af.id });
   return (
-    <div
-      ref={(node) => { setNodeRef(node); cardRef?.(node); }}
-      className="border-border/60 border-b"
-      style={{
-        transform: CSS.Transform.toString(transform) || undefined,
-        transition,
-        opacity: isDragging ? 0.4 : 1,
-      }}
-    >
-      <div
-        onClick={() => actions.toggleAF(af.id)}
-        className="grid cursor-pointer grid-cols-[24px_1fr_1fr] items-center gap-2.5 px-3.5 py-2.25"
-      >
-        <div
-          className={cn("text-muted-foreground flex items-center", isDragging ? "cursor-grabbing" : "cursor-grab")}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="size-3.5" />
-        </div>
-        <div className="flex min-w-0 items-center gap-2">
+    <SortableRow
+      id={af.id}
+      expanded={expanded}
+      onToggle={() => actions.toggleAF(af.id)}
+      grid={GRID}
+      cardRef={cardRef}
+      label={
+        <>
           <span className="truncate text-[15px] font-semibold">{af.name || "Untitled column"}</span>
           <UnsavedBadge dirty={dirty} />
-        </div>
-        <span className="text-muted-foreground truncate text-sm">{af.description || "—"}</span>
-      </div>
+        </>
+      }
+      cells={<span className="text-muted-foreground truncate text-sm">{af.description || "—"}</span>}
+    >
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           {/* Identify By gates the two inputs below — draft-buffered like the
@@ -342,6 +332,6 @@ function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, ac
           />
         </div>
       )}
-    </div>
+    </SortableRow>
   );
 }

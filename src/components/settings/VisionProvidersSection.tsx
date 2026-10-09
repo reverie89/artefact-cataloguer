@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
+import { Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
@@ -10,6 +10,8 @@ import { CardActions } from "./CardActions";
 import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
 import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
 import { UnsavedBadge } from "./UnsavedBadge";
+import { SortableList } from "./SortableList";
+import { SortableRow } from "./SortableRow";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -32,10 +34,9 @@ const THINKING_OPTIONS: { value: "off" | ThinkingEffort; label: string }[] = [
 ];
 
 /** True when a single draft entry differs from its persisted provider — drives
- *  the per-row "unsaved" badge. Mirrors isProvidersDirty but per row. Only
+ *  the per-row "unsaved" badge. Per-row twin of isTabDirty in drafts.ts. Only
  *  user-authored fields are compared: `modelOptions`/`connStatus` are
- *  machine-written by Test Connection and must not flag the row (see
- *  isTabDirty in drafts.ts). */
+ *  machine-written by Test Connection and must not flag the row. */
 function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boolean {
   return fieldsDiffer(
     e,
@@ -54,6 +55,11 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
   );
 }
 
+/** Grid template shared by the header row and each provider row (via
+ *  SortableRow) so columns align exactly: grip / Provider / Model / Status /
+ *  Active. */
+const GRID = "grid-cols-[24px_1fr_1fr_120px_104px] gap-2.5 px-3.5";
+
 export function VisionProvidersSection({ state, actions }: Props) {
   const { settings, provStatus, showProvKey } = state;
   // Render from the unified draft when there are pending edits, else settings.
@@ -68,10 +74,6 @@ export function VisionProvidersSection({ state, actions }: Props) {
     live.providers[live.providers.length - 1]?.id
   );
 
-  // Grid template shared by the header row and each provider row so columns
-  // align exactly: Provider / Model / Status / Active.
-  const GRID = "grid grid-cols-[1fr_1fr_120px_104px] gap-2.5 px-3.5";
-
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
@@ -79,7 +81,8 @@ export function VisionProvidersSection({ state, actions }: Props) {
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className={cn("bg-muted/30 border-b py-1.75", GRID)}>
+        <div className={cn("grid bg-muted/30 border-b py-1.75", GRID)}>
+          <span />
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em] flex items-center gap-1.5">
             Vision Provider
           </span>
@@ -88,40 +91,44 @@ export function VisionProvidersSection({ state, actions }: Props) {
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Active</span>
         </div>
 
-        {live.providers.map((entry) => {
-          const isActive = entry.id === live.activeProvider;
-          const saved = settings.providers.find((p) => p.id === entry.id);
-          // A row is "unsaved" when it's newly added (no persisted match) or its
-          // draft entry differs from the persisted provider. ("Set Active" persists
-          // immediately, so it doesn't contribute to per-card dirtiness.)
-          const cardDirty = !!state.providerDraft && (
-            !saved || entryDiffers(entry, saved)
-          );
-          // Resolve the Status shown in the row: the transient Test Connection
-          // outcome wins (it carries the live "testing" + just-run result that
-          // hasn't been Saved yet); when there's no transient entry, fall back to
-          // the draft's persisted connStatus so the last verified result survives
-          // a restart. "untested" maps to null ("Not tested").
-          const transient = provStatus[entry.id]?.test ?? null;
-          const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
-          return (
-            <ProviderRow
-              key={entry.id}
-              entry={entry}
-              grid={GRID}
-              testStatus={testStatus}
-              testError={provStatus[entry.id]?.error}
-              showProvKey={showProvKey}
-              isActive={isActive}
-              dirty={cardDirty}
-              cardStatus={state.provCardSaveStatus[entry.id] ?? null}
-              cardError={state.provCardError[entry.id]}
-              expanded={!!state.providerExpanded[entry.id]}
-              cardRef={(node) => { cardRefs.current[entry.id] = node; }}
-              actions={actions}
-            />
-          );
-        })}
+        <SortableList
+          items={live.providers.map((e) => e.id)}
+          onReorder={(ids) => void actions.reorderProv(ids)}
+        >
+          {live.providers.map((entry) => {
+            const isActive = entry.id === live.activeProvider;
+            const saved = settings.providers.find((p) => p.id === entry.id);
+            // A row is "unsaved" when it's newly added (no persisted match) or its
+            // draft entry differs from the persisted provider. ("Set Active" persists
+            // immediately, so it doesn't contribute to per-card dirtiness.)
+            const cardDirty = !!state.providerDraft && (
+              !saved || entryDiffers(entry, saved)
+            );
+            // Resolve the Status shown in the row: the transient Test Connection
+            // outcome wins (it carries the live "testing" + just-run result that
+            // hasn't been Saved yet); when there's no transient entry, fall back to
+            // the draft's persisted connStatus so the last verified result survives
+            // a restart. "untested" maps to null ("Not tested").
+            const transient = provStatus[entry.id]?.test ?? null;
+            const testStatus = transient ?? (entry.connStatus === "untested" ? null : entry.connStatus);
+            return (
+              <ProviderRow
+                key={entry.id}
+                entry={entry}
+                testStatus={testStatus}
+                testError={provStatus[entry.id]?.error}
+                showProvKey={showProvKey}
+                isActive={isActive}
+                dirty={cardDirty}
+                cardStatus={state.provCardSaveStatus[entry.id] ?? null}
+                cardError={state.provCardError[entry.id]}
+                expanded={!!state.providerExpanded[entry.id]}
+                cardRef={(node) => { cardRefs.current[entry.id] = node; }}
+                actions={actions}
+              />
+            );
+          })}
+        </SortableList>
 
         {live.providers.length === 0 && (
           <div className="text-muted-foreground p-5 text-center text-[15px]">
@@ -137,10 +144,10 @@ export function VisionProvidersSection({ state, actions }: Props) {
   );
 }
 
+/** A single reorderable provider row (shared SortableRow shell). Clicking
+ *  anywhere on the row toggles the editor; the grip is drag-only. */
 interface RowProps {
   entry: ProviderDraft["providers"][number];
-  /** Shared grid template (header + rows) so columns align. */
-  grid: string;
   testStatus: TestStatus;
   testError?: string;
   showProvKey: boolean;
@@ -158,7 +165,7 @@ interface RowProps {
   actions: AppActions;
 }
 
-function ProviderRow({ entry, grid, testStatus, testError, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
+function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
   // The model dropdown is only meaningful after a successful connection, which
   // is what populates `modelOptions`. Before that, show a muted hint so the user
   // understands the dependency.
@@ -168,43 +175,48 @@ function ProviderRow({ entry, grid, testStatus, testError, showProvKey, isActive
   const nameDisplay = entry.name || "Untitled provider";
 
   return (
-    <div ref={cardRef} className="border-border/60 border-b">
-      {/* Clickable summary row — grid-aligned to the header. */}
-      <div onClick={() => actions.toggleProv(id)} className={cn("grid cursor-pointer items-center py-2.25", grid)}>
-        {/* Provider: chevron + name (inline-editable when expanded) + unsaved badge */}
-        <div className="flex min-w-0 items-center gap-2">
-          {expanded ? <ChevronDown className="text-muted-foreground size-3" /> : <ChevronRight className="text-muted-foreground size-3" />}
-          {expanded ? (
-            <Input
-              value={entry.name}
-              onChange={(e) => actions.setProvF(id, "name", e)}
-              onClick={(e) => e.stopPropagation()}
-              placeholder="Provider name"
-              aria-label="Provider name"
-              className="h-7 min-w-0"
-            />
-          ) : (
-            <>
-              <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
-              <UnsavedBadge dirty={dirty} />
-            </>
-          )}
-        </div>
-        {/* Model */}
-        <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
-        {/* Status */}
-        <StatusBadge status={testStatus} error={testError} />
-{/* Active: kept interactive via stopPropagation so the row doesn't toggle.
-    "Set Active" persists immediately to disk (no per-card Save needed). */}
-<div onClick={(e) => e.stopPropagation()}>
-  {isActive ? (
-    <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
-  ) : (
-    <Button onClick={() => void actions.setActiveProv(id)} variant="outline" size="sm">Set Active</Button>
-  )}
-</div>
-      </div>
-
+    <SortableRow
+      id={entry.id}
+      expanded={expanded}
+      onToggle={() => actions.toggleProv(id)}
+      grid={GRID}
+      cardRef={cardRef}
+      /* Provider: name (inline-editable when expanded) + unsaved badge. */
+      label={
+        expanded ? (
+          <Input
+            value={entry.name}
+            onChange={(e) => actions.setProvF(id, "name", e)}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="Provider name"
+            aria-label="Provider name"
+            className="h-7 min-w-0"
+          />
+        ) : (
+          <>
+            <span className="truncate text-[15px] font-semibold">{nameDisplay}</span>
+            <UnsavedBadge dirty={dirty} />
+          </>
+        )
+      }
+      cells={
+        <>
+          {/* Model */}
+          <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
+          {/* Status */}
+          <StatusBadge status={testStatus} error={testError} />
+          {/* Active: kept interactive via stopPropagation so the row doesn't toggle.
+              "Set Active" persists immediately to disk (no per-card Save needed). */}
+          <div onClick={(e) => e.stopPropagation()}>
+            {isActive ? (
+              <Badge variant="default" className="w-fit tracking-[0.04em]">Active</Badge>
+            ) : (
+              <Button onClick={() => void actions.setActiveProv(id)} variant="outline" size="sm">Set Active</Button>
+            )}
+          </div>
+        </>
+      }
+    >
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
@@ -293,6 +305,6 @@ function ProviderRow({ entry, grid, testStatus, testError, showProvKey, isActive
           />
         </div>
       )}
-    </div>
+    </SortableRow>
   );
 }
