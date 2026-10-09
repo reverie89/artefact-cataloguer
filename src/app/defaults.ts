@@ -62,7 +62,6 @@ function vocab(id: string, name: string): VocabSource {
       status: "never",
       providerId: null,
       model: null,
-      dimensions: null,
       lastSyncedAt: null,
       rowsEmbedded: null,
       lastError: null,

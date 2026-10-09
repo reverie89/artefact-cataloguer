@@ -27,12 +27,12 @@ describe("isTabDirty modelProviders — machine-written test fields never flag t
     expect(isTabDirty(stateWith({ providerDraft: draft, settings }), "modelProviders")).toBe(false);
   });
 
-  it("an embedding draft differing only in modelOptions/dimensions/connStatus is clean", () => {
-    const settings = settingsWith({ embeddingProviders: [{ ...EMB, modelOptions: ["m1"], dimensions: undefined, connStatus: "untested" }] });
+  it("an embedding draft differing only in modelOptions/connStatus is clean", () => {
+    const settings = settingsWith({ embeddingProviders: [{ ...EMB, modelOptions: ["m1"], connStatus: "untested" }] });
     const fromSettings = embeddingProviderDraftFromSettings(settings);
     const draft: EmbeddingProviderDraft = {
       ...fromSettings,
-      providers: [{ ...fromSettings.providers[0], modelOptions: ["m1", "m2"], dimensions: 1536, connStatus: "ok" }],
+      providers: [{ ...fromSettings.providers[0], modelOptions: ["m1", "m2"], connStatus: "ok" }],
     };
     expect(isTabDirty(stateWith({ embProviderDraft: draft, settings }), "modelProviders")).toBe(false);
   });
@@ -60,7 +60,7 @@ describe("isTabDirty modelProviders — machine-written test fields never flag t
   it("a draft provider missing from settings (new row) flags the tab", () => {
     const settings = settingsWith({ embeddingProviders: [] });
     const draft = embeddingProviderDraftFromSettings(settings);
-    draft.providers = [{ id: "new", name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], dimensions: null, connStatus: "untested" }];
+    draft.providers = [{ id: "new", name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], imageInputModels: null, connStatus: "untested" }];
     expect(isTabDirty(stateWith({ embProviderDraft: draft, settings }), "modelProviders")).toBe(true);
   });
 

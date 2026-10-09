@@ -47,7 +47,7 @@ export function migrateLegacyVocabularyLists(raw: unknown): unknown {
     badgeField: null,
     embedding: {
       status: "never",
-      providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null,
+      providerId: null, model: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null,
     },
   }));
   const { vocabularyLists: _drop, ...rest } = obj;

@@ -17,7 +17,8 @@ use crate::vocab_files::{list_source_files, parse_source_file, VocabSourceField}
 
 use super::provider::{embed_texts, EmbeddingProvider, EMBED_BATCH_SIZE};
 use super::store::{
-    connect_db, existing_hashes, open_table_if_exists, sql_quote, table_name, table_schema,
+    connect_db, drop_table_if_exists, existing_hashes, open_table_if_exists, sql_quote, table_name,
+    table_schema,
 };
 
 const SYNC_EVENT: &str = "ac-vocab-sync";
@@ -40,7 +41,6 @@ pub struct SyncResult {
     pub rows_reused: usize,
     #[serde(rename = "rowsDeleted")]
     pub rows_deleted: usize,
-    pub dimensions: u32,
     #[serde(rename = "totalRows")]
     pub total_rows: usize,
     /// Each staged file's own raw row count from this parse, keyed by filename
@@ -193,18 +193,28 @@ fn diff_rows(
 /// gone. Emits `ac-vocab-sync` progress once per batch. Cancellable via
 /// `cancel_vocab_sync` — already-upserted batches stay committed, so a
 /// cancelled sync safely resumes from the diff next time.
+///
+/// `rebuild` marks a sync after an embedding-model switch: stored vectors live
+/// in the old model's space (and its width may differ from the new model's),
+/// so the table is dropped and every row re-embedded fresh. The staged files
+/// are untouched, so a failed or cancelled rebuild just rebuilds again next
+/// sync.
 pub(crate) async fn run_sync(
     app: &AppHandle,
     source_id: &str,
     provider: &EmbeddingProvider,
     fields: &[VocabSourceField],
     term_field: Option<&str>,
+    rebuild: bool,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<SyncResult, String> {
     let name = table_name(source_id);
     let diffed = diff_rows(source_id, fields, term_field)?;
     let fresh = diffed.rows;
     let db = connect_db().await?;
+    if rebuild {
+        drop_table_if_exists(&db, &name).await?;
+    }
     let existing = existing_hashes(&db, &name).await?;
 
     let fresh_keys: HashSet<&str> = fresh.iter().map(|r| r.term_key.as_str()).collect();
@@ -359,26 +369,11 @@ pub(crate) async fn run_sync(
     }
     let _ = table;
 
-    // Dimensions weren't learned this pass if every row was reused — read them
-    // back from the table's schema so the caller can still record them.
-    if dimensions == 0 {
-        if let Some(t) = open_table_if_exists(&db, &name).await? {
-            if let Ok(schema) = t.schema().await {
-                if let Ok(f) = schema.field_with_name("vector") {
-                    if let DataType::FixedSizeList(_, w) = f.data_type() {
-                        dimensions = *w as u32;
-                    }
-                }
-            }
-        }
-    }
-
     emit(embedded, "done", None, &done_by_file);
     Ok(SyncResult {
         rows_embedded: embedded,
         rows_reused: reused,
         rows_deleted: deleted_count,
-        dimensions,
         total_rows: fresh.len(),
         file_row_counts: diffed.found,
         file_synced_counts: diffed.synced,

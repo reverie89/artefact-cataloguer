@@ -4,6 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
+import { embeddingModelStale } from "../app/vocabSettings";
 
 interface RawCatalogueResult {
   fieldResults: Record<string, { value: string; similarity?: number }[]>;
@@ -123,32 +124,54 @@ export function vocabSourceIdsForRetrieval(field: CatalogueField, settings: Sett
 }
 
 /** True when a vocab source's embedded index is ready for server-side
- *  retrieval. `never`/`stale`/`error` are not: `vocabSourceIdsForRetrieval`
- *  omits them, which would otherwise silently fall through to Rust's `else`
- *  branch in `build_combined_prompt` — the field is prompted as
+ *  retrieval: synced, and embedded with the currently-active embedding model
+ *  (an index built in another model's vector space would return meaningless
+ *  cosine scores — see {@link findUnsyncedVocabField}). `vocabSourceIdsForRetrieval`
+ *  omits unready sources, which would otherwise silently fall through to
+ *  Rust's `else` branch in `build_combined_prompt` — the field is prompted as
  *  *unconstrained free text*, not the vocab list, since an empty
  *  `vocabSourceIds` reads as "not a vocab field" there. Cataloguing must not
  *  run against a source in this state; see `findUnsyncedVocabField`. */
-function isVocabSourceReady(vs: Settings["vocabSources"][number]): boolean {
-  return vs.embedding.status === "synced";
+function isVocabSourceReady(vs: Settings["vocabSources"][number], activeModel: string | null): boolean {
+  return vs.embedding.status === "synced" && !embeddingModelStale(vs.embedding, activeModel);
 }
+
+/** Why {@link findUnsyncedVocabField} rejected a source: never synced (or
+ *  content-stale/errored), or synced with a different embedding model than is
+ *  now active. */
+export type UnsyncedVocabReason = "not-synced" | "model-changed";
 
 /**
  * Find the first vocab field/source pair that would silently lose its
  * controlled-vocabulary constraint if cataloguing ran right now (see
  * {@link isVocabSourceReady}). Checked once before a Parse run — mirrors the
- * "active provider required" pre-flight check — so a forgotten Sync fails
- * loudly instead of producing free-text answers for a field that looks like
- * a controlled-vocabulary pick list everywhere else in the UI.
+ * "active provider required" pre-flight check — so a forgotten Sync (or a
+ * just-switched embedding model) fails loudly instead of producing free-text
+ * answers or meaningless cosine matches for a field that looks like a
+ * controlled-vocabulary pick list everywhere else in the UI.
  */
-export function findUnsyncedVocabField(settings: Settings): { fieldName: string; sourceName: string } | null {
+export function findUnsyncedVocabField(settings: Settings): {
+  fieldName: string;
+  sourceName: string;
+  reason: UnsyncedVocabReason;
+  /** The model the source was embedded with, and the now-active model — set
+   *  on the "model-changed" reason so the error can say both. */
+  embeddedModel: string | null;
+  activeModel: string | null;
+} | null {
+  const activeModel = activeEmbeddingProvider(settings)?.model ?? null;
   for (const field of settings.fields) {
     if (field.type !== "vocab") continue;
     for (const sid of field.vocabSources || []) {
       const vs = settings.vocabSources.find((v) => v.id === sid);
-      if (vs && !isVocabSourceReady(vs)) {
-        return { fieldName: field.name || "Untitled field", sourceName: vs.name || "Untitled source" };
-      }
+      if (!vs || isVocabSourceReady(vs, activeModel)) continue;
+      return {
+        fieldName: field.name || "Untitled field",
+        sourceName: vs.name || "Untitled source",
+        reason: vs.embedding.status === "synced" ? "model-changed" : "not-synced",
+        embeddedModel: vs.embedding.model,
+        activeModel,
+      };
     }
   }
   return null;
@@ -290,11 +313,36 @@ export async function testConnection(provider: Provider): Promise<RawConnectionT
 }
 
 /** Shape returned by the Rust `test_embedding_connection` command — mirrors
- *  RawConnectionTest, plus the vector width learned from a real embed call. */
+ *  RawConnectionTest, plus the advertised image-input subset (`null` when the
+ *  catalog carries no input-modality metadata, so capability is unknown rather
+ *  than absent). */
 interface RawEmbeddingConnectionTest {
   ok: string;
   models: string[];
-  dimensions: number;
+  image_input: string[] | null;
+}
+
+/**
+ * Model ids the picker may offer: when the catalog advertised input
+ * modalities, only image-capable ids are usable (the pipeline embeds the
+ * artefact image unconditionally, so a text-only model hard-fails every row)
+ * — the strict intersection, **including empty**, so a provider with no
+ * image-capable model shows an explained empty picker rather than options
+ * that would all fail. Without metadata (`null`) nothing is known and the
+ * full list passes through.
+ */
+export function embeddingModelOptions(modelOptions: string[], imageInputModels: string[] | null): string[] {
+  if (!imageInputModels) return modelOptions;
+  const image = new Set(imageInputModels);
+  return modelOptions.filter((m) => image.has(m));
+}
+
+/** True when a model is selected but the catalog's metadata says it can't
+ *  accept image input — the per-model warning state. Only fires when
+ *  metadata is known; metadata-less catalogs can't warn here (the runtime
+ *  image-embed error is that case's guard). */
+export function selectedModelLacksImageInput(model: string, imageInputModels: string[] | null): boolean {
+  return !!model && !!imageInputModels && !imageInputModels.includes(model);
 }
 
 /** Derive the live embeddings endpoint an embedding provider's calls hit —
@@ -310,8 +358,8 @@ export function embeddingProviderEndpoints(provider: Pick<EmbeddingProvider, "ba
 }
 
 /** Ping the embedding provider with a real 1-item embed call to validate URL +
- *  key, fetch the model list, and learn the vector width. Mirrors
- *  testConnection for the chat provider list. */
+ *  key and fetch the model list. Mirrors testConnection for the chat provider
+ *  list. */
 export async function testEmbeddingConnection(provider: EmbeddingProvider): Promise<RawEmbeddingConnectionTest> {
   const res = await invoke<RawEmbeddingConnectionTest>("test_embedding_connection", {
     provider: {

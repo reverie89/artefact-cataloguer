@@ -39,7 +39,6 @@ const VocabEmbeddingStatusSchema = z.object({
   status: z.enum(["never", "stale", "syncing", "synced", "error"]),
   providerId: z.string().nullable(),
   model: z.string().nullable(),
-  dimensions: z.number().nullable(),
   lastSyncedAt: z.string().nullable(),
   rowsEmbedded: z.number().nullable(),
   lastError: z.string().nullable(),
@@ -79,8 +78,10 @@ const EmbeddingProviderSchema = z.object({
   apiKey: z.string(),
   model: z.string(),
   modelOptions: z.array(z.string()).optional(),
+  // `.optional()` so settings written before this field existed load cleanly —
+  // an absent key reads as "input modalities unknown" (no picker filtering).
+  imageInputModels: z.array(z.string()).nullable().optional(),
   apiFormat: embeddingApiFormat.optional(),
-  dimensions: z.number().optional(),
   connStatus: z.enum(["ok", "err", "untested"]).optional(),
 });
 

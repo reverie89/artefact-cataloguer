@@ -154,9 +154,13 @@ pub(crate) fn sql_quote(s: &str) -> String {
 /// doesn't exist. Exposed through the `flush_vocab_source` command.
 pub(crate) async fn flush_source(source_id: String) -> Result<(), String> {
     let db = connect_db().await?;
-    let name = table_name(&source_id);
-    if table_exists(&db, &name).await? {
-        db.drop_table(&name, &[]).await.map_err(|e| e.to_string())?;
+    drop_table_if_exists(&db, &table_name(&source_id)).await
+}
+
+/// Drop one table by name through an existing connection. No-op if absent.
+pub(crate) async fn drop_table_if_exists(db: &Connection, name: &str) -> Result<(), String> {
+    if table_exists(db, name).await? {
+        db.drop_table(name, &[]).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }

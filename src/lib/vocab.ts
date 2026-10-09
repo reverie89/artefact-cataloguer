@@ -44,7 +44,6 @@ export interface VocabSyncResult {
   rowsEmbedded: number;
   rowsReused: number;
   rowsDeleted: number;
-  dimensions: number;
   totalRows: number;
   /** Each staged file's own raw row count from this parse, keyed by filename
    *  — mirrored into `VocabSourceFile.rowCountLast` by the caller. */
@@ -93,7 +92,9 @@ export async function downloadVocabFile(sourceId: string, filename: string): Pro
 /**
  * Run (or resume) an incremental sync: stream-parse every staged file, hash
  * each row, embed only new/changed rows via `provider`, upsert into the
- * source's LanceDB table, and delete rows for removed content. `onProgress`
+ * source's LanceDB table, and delete rows for removed content. `rebuild`
+ * (set when the embedding model changed since the last sync) drops the table
+ * first so every row re-embeds in the new model's vector space. `onProgress`
  * is called once per completed batch; the returned promise resolves with the
  * final tally. Cancellable via {@link cancelVocabSync} with the same
  * `sourceId`.
@@ -103,6 +104,7 @@ export async function syncVocabSource(
   provider: EmbeddingProvider,
   fields: VocabSourceField[],
   termField: string | null,
+  rebuild: boolean,
   onProgress?: (ev: VocabSyncEvent) => void
 ): Promise<VocabSyncResult> {
   let unlisten: UnlistenFn | undefined;
@@ -117,6 +119,7 @@ export async function syncVocabSource(
       provider: toRustProvider(provider),
       fields,
       termField,
+      rebuild,
     });
   } finally {
     if (unlisten) unlisten();

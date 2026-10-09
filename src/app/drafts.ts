@@ -81,10 +81,10 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
       // removed, content-edited, or the active selection flipped. Both the chat
       // and embedding provider lists live on this one tab, so either draft
       // being dirty makes the tab dirty. Only user-authored fields are
-      // compared: `modelOptions`/`dimensions`/`connStatus` are machine-written
-      // by Test Connection into the draft alone, so they must never flag the
-      // tab (there is no tab-level save to clear them with — the per-card Save
-      // carries them across).
+      // compared: `modelOptions`/`imageInputModels`/`connStatus`
+      // are machine-written by Test Connection into the draft alone, so they
+      // must never flag the tab (there is no tab-level save to clear them
+      // with — the per-card Save carries them across).
       const d = state.providerDraft;
       const chatDirty = !!d && (differById(
         d.providers,

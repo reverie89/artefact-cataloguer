@@ -12,13 +12,24 @@ import type { Settings, VocabEmbeddingStatus, VocabSource } from "./types";
 /** Fresh "never embedded" record — the seed for new sources and the reset
  *  point for Flush embeddings. A factory so callers never share one instance. */
 export function emptyEmbedding(): VocabEmbeddingStatus {
-  return { status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
+  return { status: "never", providerId: null, model: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
 }
 
 /** A synced index is stale once the content or column config beneath it has
  *  changed; every other status is left alone. */
 export function markStaleIfSynced(e: VocabEmbeddingStatus): VocabEmbeddingStatus {
   return e.status === "synced" ? { ...e, status: "stale" } : e;
+}
+
+/** Whether a synced index was embedded with a different model than the one
+ *  currently active — its vectors live in the old model's space, so retrieval
+ *  against them would be meaningless. Derived at render/pre-flight time, never
+ *  persisted: switching the model back re-freshens the source with no re-sync,
+ *  and the persisted `"stale"` status stays reserved for content drift. The
+ *  model string is compared, not the provider id — recreating a provider
+ *  config with the same model yields the same vectors. */
+export function embeddingModelStale(e: VocabEmbeddingStatus, activeModel: string | null): boolean {
+  return e.status === "synced" && !!e.model && !!activeModel && e.model !== activeModel;
 }
 
 /** Whether the inputs a sync embeds differ between the source snapshot a pass

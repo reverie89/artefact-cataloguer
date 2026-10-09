@@ -6,6 +6,8 @@ import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
 import { displayName } from "../../app/styles";
 import type { VocabEmbeddingStatus, VocabSource, VocabSourceFile } from "../../app/types";
+import { embeddingModelStale } from "../../app/vocabSettings";
+import { activeEmbeddingProvider } from "../../lib/ai";
 import { useDropZone } from "../../hooks/useDropZone";
 import { CardActions } from "./CardActions";
 import { Field, FieldInput, Segmented } from "./FormControls";
@@ -44,6 +46,9 @@ export function VocabTab({ state, actions }: Props) {
     : { vocabSources: settings.vocabSources };
 
   const anySyncing = Object.keys(state.vocabSyncProgress).length > 0;
+  // Derived model-staleness input: a source synced with another model than the
+  // active provider shows Stale (see embeddingModelStale) — never persisted.
+  const activeModel = activeEmbeddingProvider(settings)?.model ?? null;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -144,6 +149,7 @@ export function VocabTab({ state, actions }: Props) {
                 syncProgress={state.vocabSyncProgress[vs.id]}
                 liveFields={state.fieldDraft?.fields ?? settings.fields}
                 hasEmbeddingProvider={!!settings.activeEmbeddingProvider}
+                activeModel={activeModel}
                 actions={actions}
               />
             );
@@ -170,10 +176,13 @@ interface SortableVocabRowProps {
   syncProgress?: { rowsDone: number; rowsTotal: number; fileProgress?: Record<string, { rowsDone: number; rowsTotal: number }> };
   liveFields: { id: string; name: string; vocabSources?: string[] }[];
   hasEmbeddingProvider: boolean;
+  /** Model of the currently-active embedding provider — drives the derived
+   *  model-staleness state (badge + summary). */
+  activeModel: string | null;
   actions: AppActions;
 }
 
-function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProgress, liveFields, hasEmbeddingProvider, actions }: SortableVocabRowProps) {
+function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProgress, liveFields, hasEmbeddingProvider, activeModel, actions }: SortableVocabRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: vs.id });
   const usedBy = liveFields.filter((f) => (f.vocabSources || []).includes(vs.id)).map((f) => f.name).join(", ") || null;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -215,7 +224,7 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
           </div>
           <UnsavedBadge dirty={dirty} />
         </div>
-        <EmbeddingStatusBadge source={vs} progress={syncProgress} />
+        <EmbeddingStatusBadge source={vs} progress={syncProgress} activeModel={activeModel} />
         <Button
           onClick={(e) => { e.stopPropagation(); void actions.removeVocabSource(vs.id); }}
           variant="ghost"
@@ -390,7 +399,7 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
           )}
 
           <div className="text-muted-foreground text-[12px] leading-relaxed">
-            {embeddingSummary(vs)}
+            {embeddingSummary(vs, activeModel)}
             {usedBy && <> · Used by: {usedBy}</>}
           </div>
 
@@ -447,24 +456,36 @@ function SortableVocabRow({ vs, expanded, dirty, cardStatus, cardError, syncProg
   );
 }
 
-function embeddingSummary(vs: VocabSource): string {
+function embeddingSummary(vs: VocabSource, activeModel: string | null): string {
   const e = vs.embedding;
   switch (e.status) {
     case "never": return "Never embedded — add files and Sync to enable shortlisted retrieval.";
     case "stale": return `Stale — ${e.model ? `last embedded with ${e.model}, ` : ""}files or fields changed since. Sync to update.`;
     case "syncing": return "Syncing…";
     case "error": return `Sync failed${e.lastError ? `: ${e.lastError}` : ""}.`;
-    case "synced": return `Embedded with ${e.model} · ${e.rowsEmbedded ?? 0} terms · synced ${e.lastSyncedAt?.slice(0, 10) ?? ""}`;
+    case "synced":
+      // Derived staleness: synced, but with a different model than the active
+      // provider — its vectors live in the old model's space. Distinct copy
+      // from content-stale so the user knows why.
+      if (embeddingModelStale(e, activeModel)) {
+        return `Stale — last embedded with ${e.model}, but the active embedding model is ${activeModel}. Re-sync to re-embed.`;
+      }
+      return `Embedded with ${e.model} · ${e.rowsEmbedded ?? 0} terms · synced ${e.lastSyncedAt?.slice(0, 10) ?? ""}`;
   }
 }
 
-function EmbeddingStatusBadge({ source, progress }: { source: VocabSource; progress?: { rowsDone: number; rowsTotal: number } }) {
+function EmbeddingStatusBadge({ source, progress, activeModel }: { source: VocabSource; progress?: { rowsDone: number; rowsTotal: number }; activeModel: string | null }) {
   if (progress) {
     const pct = progress.rowsTotal ? Math.round((progress.rowsDone / progress.rowsTotal) * 100) : null;
     return <Badge variant="secondary" className="w-fit gap-1 tracking-[0.04em]"><Loader2 className="size-2.5 animate-spin" />Syncing{pct !== null ? ` ${pct}%` : "…"}</Badge>;
   }
+  if (source.embedding.status === "synced") {
+    if (embeddingModelStale(source.embedding, activeModel)) {
+      return <Badge variant="secondary" className="w-fit gap-1 text-amber-600 tracking-[0.04em] dark:text-amber-400"><AlertTriangle className="size-2.5" />Stale</Badge>;
+    }
+    return <Badge variant="default" className="w-fit gap-1 tracking-[0.04em]"><CheckCircle2 className="size-2.5" />Up to date</Badge>;
+  }
   switch (source.embedding.status) {
-    case "synced": return <Badge variant="default" className="w-fit gap-1 tracking-[0.04em]"><CheckCircle2 className="size-2.5" />Up to date</Badge>;
     case "stale": return <Badge variant="secondary" className="w-fit gap-1 text-amber-600 tracking-[0.04em] dark:text-amber-400"><AlertTriangle className="size-2.5" />Stale</Badge>;
     case "error": return <Badge variant="destructive" className="w-fit gap-1 tracking-[0.04em]"><XCircle className="size-2.5" />Error</Badge>;
     default: return <Badge variant="secondary" className="w-fit tracking-[0.04em]">Never embedded</Badge>;

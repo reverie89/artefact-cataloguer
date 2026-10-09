@@ -20,16 +20,15 @@ export function StatusBadge({ status, error }: { status: TestStatus; error?: str
   return <Badge variant="secondary" className="w-fit tracking-[0.04em]">Not tested</Badge>;
 }
 
-/** Inline indicator shown beside the Test Connection button; `dimensions`
- *  annotates the embedding path's learned vector width and `error` shows the
+/** Inline indicator shown beside the Test Connection button; `error` shows the
  *  provider's actual failure text (falling back to the generic hint only when
  *  the backend gave none). */
-export function ConnectionStatus({ status, dimensions, error }: { status: TestStatus; dimensions?: number | null; error?: string }) {
+export function ConnectionStatus({ status, error }: { status: TestStatus; error?: string }) {
   const detail = error && error.length > MAX_ERROR_CHARS ? `${error.slice(0, MAX_ERROR_CHARS)}…` : error;
   const message = status === "testing"
     ? "Testing connection…"
     : status === "ok"
-      ? `Connection successful${dimensions ? ` (dims: ${dimensions})` : ""}`
+      ? "Connection successful"
       : status === "err"
         ? (detail || "Failed — check URL and API key")
         : "No status";

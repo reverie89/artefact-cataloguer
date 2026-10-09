@@ -56,8 +56,8 @@ use tokio::sync::oneshot;
 // here so external paths like `crate::ai::http_client` stay valid.
 pub(crate) use completion::ImageData;
 pub(crate) use transport::{
-    embeddings_root, fetch_advertised_models, http_client, response_text_checked,
-    trim_trailing_slash,
+    embeddings_root, fetch_advertised_embedding_models, fetch_advertised_models, http_client,
+    response_text_checked, trim_trailing_slash,
 };
 pub use types::{
     ApiFormat, ArtefactColumnSpec, ArtefactInput, CatalogueResult, ConnectionTest, FieldSpec,
@@ -196,7 +196,13 @@ async fn resolve_vocab_fields(
         Some(img) => Some(
             crate::embeddings::embed_image_with_retry(embedding_provider, img)
                 .await
-                .map_err(|e| format!("image embedding failed: {}", e.message()))?,
+                .map_err(|e| {
+                    format!(
+                        "image embedding failed: {} — the active embedding model must accept \
+                         image input; pick a multimodal embedding model",
+                        e.message()
+                    )
+                })?,
         ),
         None => None,
     };

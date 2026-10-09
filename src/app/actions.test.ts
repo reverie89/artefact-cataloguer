@@ -146,7 +146,7 @@ describe("parsePreFlightError", () => {
     s.fields = [];
     return s;
   }
-  const syncedEmbedding: VocabEmbeddingStatus = { status: "synced", providerId: "e1", model: "m", dimensions: 8, lastSyncedAt: "2026-10-09", rowsEmbedded: 3, lastError: null };
+  const syncedEmbedding: VocabEmbeddingStatus = { status: "synced", providerId: "e1", model: "m", lastSyncedAt: "2026-10-09", rowsEmbedded: 3, lastError: null };
   const vocabField = { id: "f1", name: "Material", type: "vocab" as const, layout: "row" as const, prompt: "", vocabSources: ["s1"] };
   const vocabSource = (embedding: VocabEmbeddingStatus) => ({
     id: "s1", name: "AAT", files: [], fields: [], ingestionField: null, labelField: null, badgeField: null, embedding,
@@ -167,7 +167,7 @@ describe("parsePreFlightError", () => {
   it("rejects a vocab field whose source has no synced embedding", () => {
     const s = buildSettings();
     s.fields = [vocabField];
-    s.vocabSources = [vocabSource({ status: "never", providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null })];
+    s.vocabSources = [vocabSource({ status: "never", providerId: null, model: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null })];
     const err = parsePreFlightError(s);
     expect(err).toMatch(/not yet embedded/);
     expect(err).toContain("Material");

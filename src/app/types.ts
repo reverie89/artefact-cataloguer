@@ -83,7 +83,6 @@ export interface VocabEmbeddingStatus {
   status: "never" | "stale" | "syncing" | "synced" | "error";
   providerId: string | null;
   model: string | null;
-  dimensions: number | null;
   lastSyncedAt: string | null;
   rowsEmbedded: number | null;
   lastError: string | null;
@@ -147,9 +146,11 @@ export interface EmbeddingProvider {
   apiKey: string;
   model: string;
   modelOptions?: string[];
+  /** Advertised model ids that accept image input, from the last Test
+   *  Connection — `undefined` when the catalog carries no input-modality
+   *  metadata (image capability unknown, no filtering/warning). */
+  imageInputModels?: string[];
   apiFormat?: EmbeddingApiFormat;
-  /** Vector width learned from a successful Test Connection embed call. */
-  dimensions?: number;
   connStatus?: "ok" | "err" | "untested";
 }
 

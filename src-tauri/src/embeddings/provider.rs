@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 use crate::ai::{
-    embeddings_root, fetch_advertised_models, http_client, response_text_checked,
+    embeddings_root, fetch_advertised_embedding_models, http_client, response_text_checked,
     trim_trailing_slash, ImageData,
 };
 
@@ -39,22 +39,18 @@ pub struct EmbeddingProvider {
     pub model: String,
     #[serde(rename = "apiFormat", default)]
     pub api_format: EmbeddingApiFormat,
-    /// User-declared capability hint: whether this provider's embedding model
-    /// accepts image input. A hint, not a guarantee — a rejected image call
-    /// still surfaces as a normal `Err` so the caller can fall back to
-    /// text-only for that row. Deserialized from settings and documented as the
-    /// precondition on [`embed_image`]; the caller-side gating check that
-    /// consumes it hasn't landed yet, hence `allow(dead_code)`.
-    #[serde(rename = "supportsImageInput", default)]
-    #[allow(dead_code)]
-    pub supports_image_input: bool,
 }
 
 #[derive(Serialize)]
 pub struct EmbeddingConnectionTest {
     pub ok: String,
     pub models: Vec<String>,
-    pub dimensions: u32,
+    /// Advertised ids that accept image input — `None` when the catalog
+    /// carries no input-modality metadata (Gemini, plain OpenAI), so image
+    /// capability is unknown rather than absent. The frontend filters the
+    /// model dropdown to this subset and warns on text-only picks.
+    #[serde(default)]
+    pub image_input: Option<Vec<String>>,
 }
 
 /// Embed a batch of texts against the given provider's `/embeddings`
@@ -148,11 +144,11 @@ pub(crate) async fn embed_texts(
     }
 }
 
-/// Embed one image (M5). Only meaningful when `provider.supports_image_input`
-/// is true (a genuinely multimodal embedding model) — the caller is
-/// responsible for that check; this function just makes the call and lets a
-/// text-only model's rejection surface as a normal `Err`, so the caller can
-/// fall back to text-only retrieval for that row.
+/// Embed one image against the provider's embeddings endpoint. Requires a
+/// genuinely multimodal (text + image) model: the pipeline calls this
+/// unconditionally whenever an artefact image exists, and a text-only model's
+/// rejection surfaces as a hard row error (see `ai::resolve_vocab_fields`) —
+/// there is no text-only fallback.
 ///
 /// Reuses the same base64 image encoding used for chat completions
 /// (`ai::build_completion_body`), but targets the embeddings endpoint. The
@@ -319,8 +315,8 @@ pub(crate) async fn embed_image_with_retry(
 
 /// Ping the embedding provider: list advertised models (best-effort — some
 /// gateways don't expose this) and, once a model has been picked, perform one
-/// real embed call, which is both the genuine connectivity check and how the
-/// vector width is learned. Two-phase so the UI can bootstrap the model
+/// real embed call, which is both the genuine connectivity check and proof the
+/// reply is a real embedding. Two-phase so the UI can bootstrap the model
 /// dropdown from a first call with no model selected: called with an empty
 /// `model`, this only lists models (mirrors `ai::test_connection`); called
 /// again once the user has picked one, it also validates that model via a
@@ -349,19 +345,26 @@ pub(crate) async fn check_connection(
         vec![("Authorization", format!("Bearer {}", provider.api_key))]
     };
     let mut models = Vec::new();
+    let mut image_input: Option<Vec<String>> = None;
     let mut list_error: Option<String> = None;
     // Best-effort listing: a failure here is only fatal when no model is
     // configured yet (see below) — with a model selected, the real embed call
     // that follows is the connectivity signal.
-    match fetch_advertised_models(&client, &models_url, &auth, gemini, true).await {
-        Ok(m) => models = m,
+    match fetch_advertised_embedding_models(&client, &models_url, &auth, gemini).await {
+        Ok((m, img)) => {
+            models = m;
+            image_input = img;
+        }
         Err(e) => list_error = Some(e),
     }
     if let Some(url) = fallback_url {
         if list_error.is_some() || models.is_empty() {
-            if let Ok(m) = fetch_advertised_models(&client, &url, &auth, false, true).await {
+            if let Ok((m, img)) =
+                fetch_advertised_embedding_models(&client, &url, &auth, false).await
+            {
                 if !m.is_empty() {
                     models = m;
+                    image_input = img;
                     list_error = None;
                 }
             }
@@ -377,7 +380,7 @@ pub(crate) async fn check_connection(
         return Ok(EmbeddingConnectionTest {
             ok: "Connected — model list loaded".to_string(),
             models,
-            dimensions: 0,
+            image_input,
         });
     }
     let vectors = match embed_texts(&provider, &["connection test".to_string()]).await {
@@ -396,13 +399,12 @@ pub(crate) async fn check_connection(
             return Err(e);
         }
     };
-    let dimensions = vectors.first().map(|v| v.len()).unwrap_or(0);
-    if dimensions == 0 {
+    if vectors.first().map(|v| v.len()).unwrap_or(0) == 0 {
         return Err("embedding call returned no vector".to_string());
     }
     Ok(EmbeddingConnectionTest {
         ok: "Connection successful".to_string(),
         models,
-        dimensions: dimensions as u32,
+        image_input,
     })
 }

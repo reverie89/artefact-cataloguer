@@ -75,8 +75,8 @@ pub fn cancel_vocab_sync(
 
 /// Ping the embedding provider: list advertised models (best-effort — some
 /// gateways don't expose this) and, once a model has been picked, perform one
-/// real embed call, which is both the genuine connectivity check and how the
-/// vector width is learned. Two-phase so the UI can bootstrap the model
+/// real embed call, which is both the genuine connectivity check and proof the
+/// reply is a real embedding. Two-phase so the UI can bootstrap the model
 /// dropdown from a first call with no model selected: called with an empty
 /// `model`, this only lists models (mirrors `ai::test_connection`); called
 /// again once the user has picked one, it also validates that model via a
@@ -93,6 +93,10 @@ pub async fn test_embedding_connection(
 /// gone. Emits `ac-vocab-sync` progress once per batch. Cancellable via
 /// `cancel_vocab_sync` — already-upserted batches stay committed, so a
 /// cancelled sync safely resumes from the diff next time.
+///
+/// `rebuild` (set by the renderer when the embedding model changed since the
+/// last sync) drops the table first so every row re-embeds in the new model's
+/// vector space — see `run_sync`.
 #[tauri::command]
 pub async fn sync_vocab_source(
     app: AppHandle,
@@ -101,6 +105,7 @@ pub async fn sync_vocab_source(
     provider: EmbeddingProvider,
     fields: Vec<VocabSourceField>,
     term_field: Option<String>,
+    rebuild: Option<bool>,
 ) -> Result<SyncResult, String> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
@@ -115,6 +120,7 @@ pub async fn sync_vocab_source(
         &provider,
         &fields,
         term_field.as_deref(),
+        rebuild.unwrap_or(false),
         &cancel_flag,
     )
     .await;

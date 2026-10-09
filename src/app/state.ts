@@ -67,7 +67,9 @@ export type EmbeddingProviderDraftEntry = {
   model: string;
   apiFormat: EmbeddingApiFormat;
   modelOptions: string[];
-  dimensions: number | null;
+  /** Advertised image-input ids from the last Test Connection; `null` when
+   *  unknown (no metadata or never tested). */
+  imageInputModels: string[] | null;
   connStatus: "ok" | "err" | "untested";
 };
 
@@ -857,7 +859,7 @@ export function embeddingProviderDraftFromSettings(s: Settings): EmbeddingProvid
       model: p.model,
       apiFormat: p.apiFormat ?? "openai",
       modelOptions: [...(p.modelOptions ?? [])],
-      dimensions: p.dimensions ?? null,
+      imageInputModels: p.imageInputModels ? [...p.imageInputModels] : null,
       connStatus: p.connStatus ?? "untested",
     })),
   };

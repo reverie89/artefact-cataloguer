@@ -1,19 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { findUnsyncedVocabField, findVocabFieldWithoutEmbedding, recordForAI } from "./ai";
+import {
+  embeddingModelOptions,
+  findUnsyncedVocabField,
+  findVocabFieldWithoutEmbedding,
+  recordForAI,
+  selectedModelLacksImageInput,
+} from "./ai";
 import { _DEF } from "../app/defaults";
-import type { ArtefactField, CatalogueField, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
+import type { ArtefactField, CatalogueField, EmbeddingProvider, Settings, VocabEmbeddingStatus, VocabSource } from "../app/types";
 
-function baseSettings(fields: CatalogueField[], vocabSources: VocabSource[]): Settings {
-  return { ..._DEF(), fields, vocabSources };
+function baseSettings(fields: CatalogueField[], vocabSources: VocabSource[], overrides: Partial<Settings> = {}): Settings {
+  return { ..._DEF(), fields, vocabSources, ...overrides };
 }
 
-function embedding(status: VocabEmbeddingStatus["status"]): VocabEmbeddingStatus {
-  return { status, providerId: null, model: null, dimensions: null, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
+function embedding(status: VocabEmbeddingStatus["status"], model: string | null = null): VocabEmbeddingStatus {
+  return { status, providerId: null, model, lastSyncedAt: null, rowsEmbedded: null, lastError: null };
 }
 
 function vocabField(id: string, name: string, vocabSources: string[]): CatalogueField {
   return { id, name, type: "vocab", layout: "row", prompt: "", vocabSources };
+}
+
+function embeddingProvider(id: string, model: string): EmbeddingProvider {
+  return { id, name: id, baseUrl: "https://example.test/v1/embeddings", apiKey: "k", model };
 }
 
 function source(id: string, name: string, opts: Partial<VocabSource>): VocabSource {
@@ -51,7 +61,13 @@ describe("findUnsyncedVocabField", () => {
       [vocabField("f1", "Material", ["v1"])],
       [source("v1", "Material Thesaurus", { embedding: embedding("never") })]
     );
-    expect(findUnsyncedVocabField(s)).toEqual({ fieldName: "Material", sourceName: "Material Thesaurus" });
+    expect(findUnsyncedVocabField(s)).toEqual({
+      fieldName: "Material",
+      sourceName: "Material Thesaurus",
+      reason: "not-synced",
+      embeddedModel: null,
+      activeModel: null,
+    });
   });
 
   it("flags a stale source (files/fields changed since the last sync)", () => {
@@ -68,6 +84,30 @@ describe("findUnsyncedVocabField", () => {
       [source("v1", "Material Thesaurus", { embedding: embedding("error") })]
     );
     expect(findUnsyncedVocabField(s)).not.toBeNull();
+  });
+
+  it("flags a synced source embedded with a different model than the active provider", () => {
+    const s = baseSettings(
+      [vocabField("f1", "Material", ["v1"])],
+      [source("v1", "Material Thesaurus", { embedding: embedding("synced", "old-model") })],
+      { embeddingProviders: [embeddingProvider("p1", "new-model")], activeEmbeddingProvider: "p1" }
+    );
+    expect(findUnsyncedVocabField(s)).toEqual({
+      fieldName: "Material",
+      sourceName: "Material Thesaurus",
+      reason: "model-changed",
+      embeddedModel: "old-model",
+      activeModel: "new-model",
+    });
+  });
+
+  it("accepts a synced source embedded with the active provider's model", () => {
+    const s = baseSettings(
+      [vocabField("f1", "Material", ["v1"])],
+      [source("v1", "Material Thesaurus", { embedding: embedding("synced", "same-model") })],
+      { embeddingProviders: [embeddingProvider("p1", "same-model")], activeEmbeddingProvider: "p1" }
+    );
+    expect(findUnsyncedVocabField(s)).toBeNull();
   });
 
   it("does not flag a fully synced source", () => {
@@ -94,7 +134,42 @@ describe("findUnsyncedVocabField", () => {
         source("v2", "Technique Thesaurus", { embedding: embedding("never") }),
       ]
     );
-    expect(findUnsyncedVocabField(s)).toEqual({ fieldName: "Technique", sourceName: "Technique Thesaurus" });
+    expect(findUnsyncedVocabField(s)).toEqual({
+      fieldName: "Technique",
+      sourceName: "Technique Thesaurus",
+      reason: "not-synced",
+      embeddedModel: null,
+      activeModel: null,
+    });
+  });
+});
+
+describe("embeddingModelOptions", () => {
+  it("passes the full list through when image-input metadata is unknown", () => {
+    expect(embeddingModelOptions(["a", "b"], null)).toEqual(["a", "b"]);
+  });
+
+  it("filters to the image-capable intersection when metadata is known", () => {
+    expect(embeddingModelOptions(["a", "b", "c"], ["b", "c", "unlisted"])).toEqual(["b", "c"]);
+  });
+
+  it("returns an empty list when no advertised model accepts image input", () => {
+    // No fallback: every full-list option would hard-fail the row anyway.
+    expect(embeddingModelOptions(["a", "b"], [])).toEqual([]);
+  });
+});
+
+describe("selectedModelLacksImageInput", () => {
+  it("is false without a selection or without metadata", () => {
+    expect(selectedModelLacksImageInput("", ["a"])).toBe(false);
+    expect(selectedModelLacksImageInput("a", null)).toBe(false);
+  });
+
+  it("is true only when the selected model is absent from the image-capable list", () => {
+    expect(selectedModelLacksImageInput("a", ["b"])).toBe(true);
+    // Known-empty metadata ("nothing accepts image input"): any pick lacks it.
+    expect(selectedModelLacksImageInput("a", [])).toBe(true);
+    expect(selectedModelLacksImageInput("a", ["a", "b"])).toBe(false);
   });
 });
 

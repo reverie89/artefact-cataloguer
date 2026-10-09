@@ -94,9 +94,8 @@ pub(crate) async fn response_text_checked(
 }
 
 /// GET a provider's `/models` endpoint and return the advertised model ids,
-/// sorted. Consumed by `ai::test_connection` (all models) and
-/// `embeddings::check_connection` (`embedding_only`); the parse/filter lives in
-/// the pure [`parse_advertised_models`] so it stays unit-testable.
+/// sorted. Consumed by `ai::test_connection`; the parse/filter lives in the
+/// pure [`parse_advertised_models`] so it stays unit-testable.
 pub(crate) async fn fetch_advertised_models(
     client: &reqwest::Client,
     models_url: &str,
@@ -116,12 +115,30 @@ pub(crate) async fn fetch_advertised_models(
     Ok(parse_advertised_models(&text, gemini, embedding_only))
 }
 
+/// GET a provider's `/models` endpoint for the embeddings picker: the
+/// embedding-filtered ids plus, when the catalog advertises input modalities,
+/// the subset that accepts image input (see
+/// [`parse_advertised_embedding_models`]). Consumed by
+/// `embeddings::check_connection`.
+pub(crate) async fn fetch_advertised_embedding_models(
+    client: &reqwest::Client,
+    models_url: &str,
+    auth: &[(&'static str, String)],
+    gemini: bool,
+) -> Result<(Vec<String>, Option<Vec<String>>), String> {
+    let mut req = client.get(models_url);
+    for (name, value) in auth {
+        req = req.header(*name, value.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let text = response_text_checked(resp, "response body read failed").await?;
+    Ok(parse_advertised_embedding_models(&text, gemini))
+}
+
 /// Pure parse + optional embedding filter over an advertised-models payload.
-/// Gemini answers `{"models":[{"name":"models/<id>"}]}` (prefix stripped so
-/// values match the id the request body expects); OpenAI-shaped APIs (OpenAI,
-/// Anthropic, OpenRouter) answer `{"data":[{"id":"..."}]}`. A JSON parse
-/// failure yields an empty list — listing is best-effort across gateways.
-///
 /// With `embedding_only`, an OpenAI-shaped entry is kept when its
 /// `architecture.output_modalities` contains `"embeddings"` (gateway metadata
 /// — catches ids like `gte-base`/`e5-*` that don't say so) or its id contains
@@ -135,7 +152,54 @@ pub(crate) fn parse_advertised_models(
     embedding_only: bool,
 ) -> Vec<String> {
     let v = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
-    let raw: Vec<(String, &Value)> = if gemini {
+    let raw = raw_catalog_entries(&v, gemini);
+    let mut models: Vec<String> = if !embedding_only {
+        raw.iter().map(|(id, _)| id.clone()).collect()
+    } else {
+        embedding_filtered_ids(&raw, gemini)
+    };
+    models.sort();
+    models
+}
+
+/// Pure parse of an advertised-models payload for the embeddings picker: the
+/// embedding-filtered ids as in [`parse_advertised_models`], plus the sorted
+/// subset that accepts image input. The subset is `None` when no entry in the
+/// catalog carries `architecture.input_modalities` (Gemini, plain OpenAI) —
+/// image capability is then unknown, and the frontend must neither filter the
+/// picker nor warn on it. Inside a metadata-bearing catalog an entry without
+/// the field counts as text-only.
+pub(crate) fn parse_advertised_embedding_models(
+    text: &str,
+    gemini: bool,
+) -> (Vec<String>, Option<Vec<String>>) {
+    let v = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    let raw = raw_catalog_entries(&v, gemini);
+    let mut models = embedding_filtered_ids(&raw, gemini);
+    models.sort();
+    let image_input = if gemini || raw.is_empty() {
+        None
+    } else if raw.iter().any(|(_, m)| input_modalities(m).is_some()) {
+        let mut ids: Vec<String> = raw
+            .iter()
+            .filter(|(id, m)| is_embedding_model(id, m, false) && advertises_image_input(m))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        Some(ids)
+    } else {
+        None
+    };
+    (models, image_input)
+}
+
+/// `(id, entry)` pairs of one advertised-models payload: Gemini answers
+/// `{"models":[{"name":"models/<id>"}]}` (prefix stripped so values match the
+/// id the request body expects); OpenAI-shaped APIs (OpenAI, Anthropic,
+/// OpenRouter) answer `{"data":[{"id":"..."}]}`. A JSON parse failure yields
+/// an empty list — listing is best-effort across gateways.
+fn raw_catalog_entries(v: &Value, gemini: bool) -> Vec<(String, &Value)> {
+    if gemini {
         v.get("models")
             .and_then(Value::as_array)
             .map(|arr| {
@@ -161,23 +225,39 @@ pub(crate) fn parse_advertised_models(
                     .collect()
             })
             .unwrap_or_default()
-    };
-    let mut models: Vec<String> = if !embedding_only {
-        raw.into_iter().map(|(id, _)| id).collect()
+    }
+}
+
+/// The embedding-filtered ids of one catalog, with the
+/// list-can't-go-blank fallback from [`parse_advertised_models`].
+fn embedding_filtered_ids(raw: &[(String, &Value)], gemini: bool) -> Vec<String> {
+    let kept: Vec<String> = raw
+        .iter()
+        .filter(|(id, m)| is_embedding_model(id, m, gemini))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if kept.is_empty() && !raw.is_empty() {
+        raw.iter().map(|(id, _)| id.clone()).collect()
     } else {
-        let kept: Vec<String> = raw
-            .iter()
-            .filter(|(id, m)| is_embedding_model(id, m, gemini))
-            .map(|(id, _)| id.clone())
-            .collect();
-        if kept.is_empty() && !raw.is_empty() {
-            raw.into_iter().map(|(id, _)| id).collect()
-        } else {
-            kept
-        }
-    };
-    models.sort();
-    models
+        kept
+    }
+}
+
+/// One entry's advertised `architecture.input_modalities`, when present.
+fn input_modalities(entry: &Value) -> Option<&Vec<Value>> {
+    entry
+        .get("architecture")
+        .and_then(|a| a.get("input_modalities"))
+        .and_then(Value::as_array)
+}
+
+/// True when the entry advertises `"image"` among its input modalities.
+fn advertises_image_input(entry: &Value) -> bool {
+    input_modalities(entry).is_some_and(|mods| {
+        mods.iter()
+            .filter_map(Value::as_str)
+            .any(|s| s.eq_ignore_ascii_case("image"))
+    })
 }
 
 /// Embedding-capability signal for one advertised-models entry: an id that
@@ -219,6 +299,59 @@ mod tests {
             parse_advertised_models(text, false, true),
             vec!["openai/text-embedding-3-small", "thenlper/gte-base"]
         );
+    }
+
+    #[test]
+    fn embedding_parse_reports_image_input_subset_when_metadata_present() {
+        // OpenRouter-shaped: a text-only embedding model (kept by metadata,
+        // excluded from the image subset), an image-capable one, and a chat
+        // model with image input that is no embedding model at all.
+        let text = r#"{"data":[
+            {"id":"qwen/qwen3-embedding-8b","architecture":{"output_modalities":["embeddings"],"input_modalities":["text"]}},
+            {"id":"voyageai/voyage-multimodal-3.5","architecture":{"output_modalities":["embeddings"],"input_modalities":["text","image"]}},
+            {"id":"openai/gpt-4o","architecture":{"output_modalities":["text"],"input_modalities":["text","image"]}}
+        ]}"#;
+        let (models, image) = parse_advertised_embedding_models(text, false);
+        assert_eq!(
+            models,
+            vec!["qwen/qwen3-embedding-8b", "voyageai/voyage-multimodal-3.5"]
+        );
+        assert_eq!(
+            image,
+            Some(vec!["voyageai/voyage-multimodal-3.5".to_string()])
+        );
+    }
+
+    #[test]
+    fn embedding_parse_image_input_unknown_without_metadata() {
+        // Plain OpenAI-shaped /models: no architecture block at all, so image
+        // capability is unknown rather than "none".
+        let text = r#"{"data":[{"id":"text-embedding-3-large"},{"id":"text-embedding-3-small"}]}"#;
+        let (models, image) = parse_advertised_embedding_models(text, false);
+        assert_eq!(
+            models,
+            vec!["text-embedding-3-large", "text-embedding-3-small"]
+        );
+        assert_eq!(image, None);
+    }
+
+    #[test]
+    fn embedding_parse_image_input_unknown_for_gemini() {
+        let text = r#"{"models":[{"name":"models/gemini-embedding-001"}]}"#;
+        let (_, image) = parse_advertised_embedding_models(text, true);
+        assert_eq!(image, None);
+    }
+
+    #[test]
+    fn embedding_parse_missing_input_modalities_counts_as_text_only() {
+        // Metadata-bearing catalog where one entry omits input_modalities: it
+        // must not leak into the image-capable subset.
+        let text = r#"{"data":[
+            {"id":"a/no-mods","architecture":{"output_modalities":["embeddings"]}},
+            {"id":"c/image-embed","architecture":{"output_modalities":["embeddings"],"input_modalities":["image"]}}
+        ]}"#;
+        let (_, image) = parse_advertised_embedding_models(text, false);
+        assert_eq!(image, Some(vec!["c/image-embed".to_string()]));
     }
 
     #[test]

@@ -1,10 +1,10 @@
 import { useRef } from "react";
-import { ChevronDown, ChevronRight, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
+import { ChevronDown, ChevronRight, AlertTriangle, Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { embeddingProviderDraftFromSettings, type AppState, type EmbeddingProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
 import type { EmbeddingApiFormat, EmbeddingProvider } from "../../app/types";
-import { embeddingProviderEndpoints } from "../../lib/ai";
+import { embeddingModelOptions, embeddingProviderEndpoints, selectedModelLacksImageInput } from "../../lib/ai";
 import { CardActions } from "./CardActions";
 import { Field, FieldSelect, FieldSelectOption } from "./FormControls";
 import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
@@ -25,7 +25,7 @@ interface Props {
 /** True when a single draft entry differs from its persisted embedding
  *  provider — drives the per-row "unsaved" badge. Mirrors entryDiffers in
  *  VisionProvidersSection.tsx. Only user-authored fields are compared:
- *  `modelOptions`/`dimensions`/`connStatus` are machine-written by Test
+ *  `modelOptions`/`imageInputModels`/`connStatus` are machine-written by Test
  *  Connection and must not flag the row (see isTabDirty in drafts.ts). */
 function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: EmbeddingProvider): boolean {
   return fieldsDiffer(
@@ -38,7 +38,7 @@ function entryDiffers(e: EmbeddingProviderDraft["providers"][number], p: Embeddi
       model: p.model,
       apiFormat: (p.apiFormat ?? "openai") as EmbeddingApiFormat,
       modelOptions: p.modelOptions ?? [],
-      dimensions: p.dimensions ?? null,
+      imageInputModels: p.imageInputModels ?? null,
       connStatus: p.connStatus ?? "untested",
     },
     ["name", "baseUrl", "apiKey", "model", "apiFormat"],
@@ -68,8 +68,9 @@ export function EmbeddingProvidersSection({ state, actions }: Props) {
       <div className="text-muted-foreground text-sm px-0.5 pb-1.5 leading-relaxed">
         Configure the models used to embed vocabulary terms and, at parse time, artefact descriptions and the artefact image
         for shortlisted retrieval. Embedding models MUST be multimodal (text + image) — the per-row pipeline embeds the
-        artefact image unconditionally, so a text-only model hard-fails that row. Embeddings can run on a different vendor
-        than the vision provider above — e.g. a local multimodal model here alongside a hosted vision provider.
+        artefact image unconditionally, so a text-only model hard-fails that row. Switching models marks vocabulary syncs
+        stale — re-sync sources after changing the model. Embeddings can run on a different vendor than the vision provider
+        above — e.g. a local multimodal model here alongside a hosted vision provider.
       </div>
 
       <Card className="gap-0 overflow-hidden p-0">
@@ -139,8 +140,23 @@ interface RowProps {
 }
 
 function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
-  const modelOptions = entry.modelOptions.includes(entry.model) || !entry.model ? entry.modelOptions : [entry.model, ...entry.modelOptions];
+  // Strict image-capable filter (empty stays empty — see embeddingModelOptions),
+  // then keep a drifted saved model visible so the warning below can explain it.
+  const usable = embeddingModelOptions(entry.modelOptions, entry.imageInputModels);
+  const modelOptions = usable.includes(entry.model) || !entry.model ? usable : [entry.model, ...usable];
   const modelsReady = modelOptions.length > 0;
+  const noImageCapable = entry.imageInputModels !== null && usable.length === 0;
+  const lacksImageInput = selectedModelLacksImageInput(entry.model, entry.imageInputModels);
+  const modelWarning = noImageCapable || lacksImageInput ? (
+    <span className="flex items-start gap-1.5 text-amber-600 dark:text-amber-400">
+      <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+      <span>
+        {noImageCapable
+          ? "Connected, but none of this provider's embedding models accepts image input, which processing requires — point this provider at an image-capable endpoint or add one."
+          : "This model advertises text-only input — it can't embed the artefact image, so processing will fail. Pick a model with image input."}
+      </span>
+    </span>
+  ) : undefined;
   const id = entry.id;
   const nameDisplay = entry.name || "Untitled provider";
 
@@ -218,7 +234,7 @@ function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvK
               {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
               <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
             </Button>
-            <ConnectionStatus status={testStatus} dimensions={entry.dimensions} error={testError} />
+            <ConnectionStatus status={testStatus} error={testError} />
           </div>
 
           <FieldSelect
@@ -227,7 +243,12 @@ function EmbeddingProviderRow({ entry, grid, testStatus, testError, showEmbProvK
             onChange={(v) => actions.setEmbProvModel(id, v)}
             disabled={!modelsReady}
             ariaLabel="Model"
-            placeholder={modelsReady ? (entry.model ? undefined : "Select a model…") : "Available after Test Connection"}
+            hint={modelWarning}
+            placeholder={
+              modelsReady
+                ? entry.model ? undefined : "Select a model…"
+                : noImageCapable ? "No image-capable embedding models" : "Available after Test Connection"
+            }
           >
             {modelOptions.map((m) => (
               <FieldSelectOption key={m} value={m}>{m}</FieldSelectOption>

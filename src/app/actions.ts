@@ -1452,8 +1452,11 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     };
     await markStatus({ ...source.embedding, status: "syncing", providerId: provider.id, model: provider.model });
     dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: 0, rowsTotal: 0 });
+    // An index built with another model is invalid in the new model's vector
+    // space — rebuild drops the table so every row re-embeds (run_sync).
+    const rebuild = !!source.embedding.model && source.embedding.model !== provider.model;
     try {
-      const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, (ev) => {
+      const result = await vocabLib.syncVocabSource(sourceId, provider, source.fields, source.ingestionField, rebuild, (ev) => {
         dispatch({ type: "SET_VOCAB_SYNC_PROGRESS", id: sourceId, rowsDone: ev.rowsDone, rowsTotal: ev.rowsTotal, fileProgress: ev.fileProgress });
       });
       await patchNow((s) =>
@@ -1466,7 +1469,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
             return { ...f, ...(rowCountLast !== undefined && { rowCountLast }), ...(rowCountSyncedLast !== undefined && { rowCountSyncedLast }) };
           });
           const synced = {
-            status: "synced" as const, providerId: provider.id, model: provider.model, dimensions: result.dimensions,
+            status: "synced" as const, providerId: provider.id, model: provider.model,
             lastSyncedAt: new Date().toISOString(), rowsEmbedded: result.totalRows, lastError: null,
           };
           // If the sync-relevant inputs drifted mid-pass (a file added or
@@ -1940,7 +1943,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const id = gid();
     patchEmbProvDraft((d) => ({
       ...d,
-      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], dimensions: null, connStatus: "untested" }],
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], imageInputModels: null, connStatus: "untested" }],
     }));
     dispatch({ type: "TOGGLE_EMB_PROV", id });
   }, [patchEmbProvDraft, dispatch]);
@@ -1953,7 +1956,12 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (k === "baseUrl" || k === "apiKey") {
       // Editing credentials invalidates any prior test, same as chat providers.
       const saved = state.settings.embeddingProviders.find((p) => p.id === id);
-      patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({ ...entry, modelOptions: saved?.modelOptions ? [...saved.modelOptions] : [], dimensions: null, connStatus: "untested" })));
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry) => ({
+        ...entry,
+        modelOptions: saved?.modelOptions ? [...saved.modelOptions] : [],
+        imageInputModels: saved?.imageInputModels ? [...saved.imageInputModels] : null,
+        connStatus: "untested",
+      })));
       dispatch({ type: "CLEAR_EMB_PROV_STATUS", id });
     }
   }, [patchEmbProvDraft, mapEmbDraftEntry, dispatch, state.settings.embeddingProviders]);
@@ -1988,7 +1996,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     try {
       const res = await testEmbeddingConnection({ id: "", name, baseUrl, apiKey, model, apiFormat });
       const nextModel = res.models.includes(model) ? model : "";
-      patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({ ...entry2, model: nextModel, modelOptions: res.models, dimensions: res.dimensions, connStatus: "ok" })));
+      patchEmbProvDraft(mapEmbDraftEntry(id, (entry2) => ({
+        ...entry2,
+        model: nextModel,
+        modelOptions: res.models,
+        imageInputModels: res.image_input ?? null,
+        connStatus: "ok",
+      })));
       dispatch({ type: "SET_EMB_PROV_STATUS", id, test: "ok" });
     } catch (e) {
       console.error("[artefact] test embedding connection failed", e);
@@ -2019,7 +2033,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     const persistedEntry: EmbeddingProvider = {
       id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
       model: entry.model, apiFormat: entry.apiFormat,
-      modelOptions: entry.modelOptions, dimensions: entry.dimensions ?? undefined, connStatus: entry.connStatus,
+      modelOptions: entry.modelOptions, imageInputModels: entry.imageInputModels ?? undefined,
+      connStatus: entry.connStatus,
     };
     try {
       await patchNow((s) => ({
@@ -2046,7 +2061,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({
         type: "PATCH_EMB_PROVIDER_DRAFT",
         patch: mapEmbDraftEntry(id, () => ({
-          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], dimensions: null, connStatus: "untested",
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], imageInputModels: null, connStatus: "untested",
         })),
       });
       return;
@@ -2058,7 +2073,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         providers: d.providers.map((e) => (e.id === id ? {
           id: saved.id, name: saved.name, baseUrl: saved.baseUrl, apiKey: saved.apiKey,
           model: saved.model, apiFormat: saved.apiFormat ?? "openai",
-          modelOptions: [...(saved.modelOptions ?? [])], dimensions: saved.dimensions ?? null,
+          modelOptions: [...(saved.modelOptions ?? [])],
+          imageInputModels: saved.imageInputModels ? [...saved.imageInputModels] : null,
           connStatus: saved.connStatus ?? "untested",
         } : e)),
       }),
@@ -2333,12 +2349,15 @@ export function parsePreFlightError(settings: Settings): string | null {
   if (!activeProvider(settings)) {
     return "An active AI provider is required — add one in Settings → Model Providers.";
   }
-  // A vocab field whose source hasn't been synced yet resolves to neither
-  // the full list nor a shortlist — it would silently prompt as
-  // unconstrained free text (see findUnsyncedVocabField). Fail the whole
-  // run up front rather than producing quietly-wrong results.
+  // A vocab field whose source isn't ready resolves to neither the full list
+  // nor a shortlist — it would silently prompt as unconstrained free text
+  // (see findUnsyncedVocabField). Fail the whole run up front rather than
+  // producing quietly-wrong results.
   const unsynced = findUnsyncedVocabField(settings);
   if (unsynced) {
+    if (unsynced.reason === "model-changed") {
+      return `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") was embedded with ${unsynced.embeddedModel ?? "an unknown model"}, but the active embedding model is ${unsynced.activeModel ?? "none"} — re-sync it in Settings → Vocabulary Lists (or switch the embedding model back) before parsing.`;
+    }
     return `Vocabulary source "${unsynced.sourceName}" (used by "${unsynced.fieldName}") is not yet embedded — sync it in Settings → Vocabulary Lists before parsing, or remove it from this field.`;
   }
   // Vocab fields are resolved purely by embedding search (no LLM), so they

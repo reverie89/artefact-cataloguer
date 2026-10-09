@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StagedVocabFile } from "../lib/vocab";
 import type { Settings, VocabSource } from "./types";
 import {
+  embeddingModelStale,
   emptyEmbedding,
   markStaleIfSynced,
   newVocabSource,
@@ -48,6 +49,27 @@ describe("markStaleIfSynced", () => {
     for (const status of ["never", "stale", "syncing", "error"] as const) {
       const e = { ...emptyEmbedding(), status };
       expect(markStaleIfSynced(e)).toBe(e);
+    }
+  });
+});
+
+describe("embeddingModelStale", () => {
+  it("is true when a synced index was embedded with another model", () => {
+    const e = { ...emptyEmbedding(), status: "synced" as const, model: "old-model" };
+    expect(embeddingModelStale(e, "new-model")).toBe(true);
+  });
+
+  it("is false when the model matches, is unknown, or none is active", () => {
+    const e = { ...emptyEmbedding(), status: "synced" as const, model: "m" };
+    expect(embeddingModelStale(e, "m")).toBe(false);
+    expect(embeddingModelStale({ ...e, model: null }, "m")).toBe(false);
+    expect(embeddingModelStale(e, null)).toBe(false);
+  });
+
+  it("is false for any non-synced status", () => {
+    for (const status of ["never", "stale", "syncing", "error"] as const) {
+      const e = { ...emptyEmbedding(), status, model: "old-model" };
+      expect(embeddingModelStale(e, "new-model")).toBe(false);
     }
   });
 });
