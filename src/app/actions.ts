@@ -11,7 +11,7 @@ import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
 import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
-import type { ApiFormat, AiResults, ArtefactColumnMode, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
+import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
 import { parseArtefactFile } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
@@ -243,10 +243,6 @@ export interface AppActions {
   /** Reorder artefact columns to the given id sequence (result of a drag). Persists immediately. */
   reorderAF(ids: string[]): Promise<void>;
   updateAF(id: string, key: EditableArtefactFieldKey, value: string): void;
-  /** Switch how uploaded-spreadsheet columns are identified (header text vs a
-   *  per-field Excel letter). Persists immediately — it applies to the whole
-   *  artefact file, not one row's content. */
-  setArtefactColumnMode(mode: ArtefactColumnMode): Promise<void>;
   removeAF(id: string): Promise<void>;
   /** Append an empty artefact-column row to the draft (expanded). Persisted on per-card Save. */
   startAddAF(): void;
@@ -612,14 +608,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       const columnProblems: string[] = [];
       const readErrors: string[] = [];
       const validEntries: ParsedStore[string][] = [];
-      const letterMode = (state.settings.artefactColumnMode ?? "name") === "letter";
 
       for (const it of items) {
         const tag = multi ? `${it.file.name}: ` : "";
         try {
           const parsed = await parseArtefactFile(it.file, state.settings);
           const errs = [
-            ...parsed.missingColumns.map((c) => ({ message: `${tag}${letterMode ? "No spreadsheet column assigned for" : "Missing required column"}: ${c}` })),
+            ...parsed.missingColumns.map((c) => ({ message: `${tag}Missing required column: ${c}` })),
             ...parsed.columnProblems.map((m) => ({ message: `${tag}${m}` })),
           ];
           if (errs.length) {
@@ -2143,13 +2138,13 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     } catch { console.error("[artefact] reorderAF: save failed"); }
   }, [patchNow, patchArtefactDraft]);
   const updateAF = useCallback((id: string, key: EditableArtefactFieldKey, value: string) => {
-    // The Include-for-AI / Include-in-Export booleans are persisted on
-    // ArtefactField, but the Segmented toggles emit the string "true"/"false" —
-    // coerce here so the draft carries the typed value. The column letter is
-    // normalized to the canonical uppercase form; name/description/prompt stay
-    // string passthroughs.
+    // The Include-for-AI / Include-in-Export / use-column-letter booleans are
+    // persisted on ArtefactField, but the Segmented toggles emit the string
+    // "true"/"false" — coerce here so the draft carries the typed value. The
+    // column letter is normalized to the canonical uppercase form;
+    // name/description/prompt stay string passthroughs.
     const coerced =
-      key === "includeForAI" || key === "includeInExport" ? value === "true"
+      key === "includeForAI" || key === "includeInExport" || key === "useColumnLetter" ? value === "true"
       : key === "column" ? value.trim().toUpperCase()
       : value;
     patchArtefactDraft((d) => ({ ...d, artefactFields: d.artefactFields.map((f) => (f.id === id ? { ...f, [key]: coerced } : f)) }));
@@ -2173,17 +2168,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   }, [state.artefactDraft, state.settings, patchNow, patchArtefactDraft, confirmDelete]);
   const startAddAF = useCallback(() => {
     const id = gid();
-    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" }] }));
+    patchArtefactDraft((d) => ({ ...d, artefactFields: [...d.artefactFields, { id, name: "", description: "", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" }] }));
     dispatch({ type: "TOGGLE_AF", id });
   }, [patchArtefactDraft, dispatch]);
-
-  // Column identification mode applies to the whole artefact file (not one
-  // row's content), so it persists immediately — same precedent as reorderAF.
-  const setArtefactColumnMode = useCallback(async (mode: ArtefactColumnMode) => {
-    try {
-      await patchNow((s) => ({ ...s, artefactColumnMode: mode }));
-    } catch { console.error("[artefact] setArtefactColumnMode: save failed"); }
-  }, [patchNow]);
 
   // --- per-card save/discard (artefact columns) ---
   // One column's content (name/description/prompt) persists or reverts on its
@@ -2200,7 +2187,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       // missing key never survives into persisted settings. Judged against
       // reducer-current columns so the Save composes with any write that
       // landed while the card was being edited.
-      const normalize = (f: ArtefactField) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "", column: f.column ?? "" });
+      const normalize = (f: ArtefactField) => ({ ...f, description: f.description ?? "", prompt: f.prompt ?? "", useColumnLetter: f.useColumnLetter ?? false, column: f.column ?? "" });
       await patchNow((s) => {
         const base = s.artefactFields || _DEF_AF;
         const artefactFields = base.some((f) => f.id === id)
@@ -2330,7 +2317,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
     startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, saveProviders, discardProviders, deleteProv, setActiveProv, saveProvCard, discardProvCard,
     toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
-    toggleAF, reorderAF, updateAF, setArtefactColumnMode, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
+    toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
   };
 }

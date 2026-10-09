@@ -5,8 +5,8 @@ import { columnLetterToIndex, parseArtefactFile } from "./spreadsheet";
 import { _DEF } from "../app/defaults";
 import type { Settings } from "../app/types";
 
-/** Minimal settings: only artefactFields/artefactColumnMode are consulted by
- *  parseArtefactFile. Name mode by default. */
+/** Minimal settings: only artefactFields is consulted by parseArtefactFile.
+ *  Header-text identification (the default) for every field. */
 function settings(fieldNames: string[]): Settings {
   return {
     ..._DEF(),
@@ -17,16 +17,18 @@ function settings(fieldNames: string[]): Settings {
       prompt: "",
       includeForAI: true,
       includeInExport: true,
+      useColumnLetter: false,
       column: "",
     })),
   };
 }
 
-/** Letter-mode settings: each configured field bound to an Excel column letter. */
-function letterSettings(bindings: { name: string; column: string }[]): Settings {
+/** Settings with per-field Identify By bindings: a `column` + useColumnLetter
+ *  (default true for this factory) reads positionally; useColumnLetter false
+ *  with a stored letter exercises the ignored-binding path. */
+function boundSettings(bindings: { name: string; column?: string; useColumnLetter?: boolean }[]): Settings {
   return {
     ..._DEF(),
-    artefactColumnMode: "letter",
     artefactFields: bindings.map((b, i) => ({
       id: `af${i + 1}`,
       name: b.name,
@@ -34,7 +36,8 @@ function letterSettings(bindings: { name: string; column: string }[]): Settings 
       prompt: "",
       includeForAI: true,
       includeInExport: true,
-      column: b.column,
+      useColumnLetter: b.useColumnLetter ?? true,
+      column: b.column ?? "",
     })),
   };
 }
@@ -172,43 +175,98 @@ describe("parseArtefactFile", () => {
     const byName = await parseArtefactFile(file, settings(["Material", "Title"]));
     expect(byName.columnProblems).toEqual(["Duplicate column header: Material"]);
 
-    const byLetter = await parseArtefactFile(file, letterSettings([
+    const byLetter = await parseArtefactFile(file, boundSettings([
       { name: "Material", column: "A" },
       { name: "Title", column: "C" },
     ]));
     expect(byLetter.columnProblems).toEqual(["Duplicate column header: Material"]);
   });
+
+  it("resolves rich-text header cells to their plain text", async () => {
+    // Real-world case: headers whose tail is bold/red (e.g. "[NOT Published
+    // info]") are stored as rich-text runs; String() of those cells used to
+    // yield "[object Object]", breaking matching and inventing duplicates.
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    ws.getCell("A1").value = "Material";
+    ws.getCell("B1").value = {
+      richText: [
+        { text: "Hist. Signi " },
+        { text: "[NOT Published info]", font: { bold: true, color: { argb: "FFFF0000" } } },
+      ],
+    };
+    ws.addRow(["bronze", "fine piece"]);
+    const buf = await wb.xlsx.writeBuffer();
+    const file = new File([buf], "rich.xlsx");
+
+    const { rows, missingColumns, columnProblems } = await parseArtefactFile(
+      file,
+      settings(["Material", "Hist. Signi [NOT Published info]"]),
+    );
+
+    expect(missingColumns).toEqual([]);
+    expect(columnProblems).toEqual([]);
+    expect(rows[0].record).toEqual({ Material: "bronze", "Hist. Signi [NOT Published info]": "fine piece" });
+  });
 });
 
-describe("parseArtefactFile in letter mode", () => {
-  it("reads columns positionally and keys records by configured names", async () => {
+describe("parseArtefactFile with column bindings", () => {
+  it("reads Column Letter fields positionally and Header Text fields by name", async () => {
     const file = await xlsxFile([
-      ["Some Header A", "Some Header B", "Some Header C"],
+      ["Object Name", "Some Header B", "Title"],
       ["Cup", "ignored", "Lee"],
     ]);
 
-    // Deliberately out of sheet order: Title reads column C, Object Name reads A.
-    const { rows, missingColumns, columnProblems } = await parseArtefactFile(file, letterSettings([
+    // Title is identified by Column Letter C; Object Name by Header Text.
+    const { rows, missingColumns, columnProblems } = await parseArtefactFile(file, boundSettings([
       { name: "Title", column: "C" },
-      { name: "Object Name", column: "A" },
+      { name: "Object Name", useColumnLetter: false },
     ]));
 
     expect(missingColumns).toEqual([]);
     expect(columnProblems).toEqual([]);
-    // Bound columns are keyed by the configured name; the unbound middle column
-    // keeps its header text.
+    // Letter fields are keyed by the configured name; header-text fields by
+    // the sheet's own header; unbound columns keep their header text.
     expect(rows[0].record).toEqual({ Title: "Lee", "Object Name": "Cup", "Some Header B": "ignored" });
   });
 
-  it("excludes the bound image column from records but keeps the row hint", async () => {
+  it("flags a Column Letter field with no letter assigned", async () => {
+    const file = await xlsxFile([["Object Name"], ["Cup"]]);
+
+    const { missingColumns, columnProblems } = await parseArtefactFile(file, boundSettings([
+      { name: "Object Name", useColumnLetter: false },
+      { name: "Unassigned", column: "" },
+    ]));
+
+    expect(missingColumns).toEqual([]);
+    expect(columnProblems).toEqual(["No spreadsheet column assigned for: Unassigned"]);
+  });
+
+  it("ignores a stored letter when the field identifies by Header Text", async () => {
+    // The letter would match ("B" header), but the field identifies by Header
+    // Text — and no header carries its configured name, so it is missing.
+    const file = await xlsxFile([
+      ["B"],
+      ["Lee"],
+    ]);
+
+    const { missingColumns, columnProblems } = await parseArtefactFile(file, boundSettings([
+      { name: "Material", column: "A", useColumnLetter: false },
+    ]));
+
+    expect(missingColumns).toEqual(["Material"]);
+    expect(columnProblems).toEqual([]);
+  });
+
+  it("excludes a bound image column from records but keeps the row hint", async () => {
     const file = await xlsxFile([
       ["Object Name", "Picture"],
       ["Cup", "(image present)"],
       ["Bowl", ""],
     ]);
 
-    const { rows, imageRowIndices, discardedColumns } = await parseArtefactFile(file, letterSettings([
-      { name: "Object Name", column: "A" },
+    const { rows, imageRowIndices, discardedColumns } = await parseArtefactFile(file, boundSettings([
+      { name: "Object Name", useColumnLetter: false },
       { name: "Image", column: "B" },
     ]));
 
@@ -217,22 +275,27 @@ describe("parseArtefactFile in letter mode", () => {
     expect(discardedColumns["Image"]).toBe("image bytes (sent to the AI separately)");
   });
 
-  it("reports unassigned, invalid, out-of-range, and colliding letter bindings", async () => {
+  it("reports invalid, out-of-range, colliding, and overlapping bindings", async () => {
     const file = await xlsxFile([
-      ["A", "B"],
+      ["Object Name", "B"],
       ["Cup", "Lee"],
     ]);
 
-    const { missingColumns, columnProblems } = await parseArtefactFile(file, letterSettings([
+    const { missingColumns, columnProblems } = await parseArtefactFile(file, boundSettings([
       { name: "Assigned", column: "B" },
-      { name: "Unassigned", column: "" },
       { name: "Invalid", column: "1A" },
       { name: "Out of range", column: "AB" },
       { name: "Collides", column: "b" },
+      { name: "B", useColumnLetter: false }, // name-matches column B, already claimed
     ]));
 
-    expect(missingColumns).toEqual(["Unassigned", "Invalid", "Out of range"]);
-    expect(columnProblems).toEqual(['Fields "Assigned" and "Collides" are both bound to column B']);
+    expect(missingColumns).toEqual([]);
+    expect(columnProblems).toEqual([
+      'Column "1A" is not a valid Excel column letter for: Invalid',
+      'Column "AB" is outside the sheet for: Out of range',
+      'Fields "Assigned" and "Collides" are both bound to column B',
+      'Fields "Assigned" and "B" both resolve to the same column',
+    ]);
   });
 });
 

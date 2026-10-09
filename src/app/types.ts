@@ -33,8 +33,11 @@ export interface ArtefactField {
   /** Whether this column is emitted as a leading column in xlsx export,
    *  before the catalogue fields. Default true (opt-out). */
   includeInExport: boolean;
-  /** Excel column letter ("A", "AB") this column is read from when settings
-   *  use letter-based identification. Empty in name-based mode. */
+  /** Identify this column by its Column Letter instead of its Header Text.
+   *  Default false (match the header name). */
+  useColumnLetter: boolean;
+  /** Excel column letter ("A", "AB") this column is read from when
+   *  useColumnLetter is on; ignored (and optional) otherwise. */
   column: string;
 }
 
@@ -150,11 +153,6 @@ export interface EmbeddingProvider {
   connStatus?: "ok" | "err" | "untested";
 }
 
-/** How uploaded-spreadsheet columns are identified: by row-1 header text
- *  ("name", whitespace-tolerant) or by a fixed Excel letter bound per field
- *  ("letter"). */
-export type ArtefactColumnMode = "name" | "letter";
-
 /** The whole persisted settings object. */
 export interface Settings {
   /** The unified artefact-analysis system prompt: the museum-cataloguing persona
@@ -178,7 +176,6 @@ export interface Settings {
   activeProvider: string | null;
   embeddingProviders: EmbeddingProvider[];
   activeEmbeddingProvider: string | null;
-  artefactColumnMode: ArtefactColumnMode;
   artefactFields: ArtefactField[];
 }
 

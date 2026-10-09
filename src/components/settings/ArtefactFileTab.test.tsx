@@ -40,34 +40,26 @@ describe("ArtefactFileTab System Prompt reset", () => {
   });
 });
 
-describe("ArtefactFileTab column identification mode", () => {
-  it("shows the per-field letter binding only in letter mode, and persists mode changes immediately", async () => {
-    const user = userEvent.setup();
-    const modeSpy = vi.fn();
-    const actions = new Proxy<AppActions>({} as AppActions, {
-      get: (_t, prop) => {
-        if (prop === "setArtefactColumnMode") return modeSpy;
-        return () => vi.fn();
-      },
-    });
-    renderWith(
-      {
-        settings: { ...initialState.settings, artefactColumnMode: "letter" },
-        // Expand the first default column (Image) so its editor is visible.
-        artefactFieldExpanded: { af1: true },
-      },
-      actions,
-    );
+describe("ArtefactFileTab per-column Identify By toggle", () => {
+  const expandedAf1 = { artefactFieldExpanded: { af1: true } };
 
-    expect(screen.getByPlaceholderText("e.g. C")).toBeInTheDocument();
+  it("shows the Header Text input by default and hides the Column Letter input", () => {
+    renderWith(expandedAf1, makeActions(vi.fn(), vi.fn()));
 
-    await user.click(screen.getByRole("button", { name: "Column name" }));
-    expect(modeSpy).toHaveBeenCalledWith("name");
+    expect(screen.getByText(/Must match a column header in the uploaded spreadsheet/)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("e.g. C")).not.toBeInTheDocument();
   });
 
-  it("hides the letter binding in name mode", () => {
-    renderWith({ artefactFieldExpanded: { af1: true } }, makeActions(vi.fn(), vi.fn()));
+  it("swaps to the Column Letter input when the field identifies by letter", () => {
+    const settings = {
+      ...initialState.settings,
+      artefactFields: initialState.settings.artefactFields.map((f) =>
+        f.id === "af1" ? { ...f, useColumnLetter: true } : f
+      ),
+    };
+    renderWith({ ...expandedAf1, settings }, makeActions(vi.fn(), vi.fn()));
 
-    expect(screen.queryByPlaceholderText("e.g. C")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g. C")).toBeInTheDocument();
+    expect(screen.queryByText(/Must match a column header in the uploaded spreadsheet/)).not.toBeInTheDocument();
   });
 });

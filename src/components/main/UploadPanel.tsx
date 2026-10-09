@@ -24,7 +24,6 @@ export function UploadPanel({ state, actions }: Props) {
   // parse loop must not be alive: startParse would otherwise dispatch stale
   // aiResults/fieldSelections after the reset clears them (see startParse).
   const canReset = (!noFiles || state.parseStatus !== "idle") && !isActive;
-  const letterMode = (state.settings.artefactColumnMode ?? "name") === "letter";
   const reqCols = (state.settings.artefactFields || _DEF_AF).map((af) => af.name).join(", ");
   const queueLabel =
     files.length === 0
@@ -104,9 +103,7 @@ export function UploadPanel({ state, actions }: Props) {
               <div key={i} className="text-destructive pl-1 mb-0.5 text-sm">· {err.message}</div>
             ))}
             <div className="text-muted-foreground mt-1.5 border-destructive/20 border-t pt-1.5 text-[13px]">
-              {letterMode
-                ? <>Bind each column&apos;s letter in <span className="text-foreground text-[13px]">Settings → Artefact File</span>.</>
-                : <>Required columns: <span className="text-foreground text-[13px]">{reqCols}</span></>}
+              Required columns: <span className="text-foreground text-[13px]">{reqCols}</span>
             </div>
           </div>
         </Card>

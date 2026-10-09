@@ -76,8 +76,8 @@ describe("composeExportTable", () => {
   function buildSettings(opts: { materialExport?: boolean; imageExport?: boolean } = {}): Settings {
     const s = _DEF();
     s.artefactFields = [
-      { id: "af-m", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: opts.materialExport ?? true, column: "" },
-      { id: "af-i", name: "Image", description: "", prompt: "", includeForAI: true, includeInExport: opts.imageExport ?? true, column: "" },
+      { id: "af-m", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: opts.materialExport ?? true, useColumnLetter: false, column: "" },
+      { id: "af-i", name: "Image", description: "", prompt: "", includeForAI: true, includeInExport: opts.imageExport ?? true, useColumnLetter: false, column: "" },
     ];
     s.fields = [{ id: "fp", name: "Place", type: "open", layout: "row", prompt: "", vocabSources: [] }];
     return s;

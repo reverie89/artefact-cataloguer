@@ -142,7 +142,7 @@ describe("reducer", () => {
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
-      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" }] }),
+      patch: (d) => ({ ...d, artefactFields: [...d.artefactFields, { id: "y", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" }] }),
     });
     expect(next.artefactDraft).not.toBeNull();
     expect(next.artefactDraft!.artefactFields.length).toBe(before + 1);
@@ -330,7 +330,7 @@ describe("reducer PATCH_SETTINGS search-column reconcile", () => {
   it("seeds every loaded column as searchable on INIT", () => {
     const next = reducer(initialState, {
       type: "INIT",
-      settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, column: "" }] },
+      settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" }] },
       darkMode: true,
       zoom: 1,
     });

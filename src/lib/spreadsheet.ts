@@ -19,11 +19,11 @@ export interface ParsedArtefactFile {
   rows: ArtefactRow[];
   /** Row indices (0-based data rows) that carry an Image cell value hint. */
   imageRowIndices: number[];
-  /** Names of required columns missing from the sheet, if any — in letter
-   *  mode, names of fields with no usable column binding. */
+  /** Names of configured columns that matched no header. Fields with a
+   *  Column Letter bindings report their failures via columnProblems. */
   missingColumns: string[];
-  /** Structural problems that make the file unusable regardless of mode:
-   *  repeated header names, two fields bound to the same column letter. */
+  /** Structural problems that make the file unusable: repeated header names,
+   *  unusable/colliding column bindings, two fields resolving to one column. */
   columnProblems: string[];
   /** Columns dropped from the record, mapped name → reason. The Image column
    *  is excluded (its bytes go to artefact analysis separately) and fully-empty columns
@@ -71,9 +71,9 @@ export function columnLetterToIndex(letter: string): number | null {
   return n;
 }
 
-/** Parse a .xlsx artefact workbook into artefact rows. Columns are identified
- *  either by row-1 header text (`artefactColumnMode: "name"`) or positionally,
- *  by each configured field's bound Excel letter (`"letter"`). */
+/** Parse a .xlsx artefact workbook into artefact rows. Each configured column
+ *  is identified by its Header Text matching the header row, or — when its
+ *  useColumnLetter toggle is on — positionally by its Column Letter. */
 export async function parseArtefactFile(file: File, settings: Settings): Promise<ParsedArtefactFile> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(await file.arrayBuffer());
@@ -81,10 +81,12 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
   if (!ws) return { rows: [], imageRowIndices: [], missingColumns: [], columnProblems: [], discardedColumns: {}, sheetRowToDataRow: [] };
 
   // Header row — ExcelJS is 1-based; row 1 carries the configured column names.
+  // cellToString so rich-text headers (partially bold/coloured runs) resolve to
+  // their plain text instead of stringifying to "[object Object]".
   const headerRow = ws.getRow(1);
   const headers: string[] = [];
   for (let c = 1; c <= headerRow.cellCount; c++) {
-    headers.push(String(headerRow.getCell(c).value ?? "").trim());
+    headers.push(cellToString(headerRow.getCell(c).value).trim());
   }
 
   const afFields: ArtefactField[] = settings.artefactFields || [];
@@ -106,50 +108,66 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
   }
 
   // Resolve what each column is keyed as in the record, and which column is
-  // the image role. Name mode keys columns by their header (every configured
-  // name must appear among them); letter mode keys bound columns by the
-  // configured field name — the AI gate, export, and results search all look
-  // records up by configured name — and unbound columns by their header.
-  // Columns with no identifiable key (blank header, unbound) are skipped in
-  // both modes.
+  // the image role. Per configured column, the Identify By toggle decides: a
+  // Column Letter binding reads that spreadsheet column positionally, keyed by
+  // the configured field name (the AI gate, export, and results search all
+  // look records up by configured name); Header Text matches the headers by
+  // name, keyed by the sheet's own header casing. Unbound columns keep their
+  // header text, and columns with no identifiable key (blank header, unbound)
+  // are skipped.
   const missingColumns: string[] = [];
   // 1-based by column; index 0 unused. 0 imageColIndex = no image column.
   const colKeys: (string | null)[] = [];
   let imageColIndex = 0;
-  if ((settings.artefactColumnMode ?? "name") === "letter") {
-    const imageField = afFields.find((f) => IMAGE_NAME_RE.test(f.name.trim().toLowerCase()));
-    const bound = new Map<number, string>();
-    for (const f of afFields) {
-      const idx = f.column ? columnLetterToIndex(f.column) : null;
-      if (idx === null || idx > headers.length) {
-        missingColumns.push(f.name);
-        continue;
-      }
-      const other = bound.get(idx);
-      if (other !== undefined) {
-        columnProblems.push(`Fields "${other}" and "${f.name}" are both bound to column ${f.column.trim().toUpperCase()}`);
-        continue;
-      }
-      bound.set(idx, f.name);
-      colKeys[idx] = f.name;
-      if (f === imageField) imageColIndex = idx;
+  const imageField = afFields.find((f) => IMAGE_NAME_RE.test(f.name.trim().toLowerCase()));
+
+  // Column Letter bindings first — they claim their columns positionally.
+  const bound = new Map<number, string>();
+  for (const f of afFields) {
+    if (!f.useColumnLetter) continue;
+    if (!f.column) {
+      columnProblems.push(`No spreadsheet column assigned for: ${f.name}`);
+      continue;
     }
-    for (let c = 1; c <= headers.length; c++) {
-      if (!colKeys[c]) colKeys[c] = headers[c - 1] || null;
+    const idx = columnLetterToIndex(f.column);
+    if (idx === null) {
+      columnProblems.push(`Column "${f.column.trim().toUpperCase()}" is not a valid Excel column letter for: ${f.name}`);
+      continue;
     }
-  } else {
-    // Every configured column is required; read strictly from config, no aliases.
-    const present = headers.filter((h) => h.length > 0);
-    for (const a of afFields) {
-      if (!present.some((p) => norm(p) === norm(a.name))) missingColumns.push(a.name);
+    if (idx > headers.length) {
+      columnProblems.push(`Column "${f.column.trim().toUpperCase()}" is outside the sheet for: ${f.name}`);
+      continue;
     }
-    const imageName = afFields.find((f) => IMAGE_NAME_RE.test(f.name.trim().toLowerCase()))?.name;
-    if (imageName) imageColIndex = headers.findIndex((h) => h && norm(h) === norm(imageName)) + 1;
-    for (let c = 1; c <= headers.length; c++) {
-      colKeys[c] = headers[c - 1] || null;
+    const other = bound.get(idx);
+    if (other !== undefined) {
+      columnProblems.push(`Fields "${other}" and "${f.name}" are both bound to column ${f.column.trim().toUpperCase()}`);
+      continue;
     }
+    bound.set(idx, f.name);
+    colKeys[idx] = f.name;
+    if (f === imageField) imageColIndex = idx;
+  }
+
+  // Remaining fields match by header name.
+  for (const f of afFields) {
+    if (f.useColumnLetter) continue;
+    const idx = headers.findIndex((h) => h && norm(h) === norm(f.name));
+    if (idx === -1) {
+      missingColumns.push(f.name);
+      continue;
+    }
+    const claimed = colKeys[idx + 1];
+    if (claimed) {
+      columnProblems.push(`Fields "${claimed}" and "${f.name}" both resolve to the same column`);
+      continue;
+    }
+    colKeys[idx + 1] = headers[idx];
+    if (f === imageField) imageColIndex = idx + 1;
   }
   const imageKey = imageColIndex > 0 ? colKeys[imageColIndex] : null;
+  for (let c = 1; c <= headers.length; c++) {
+    if (!colKeys[c]) colKeys[c] = headers[c - 1] || null;
+  }
 
   // Read data rows (row 2 onward) into array-of-objects keyed by the column's
   // record key. ExcelJS returns empty cells as null; we omit them from the

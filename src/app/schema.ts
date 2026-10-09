@@ -97,6 +97,9 @@ const ArtefactFieldSchema = z.object({
   // Same back-compat: settings written before this field existed load with
   // every configured column sent to the AI — the pre-toggle behaviour.
   includeForAI: z.boolean().default(true),
+  // `.default(false)` so settings written before this field existed load
+  // cleanly — an absent key reads as "identify by Header Text" (the default).
+  useColumnLetter: z.boolean().default(false),
   // `.default("")` so settings written before this field existed load cleanly —
   // an absent key reads as "no letter binding" (name-based identification).
   column: z.string().default(""),
@@ -117,7 +120,6 @@ export const SettingsSchema = z.object({
   activeProvider: z.string().nullable(),
   embeddingProviders: z.array(EmbeddingProviderSchema),
   activeEmbeddingProvider: z.string().nullable(),
-  artefactColumnMode: z.enum(["name", "letter"]),
   artefactFields: z.array(ArtefactFieldSchema),
 });
 
@@ -147,7 +149,6 @@ export const PersistedSettingsSchema = SettingsSchema.partial({
   validationEnabled: true,
   activeProvider: true,
   activeEmbeddingProvider: true,
-  artefactColumnMode: true,
 })
   .extend({
     // Arrays are optional so an absent key produces `undefined` (not `[]`).

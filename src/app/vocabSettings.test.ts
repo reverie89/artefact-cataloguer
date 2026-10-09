@@ -30,7 +30,6 @@ function settings(vocabSources: VocabSource[]): Settings {
     activeProvider: null,
     embeddingProviders: [],
     activeEmbeddingProvider: null,
-    artefactColumnMode: "name",
     artefactFields: [],
   };
 }

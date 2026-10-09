@@ -7,7 +7,7 @@ import type { AppState } from "../../app/state";
 import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../../app/defaults";
 import { fieldsDiffer } from "../../app/drafts";
 import { buildPromptPreview } from "../../lib/ai";
-import type { ArtefactColumnMode, Settings } from "../../app/types";
+import type { Settings } from "../../app/types";
 import { CardActions } from "./CardActions";
 import { Field, FieldInput, FieldTextarea, Segmented } from "./FormControls";
 import { PromptPreviewSheet } from "./PromptPreviewSheet";
@@ -29,10 +29,6 @@ interface Props {
 
 export function ArtefactFileTab({ state, actions }: Props) {
   const { settings } = state;
-  // Column identification applies to the whole artefact file and persists
-  // immediately (setArtefactColumnMode), so it always reads from settings —
-  // unlike the content draft below.
-  const columnMode: ArtefactColumnMode = settings.artefactColumnMode ?? "name";
 
   // Render from the pending draft if there are unsaved edits, otherwise from
   // persisted settings. Edits accumulate in the draft and only hit disk on Save.
@@ -83,9 +79,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
             The artefact file must be a spreadsheet (<strong className="text-foreground">.xlsx</strong>) with a header row.
           </div>
           <div className="text-muted-foreground text-[13px] leading-relaxed">
-            {columnMode === "letter"
-              ? "Every column configured here must have a spreadsheet column letter assigned below when the file is parsed, even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. The AI receives every configured column when it examines each artefact, unless you turn a column's Include for AI toggle off."
-              : "Every column configured here must be present in the spreadsheet's header row when the file is parsed, even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. The AI receives every configured column when it examines each artefact, unless you turn a column's Include for AI toggle off."}
+            Every column configured here must resolve to a spreadsheet column when the file is parsed — by its Header Text matching the header row, or by the Column Letter set on it — even if some cells are empty. Columns that are not configured here still appear in the source record panel but are never sent to the AI. The AI receives every configured column when it examines each artefact, unless you turn a column&apos;s Include for AI toggle off.
           </div>
         </div>
       </Card>
@@ -148,20 +142,9 @@ export function ArtefactFileTab({ state, actions }: Props) {
       />
 
       <Card className="gap-0 overflow-hidden p-0">
-        <div className="flex flex-wrap items-center gap-2.5 border-b px-3.5 py-2">
-          <span className="text-muted-foreground text-[13px]">Identify spreadsheet columns by</span>
-          <Segmented
-            value={columnMode}
-            onChange={(v) => { if (v === "name" || v === "letter") void actions.setArtefactColumnMode(v); }}
-            options={[
-              { value: "name", label: "Column name" },
-              { value: "letter", label: "Column letter" },
-            ]}
-          />
-        </div>
         <div className="bg-muted/30 grid grid-cols-[24px_1fr_1fr] gap-2.5 border-b px-3.5 py-1.75">
           <span />
-          <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Column Name</span>
+          <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Name</span>
           <span className="text-muted-foreground text-xs uppercase tracking-[0.1em]">Description</span>
         </div>
         <SortableList
@@ -171,15 +154,14 @@ export function ArtefactFileTab({ state, actions }: Props) {
           {live.artefactFields.map((af) => {
             const saved = (settings.artefactFields || _DEF_AF).find((s) => s.id === af.id);
             const cardDirty = !!state.artefactDraft && (!saved || fieldsDiffer(
-              { ...af, description: af.description ?? "", prompt: af.prompt ?? "" },
-              { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "" },
-              ["id", "name", "description", "prompt", "includeForAI", "includeInExport", "column"],
+              { ...af, description: af.description ?? "", prompt: af.prompt ?? "", useColumnLetter: af.useColumnLetter ?? false, column: af.column ?? "" },
+              { ...saved, description: saved.description ?? "", prompt: saved.prompt ?? "", useColumnLetter: saved.useColumnLetter ?? false, column: saved.column ?? "" },
+              ["id", "name", "description", "prompt", "includeForAI", "includeInExport", "useColumnLetter", "column"],
             ));
             return (
               <ArtefactColumnRow
                 key={af.id}
                 field={af}
-                columnMode={columnMode}
                 expanded={!!state.artefactFieldExpanded[af.id]}
                 dirty={cardDirty}
                 cardStatus={state.artefactCardSaveStatus[af.id] ?? null}
@@ -220,9 +202,7 @@ export function ArtefactFileTab({ state, actions }: Props) {
 /** A single artefact-column row. Clicking anywhere on the row toggles the
  *  editor (mirrors CataloguingFieldsTab's SortableFieldRow). */
 interface ArtefactColumnRowProps {
-  field: { id: string; name: string; description: string; prompt: string; includeForAI: boolean; includeInExport: boolean; column: string };
-  /** How spreadsheet columns are identified — drives the letter binding input. */
-  columnMode: ArtefactColumnMode;
+  field: { id: string; name: string; description: string; prompt: string; includeForAI: boolean; includeInExport: boolean; useColumnLetter: boolean; column: string };
   expanded: boolean;
   /** Whether this column has unsaved content edits. */
   dirty: boolean;
@@ -233,7 +213,7 @@ interface ArtefactColumnRowProps {
   actions: AppActions;
 }
 
-function ArtefactColumnRow({ field: af, columnMode, expanded, dirty, cardStatus, cardRef, actions }: ArtefactColumnRowProps) {
+function ArtefactColumnRow({ field: af, expanded, dirty, cardStatus, cardRef, actions }: ArtefactColumnRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: af.id });
   return (
     <div
@@ -264,21 +244,37 @@ function ArtefactColumnRow({ field: af, columnMode, expanded, dirty, cardStatus,
       </div>
       {expanded && (
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
-          <FieldInput
-            label="Column Name"
-            value={af.name}
-            onChange={(e) => actions.updateAF(af.id, "name", e.target.value)}
-            desc={columnMode === "letter"
-              ? "Label for this column. Data is read from the spreadsheet column set below."
-              : "Must match a column header in the uploaded spreadsheet (case-insensitive; spaces and line breaks count as the same)."}
-          />
-          {columnMode === "letter" && (
+          {/* Identify By gates the two inputs below — draft-buffered like the
+              Segmented toggles further down (updateAF coerces the string). On
+              Column Letter, the field reads positionally and Header Text is
+              hidden: the name is only the row's label. */}
+          <Field
+            label="Identify By"
+            desc="Header Text matches this column against the uploaded spreadsheet's header row. Column Letter reads it positionally from that Excel column, regardless of the header text."
+          >
+            <Segmented
+              value={af.useColumnLetter ? "letter" : "name"}
+              onChange={(v) => actions.updateAF(af.id, "useColumnLetter", v === "letter" ? "true" : "false")}
+              options={[
+                { value: "name", label: "Header text" },
+                { value: "letter", label: "Column letter" },
+              ]}
+            />
+          </Field>
+          {af.useColumnLetter ? (
             <FieldInput
-              label="Spreadsheet Column"
+              label="Column Letter"
               value={af.column}
               onChange={(e) => actions.updateAF(af.id, "column", e.target.value)}
               placeholder="e.g. C"
               desc="Excel column letter (A, B, … AA) this column is read from, regardless of the header text."
+            />
+          ) : (
+            <FieldInput
+              label="Header Text"
+              value={af.name}
+              onChange={(e) => actions.updateAF(af.id, "name", e.target.value)}
+              desc="Must match a column header in the uploaded spreadsheet (case-insensitive; spaces and line breaks count as the same)."
             />
           )}
           <FieldInput
