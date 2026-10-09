@@ -30,9 +30,32 @@ interface Props {
   actions: AppActions;
 }
 
+/** Badge suffix marking a multi-component vocab field: ×N components, ×∞ for
+ *  unlimited (0). Single-pick fields (1) get no suffix — that's the default. */
+function vocabComponentSuffix(maxComponents: number): string {
+  if (maxComponents === 1) return "";
+  return maxComponents === 0 ? " · ×∞" : ` · ×${maxComponents}`;
+}
+
+/** Desc copy for the Distinct components input — what the number means and
+ *  what the pipeline does at the current value. The number is a cap applied
+ *  in Rust after validation; the partition prompt never sees it. */
+function componentsDesc(maxComponents: number, shortlistCount: number): string {
+  const meaning =
+    "Terms the AI records: 1 = only the top match; 2+ = one top match per distinct component, keeping this many best-validated picks; 0 = unlimited.";
+  if (maxComponents === 1) {
+    return `${meaning} Validation shortlists ${shortlistCount} candidates for the top pick.`;
+  }
+  if (maxComponents === 0) {
+    return `${meaning} Every perceived component is retrieved and shortlisted (${shortlistCount} candidates each).`;
+  }
+  return `${meaning} Components are retrieved separately (${shortlistCount} candidates each).`;
+}
+
 /** Grid template shared by the header row and each field row (via SortableRow)
- *  so columns align exactly: grip / Name / Type. */
-const GRID = "grid-cols-[24px_1fr_130px] gap-2.5 px-3.5";
+ *  so columns align exactly: grip / Name / Type. The Type column is wide
+ *  enough for the multi-component suffix ("Controlled vocab · ×3"). */
+const GRID = "grid-cols-[24px_1fr_170px] gap-2.5 px-3.5";
 
 export function CataloguingFieldsTab({ state, actions }: Props) {
   const { settings, settingsFieldExpanded } = state;
@@ -73,12 +96,13 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
         >
           {live.fields.map((f) => {
             const saved = settings.fields.find((s) => s.id === f.id);
-            const fieldDirty = !!state.fieldDraft && (!saved || fieldsDiffer(f, saved, ["id", "name", "type", "layout", "prompt", "vocabSources"]));
+            const fieldDirty = !!state.fieldDraft && (!saved || fieldsDiffer(f, saved, ["id", "name", "type", "layout", "prompt", "vocabSources", "maxComponents"]));
             return (
               <SortableFieldRow
                 key={f.id}
                 field={f}
                 lists={settings.vocabSources}
+                shortlistCount={settings.vocabShortlistCount}
                 expanded={!!settingsFieldExpanded[f.id]}
                 dirty={fieldDirty}
                 cardStatus={state.fieldCardSaveStatus[f.id] ?? null}
@@ -102,6 +126,9 @@ export function CataloguingFieldsTab({ state, actions }: Props) {
 interface SortableFieldRowProps {
   field: CatalogueField;
   lists: VocabSource[];
+  /** Global AI shortlist count — the per-component candidate multiplier basis
+   *  for the Distinct components desc. */
+  shortlistCount: number;
   expanded: boolean;
   /** Whether this field row has unsaved content edits. */
   dirty: boolean;
@@ -112,7 +139,7 @@ interface SortableFieldRowProps {
   actions: AppActions;
 }
 
-function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRef, actions }: SortableFieldRowProps) {
+function SortableFieldRow({ field: f, lists, shortlistCount, expanded, dirty, cardStatus, cardRef, actions }: SortableFieldRowProps) {
   return (
     <SortableRow
       id={f.id}
@@ -128,7 +155,9 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
       }
       cells={
         <Badge variant={f.type === "vocab" ? "default" : "secondary"} className="w-fit tracking-[0.04em]">
-          {f.type === "vocab" ? "Controlled vocab" : "Open-ended"}
+          {f.type === "vocab"
+            ? `Controlled vocab${vocabComponentSuffix(f.maxComponents)}`
+            : "Open-ended"}
         </Badge>
       }
     >
@@ -137,8 +166,10 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
           <FieldEditor
             field={f}
             lists={lists}
+            shortlistCount={shortlistCount}
             onName={(v) => actions.updateField(f.id, "name", v)}
             onType={(v) => actions.updateField(f.id, "type", v)}
+            onMaxComponents={(v) => actions.updateField(f.id, "maxComponents", v)}
             onPrompt={(v) => actions.updateField(f.id, "prompt", v)}
             onAddSource={(vId) => actions.addVocabSrc(f.id, vId)}
             onRemoveSource={(vId) => actions.removeVocabSrc(f.id, vId)}
@@ -162,16 +193,19 @@ function SortableFieldRow({ field: f, lists, expanded, dirty, cardStatus, cardRe
 /** Shared editor body for a catalogue field. Rendered inside the expanded row
  *  editor. Kept as a component so the field edits stay in one place (DRY). */
 interface FieldEditorProps {
-  field: { name: string; type: FieldType; prompt: string; vocabSources: string[] };
+  field: { name: string; type: FieldType; prompt: string; vocabSources: string[]; maxComponents: number };
   lists: VocabSource[];
+  /** Global AI shortlist count — per-component candidate multiplier basis. */
+  shortlistCount: number;
   onName: (v: string) => void;
   onType: (v: FieldType) => void;
+  onMaxComponents: (v: number) => void;
   onPrompt: (v: string) => void;
   onAddSource: (vId: string) => void;
   onRemoveSource: (vId: string) => void;
 }
 
-function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRemoveSource }: FieldEditorProps) {
+function FieldEditor({ field, lists, shortlistCount, onName, onType, onMaxComponents, onPrompt, onAddSource, onRemoveSource }: FieldEditorProps) {
   const sources = field.vocabSources || [];
   const available = lists.filter((v) => !sources.includes(v.id));
   // Radix keeps the last-selected item's label displayed even after it's
@@ -200,6 +234,15 @@ function FieldEditor({ field, lists, onName, onType, onPrompt, onAddSource, onRe
           ]}
         />
       </Field>
+      {field.type === "vocab" && (
+        <FieldInput
+          label="Distinct components"
+          type="number"
+          value={String(field.maxComponents)}
+          onChange={(e) => onMaxComponents(Number(e.target.value))}
+          desc={componentsDesc(field.maxComponents, shortlistCount)}
+        />
+      )}
       {field.type === "vocab" && (
         <Field
           label="Vocabulary Sources"

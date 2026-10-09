@@ -112,25 +112,45 @@ pub struct FieldSpec {
     /// Only meaningful for vocab-type fields; open-ended fields leave this empty.
     #[serde(rename = "vocabSourceIds", default)]
     pub vocab_source_ids: Vec<String>,
+    /// How many distinct components the AI picks the top term for: 1 = single
+    /// (only the top match), 2+ = one top match per component (validation
+    /// shortlists `shortlist_count` candidates per component), 0 = unlimited.
+    /// Only meaningful for vocab-type fields.
+    #[serde(rename = "maxComponents", default = "default_one")]
+    pub max_components: u32,
 }
 
-/// The candidate net for one vocab field — produced by per-field embedding
-/// search against that field's own `<extraction>` text. Each candidate carries
-/// its cosine score so validation's picks can be stamped with grounded
-/// similarity. When validation is disabled, the top `shortlist_count`
-/// candidates (by cosine) become the field's suggestions directly.
+fn default_one() -> u32 {
+    1
+}
+
+/// The candidate groups for one vocab field — one per distinct component of
+/// the artefact (partitioned by the judge when validation is on, else split
+/// from the field's `<extraction>` text). Candidates carry cosine scores (and
+/// vectors, for the near-duplicate gate) so validation's picks can be stamped
+/// with grounded similarity.
 pub(crate) struct ResolvedVocab {
     /// Index into the `fields: Vec<FieldSpec>` passed to the resolver — which
-    /// field these candidates belong to.
+    /// field these groups belong to.
     pub field_index: usize,
-    /// The net (≤ net_count), cosine-ranked desc, each with its score.
+    /// One net per distinct component, cosine-ranked desc within each group.
+    pub groups: Vec<ComponentNet>,
+}
+
+/// One component's candidate list: the component's own text (one partition
+/// part) and its shortlisted candidates.
+pub(crate) struct ComponentNet {
+    pub extraction: String,
     pub candidates: Vec<NetCandidate>,
 }
 
-/// One shortlisted candidate with its cosine score.
+/// One shortlisted candidate with its cosine score and its embedding (the
+/// vector feeds the near-duplicate gate; the prompt path reads term only).
+#[derive(Clone)]
 pub(crate) struct NetCandidate {
     pub term: String,
     pub score: f32,
+    pub vector: Vec<f32>,
 }
 
 /// One configured artefact-file column, as seen by the artefact-analysis prompt.
@@ -213,6 +233,7 @@ pub(crate) mod fixtures {
             field_type: "open".to_string(),
             prompt: String::new(),
             vocab_source_ids: Vec::new(),
+            max_components: 1,
         }
     }
 
@@ -222,6 +243,7 @@ pub(crate) mod fixtures {
             field_type: "vocab".to_string(),
             prompt: String::new(),
             vocab_source_ids: Vec::new(),
+            max_components: 1,
         }
     }
 

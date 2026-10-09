@@ -11,7 +11,7 @@ import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
 import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
-import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, FieldType, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
+import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
 import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
@@ -104,8 +104,10 @@ export interface AppActions {
   exportResults(): Promise<void>;
   onTriggerClick(key: string): void;
   setFieldSearch(key: string, val: string): void;
-  /** Toggle a vocab term in/out of a field's selection set (multi-select). */
-  toggleFieldValue(key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null): void;
+  /** Pick a vocab term for a field's selection: single-pick fields replace
+   *  the selection (and close the dropdown), multi-component fields toggle
+   *  the term in/out. */
+  toggleFieldValue(key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null, multi: boolean): void;
   clearField(key: string): void;
   setOpenFieldValue(key: string, val: string): void;
 
@@ -120,7 +122,7 @@ export interface AppActions {
   reorderFields(ids: string[]): Promise<void>;
   toggleProv(id: string): void;
   removeField(id: string): Promise<void>;
-  updateField(id: string, key: EditableCatalogueFieldKey, value: string | FieldType): void;
+  updateField(id: string, key: EditableCatalogueFieldKey, value: string | number | boolean): void;
   addVocabSrc(fId: string, vId: string): void;
   removeVocabSrc(fId: string, sId: string): void;
   /** Persist only this catalogue-field row's content edits to disk. */
@@ -986,8 +988,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   );
   const setFieldSearch = useCallback((key: string, val: string) => dispatch({ type: "SET_FIELD_SEARCH", key, value: val }), [dispatch]);
   const toggleFieldValue = useCallback(
-    (key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null) =>
-      dispatch({ type: "TOGGLE_FIELD_VALUE", key, value, source, listName, similarity }),
+    (key: string, value: string, source: "ai" | "vocab" | "manual", listName: string, similarity: number | null, multi: boolean) =>
+      dispatch({ type: "TOGGLE_FIELD_VALUE", key, value, source, listName, similarity, multi }),
     [dispatch]
   );
   const clearField = useCallback((key: string) => dispatch({ type: "CLEAR_FIELD", key }), [dispatch]);
@@ -1039,7 +1041,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       }
     } catch { console.error("[artefact] removeField: save failed"); }
   }, [state.fieldDraft, state.settings, patchNow, patchDraft, confirmDelete]);
-  const updateField = useCallback((id: string, key: EditableCatalogueFieldKey, value: string | FieldType) => {
+  const updateField = useCallback((id: string, key: EditableCatalogueFieldKey, value: string | number | boolean) => {
     patchDraft((d) => ({ ...d, fields: d.fields.map((f) => (f.id === id ? { ...f, [key]: value } : f)) }));
   }, [patchDraft]);
   const addVocabSrc = useCallback((fId: string, vId: string) => {
@@ -1099,7 +1101,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // separate "New Field" form. CataloguingFieldsTab scrolls the new row into view.
   const startAddField = useCallback(() => {
     const id = gid();
-    patchDraft((d) => ({ ...d, fields: [...d.fields, { id, name: "", type: "open", layout: "row", prompt: "", vocabSources: [] }] }));
+    patchDraft((d) => ({ ...d, fields: [...d.fields, { id, name: "", type: "open", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 }] }));
     dispatch({ type: "TOGGLE_SF", id });
   }, [patchDraft, dispatch]);
 

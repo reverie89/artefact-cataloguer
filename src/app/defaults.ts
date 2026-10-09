@@ -16,14 +16,14 @@ export const _DEF_AF: ArtefactField[] = [
 ];
 
 export const _DEF_FIELDS: CatalogueField[] = [
-  { id: "f3", name: "Physical Description", type: "open", layout: "row", prompt: "Make a physical description of the artefact.\n\nAdditionally, if handwriting or motif can be observed and is legible, answer in a structured markdown format:\n```\nRaw text:\n{words as-is identified}\n\nEnglish Translation:\n{English translation}\n```", vocabSources: [] },
-  { id: "f4", name: "Obj./Work type", type: "vocab", layout: "row", prompt: "When two or more candidates are otherwise equally plausible, rank the one hinted \"Thesaurus: NHB\" above the others.", vocabSources: ["object-type"] },
-  { id: "f5", name: "Place", type: "vocab", layout: "row", prompt: "", vocabSources: ["place"] },
-  { id: "f6", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["material"] },
-  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "Name the specific making process, never use generic terms. Review everything in <artefact_file> to evaluate the making process.", vocabSources: ["technique"] },
-  { id: "f8", name: "Shape", type: "vocab", layout: "row", prompt: "", vocabSources: ["shape"] },
-  { id: "f9", name: "Date/Period", type: "open", layout: "row", prompt: "Translate and convert to the Gregorian calendar and even if only century notation can be derived, you must express it in Gregorian (e.g., \"19th century\" → \"1800s\", \"20th century\" → \"1900s\").", vocabSources: [] },
-  { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["colour"] },
+  { id: "f3", name: "Physical Description", type: "open", layout: "row", prompt: "Make a physical description of the artefact.\n\nAdditionally, if handwriting or motif can be observed and is legible, answer in a structured markdown format:\n```\nRaw text:\n{words as-is identified}\n\nEnglish Translation:\n{English translation}\n```", vocabSources: [], maxComponents: 1 },
+  { id: "f4", name: "Obj./Work type", type: "vocab", layout: "row", prompt: "When two or more candidates are otherwise equally plausible, rank the one hinted \"Thesaurus: NHB\" above the others.", vocabSources: ["object-type"], maxComponents: 1 },
+  { id: "f5", name: "Place", type: "vocab", layout: "row", prompt: "", vocabSources: ["place"], maxComponents: 1 },
+  { id: "f6", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["material"], maxComponents: 1 },
+  { id: "f7", name: "Technique", type: "vocab", layout: "row", prompt: "Name the specific making process, never use generic terms. Review everything in <artefact_file> to evaluate the making process.", vocabSources: ["technique"], maxComponents: 1 },
+  { id: "f8", name: "Shape", type: "vocab", layout: "row", prompt: "", vocabSources: ["shape"], maxComponents: 1 },
+  { id: "f9", name: "Date/Period", type: "open", layout: "row", prompt: "Translate and convert to the Gregorian calendar and even if only century notation can be derived, you must express it in Gregorian (e.g., \"19th century\" → \"1800s\", \"20th century\" → \"1900s\").", vocabSources: [], maxComponents: 1 },
+  { id: "f10", name: "Colour", type: "vocab", layout: "row", prompt: "", vocabSources: ["colour"], maxComponents: 1 },
 ];
 
 /** The unified artefact-analysis system prompt: the museum-cataloguing persona

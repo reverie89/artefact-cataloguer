@@ -3,7 +3,7 @@
 //! and the read paths (nearest-neighbour search + full listing) consumed by
 //! the catalogue pipeline and the manual vocab picker.
 
-use arrow_array::{Array, RecordBatch, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -174,6 +174,10 @@ pub struct CandidateTerm {
     /// `ai::resolve_vocab_fields`; the kept score becomes the field pick's
     /// `similarity`.
     pub score: f32,
+    /// The row's own embedding. Rides along so `ai.rs`'s near-duplicate gate
+    /// can measure picked terms against each other without re-querying
+    /// LanceDB. Empty only if the column is unreadable (search still works).
+    pub vector: Vec<f32>,
 }
 
 /// Nearest-neighbour search against one source's table. Returns the empty
@@ -191,10 +195,13 @@ pub async fn search_similar(
     };
     let batches: Vec<RecordBatch> = table
         .query()
-        // Only `term` is consumed by the search path now (the per-field
-        // embedding fuses by cosine score, not by the row's other columns).
-        // `columns_json` remains stored in the table for `list_vocab_terms`.
-        .select(lancedb::query::Select::Columns(vec!["term".into()]))
+        // `term` feeds the prompt path; `vector` rides along so the
+        // near-duplicate gate can compare picked terms directly (see
+        // CandidateTerm). `columns_json` remains stored for `list_vocab_terms`.
+        .select(lancedb::query::Select::Columns(vec![
+            "term".into(),
+            "vector".into(),
+        ]))
         .limit(k)
         .nearest_to(vector)
         .map_err(|e| e.to_string())?
@@ -212,15 +219,30 @@ pub async fn search_similar(
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let dist = batch
             .column_by_name("_distance")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::Float32Array>());
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+        let vecs = batch
+            .column_by_name("vector")
+            .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>());
         let Some(terms) = terms else {
             continue;
         };
         for i in 0..batch.num_rows() {
             let score = dist.map(|d| 1.0 - d.value(i)).unwrap_or(0.0);
+            let vector = vecs
+                .map(|v| {
+                    let values = v
+                        .values()
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .expect("vector child values must be f32");
+                    let dim = v.value_length() as usize;
+                    (0..dim).map(|j| values.value(i * dim + j)).collect()
+                })
+                .unwrap_or_default();
             out.push(CandidateTerm {
                 term: terms.value(i).to_string(),
                 score,
+                vector,
             });
         }
     }

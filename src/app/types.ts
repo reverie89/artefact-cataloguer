@@ -49,6 +49,11 @@ export interface CatalogueField {
   layout: string;
   prompt: string;
   vocabSources: string[]; // ids into Settings.vocabSources
+  /** Vocab-type fields only: how many distinct components the AI picks the
+   *  top term for. 1 = single (only the top match); 2+ = one top match per
+   *  component (validation shortlists shortlist-count candidates per
+   *  component); 0 = unlimited. */
+  maxComponents: number;
 }
 
 /** One raw file staged into a vocabulary source, persisted to disk beside the

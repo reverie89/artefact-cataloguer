@@ -265,7 +265,7 @@ flowchart TD
         XLSX --> COLS["Configured columns sent to AI<br/>(Image column excluded from record)"]
         SP["System prompt<br/>+ fixed XML reply contract"]
         AF["Artefact File tab<br/>per-column guidance"]
-        CF["Cataloguing Fields tab<br/>per-field guidance + type"]
+        CF["Cataloguing Fields tab<br/>per-field guidance + type<br/>+ distinct components (0 = unlimited)"]
         SP --> PROMPT
         AF --> PROMPT
         CF --> PROMPT
@@ -277,28 +277,33 @@ flowchart TD
     IMGDATA --> VISION
     subgraph S1["Stage 1 — Artefact analysis"]
         VISION["do_completion · Artefact Analysis<br/>image content block + unified prompt text"]
-        VISION --> UP["UnifiedParse<br/>· extractions (per vocab field)<br/>· open_values (per open field)"]
+        VISION --> UP["UnifiedParse<br/>· extractions (per vocab field;<br/>multi-component fields enumerate components)<br/>· open_values (per open field)"]
     end
 
     UP -->|"open field"| OPENRES["Take value verbatim<br/>similarity = none"]
-    UP -->|"vocab field"| EMB
+    UP -->|"vocab field"| PARTDEC
+    PARTDEC{"validationEnabled<br/>AND multi-component field?"}
+    PARTDEC -->|"yes"| PART["Partition call (the judge)<br/>names each field's distinct components<br/>quota-free · artefact record included"]
+    PARTDEC -->|"no / failure"| SPLIT["Fallback: split the extraction<br/>on semicolons"]
+    PART --> EMB
+    SPLIT --> EMB
 
     subgraph S2["Stage 2 · Embedding + retrieval (no LLM)"]
-        EMB["ONE batched embed_texts<br/>over every extraction<br/>→ 1 vector per field"]
+        EMB["ONE batched embed_texts<br/>over every component text<br/>→ 1 vector per component"]
         IMGDATA --> IMGEMB["embed_image always<br/>(retry once on network error,<br/>else hard-fail row)"]
         EMB --> SEARCH
         IMGEMB --> SEARCH
-        SEARCH["search_similar per field per source<br/>LanceDB cosine · top net_count (default 20)"]
+        SEARCH["search_similar per component per source<br/>LanceDB cosine · top net_count (default 20)"]
         SEARCH --> FUSE["fuse_by_max_cosine<br/>merge across sources + text/image"]
-        FUSE --> NET["Per-field candidate net<br/>sorted by cosine desc"]
+        FUSE --> NET["Per-component candidate groups<br/>top shortlist_count per component"]
     end
 
     NET --> VALDEC{"validationEnabled<br/>AND has candidates?"}
-    VALDEC -->|"no"| DIRECT["Take top shortlist_count (default 3)<br/>by cosine"]
+    VALDEC -->|"no"| DIRECT["Top cosine per component<br/>→ max_components cut + near-duplicate gate"]
     VALDEC -->|"yes"| VALIDATE
     subgraph S3["Stage 3 — Validation (optional)"]
-        VALIDATE["do_completion · Vocab Validation<br/>re-sends image + artefact-analysis extractions<br/>+ candidate terms (scores hidden)"]
-        VALIDATE --> PICKS["≤ shortlist_count verbatim picks<br/>re-ranked by cosine"]
+        VALIDATE["do_completion · Vocab Validation<br/>every component group + its candidates<br/>pick ≤ 1 term per group"]
+        VALIDATE --> PICKS["Validated picks<br/>→ max_components cut (logged)<br/>→ ≥ 0.90 near-duplicate gate (logged)"]
     end
 
     DIRECT --> RESULT
@@ -308,8 +313,10 @@ flowchart TD
 ```
 
 - **Artefact analysis.** Observes the artefact and answers every field in one XML response: a rich `<image_description>`, one `<extraction field="…">` per controlled-vocab field (field-specific text used to search that field's own source), and one `<open_field field="…">` per open-ended field (the free-text answer, used directly). Built from the **Artefact File tab**'s single Override-gated "System Prompt" (persona + output-format preamble); the dynamic per-field XML enumeration and the `<artefact_file>` record are Rust-appended at runtime. The artefact record is delivered as XML, not JSON, for format consistency.
-- **Embedding step (per-field).** Each vocab field's **own** `<extraction>` is embedded in one batched call, and the artefact image is embedded alongside it (embedding providers must be multimodal — text + image; an image-embed failure hard-fails the row after one retry on a network error). The per-field vector and the image vector are each searched against the synced LanceDB tables; the best candidates across sources/modalities are fused by **max cosine similarity**, and the top `net count` (default 20, configurable) are kept. Per-field embedding (rather than one global description vector) is the primary fix for mis-matches like "u-shape" returned for a circular object. Empty/missing extraction → no candidates for that field + a warning.
-- **Validation (optional, toggleable).** One batched call, threaded and trimmed onto artefact analysis (image re-sent). Each vocab field's extracted text and its ≤net-count candidate **terms** (pure strings — no cosine, no thesaurus) are presented; the vision model picks the top `shortlist count` (default 3, configurable) **verbatim from the candidate set** (a hallucination guard in Rust drops any term not in the net). If none fit, the field stays **empty + warning** — a controlled-vocab field can only ever receive values that exist in its source. When validation is **off**, the cosine top-`shortlist count` is used directly.
+- **Partition step (validation on, multi-component fields).** A focused vision call — the "judge" — names each field's **distinct components** ("jute body", "synthetic lining"): the artefact record is included (a cataloguer reads the row's metadata first), and the call is **quota-free** — the field's *Distinct components* number never reaches the prompt, so the model can't pad to a quota it was never shown. If it fails, the run warns and falls back to splitting the field's `<extraction>` on semicolons (the per-field guidance asks for exactly that). Components that are near-identical in embedding space (≥ 0.90 mutual cosine) are merged before searching, first kept.
+- **Embedding step (per-component).** Every component text is embedded in one batched call, and the artefact image alongside it (embedding providers must be multimodal — text + image; an image-embed failure hard-fails the row after one retry). Each component vector (and the image vector) is searched against the field's synced LanceDB tables; hits fuse by **max cosine similarity**, and the top `shortlist count` candidates become that component's group. Per-component retrieval replaces the old single-vector search whose flat candidate pile produced lookalike picks ("rectangular" + "rectangular cuboid").
+- **Validation (optional, toggleable).** One batched call, threaded and trimmed onto artefact analysis (image re-sent). **Every** component group is presented with its candidate **terms** (pure strings — no cosine, no thesaurus); the vision model picks **at most one term per component**, verbatim (a hallucination guard in Rust drops any term not in a group), and may skip a group that doesn't fit or that duplicates another. If nothing fits, the field stays **empty + warning** — a controlled-vocab field can only ever receive values that exist in its source.
+- **Distinct components (per vocab field).** How many terms may be recorded: 1 (default) = only the top match; 2+ = one pick per distinct component, with the N **strongest-validated** picks recorded; 0 = unlimited. The number is a cap applied in Rust **after** validation — the partition prompt never sees it, so there is nothing to pad to — and every dropped pick is logged ("kept best 3 of 5 validated picks"). Afterwards a ≥ 0.90 embedding gate merges near-synonym picks ("hand weaving" vs "weaving") — conservative by design: hue-family collapses like crimson → red stay a judgment for the perceiver and your per-field prompts (e.g. "Record at their basic level."). Every recorded suggestion is pre-selected in the review row for multi-component fields.
 - **Similarity.** Controlled-vocab picks carry `similarity = cosine` (grounded in vector distance, not the model's self-reported guess); open-ended fields have no similarity. When validation overrides a poor embedding match, that pick's similarity stays low — an honest signal that the vision model overrode a weak embedding.
 - **No thesaurus tiebreak.** Candidate ranking is the embedding's alone; final selection is validation's. The `Thesaurus` vocab column still feeds embedding text at sync time (useful for embedding quality) but is never surfaced to the LLM.
 - **Optional prompts.** An empty per-column or per-field prompt is **omitted** from the prompt rather than emitted as a blank line.

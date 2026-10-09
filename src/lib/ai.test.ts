@@ -19,7 +19,7 @@ function embedding(status: VocabEmbeddingStatus["status"], model: string | null 
 }
 
 function vocabField(id: string, name: string, vocabSources: string[]): CatalogueField {
-  return { id, name, type: "vocab", layout: "row", prompt: "", vocabSources };
+  return { id, name, type: "vocab", layout: "row", prompt: "", vocabSources, maxComponents: 1 };
 }
 
 function embeddingProvider(id: string, model: string): EmbeddingProvider {
@@ -120,7 +120,7 @@ describe("findUnsyncedVocabField", () => {
 
   it("ignores open-ended fields entirely", () => {
     const s = baseSettings(
-      [{ id: "f1", name: "Description", type: "open", layout: "row", prompt: "", vocabSources: ["v1"] }],
+      [{ id: "f1", name: "Description", type: "open", layout: "row", prompt: "", vocabSources: ["v1"], maxComponents: 1 }],
       [source("v1", "Material Thesaurus", { embedding: embedding("never") })]
     );
     expect(findUnsyncedVocabField(s)).toBeNull();

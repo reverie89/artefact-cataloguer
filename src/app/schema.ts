@@ -19,6 +19,9 @@ const CatalogueFieldSchema = z.object({
   layout: z.string(),
   prompt: z.string(),
   vocabSources: z.array(z.string()),
+  // `.default(1)` so settings written before this field existed load cleanly —
+  // an absent key reads as 1 (single: the AI picks only the top match).
+  maxComponents: z.number().int().min(0).default(1),
 });
 
 const VocabSourceFileSchema = z.object({

@@ -1,13 +1,14 @@
-//! Prompt construction for the two LLM calls: the unified artefact-analysis
+//! Prompt construction for the LLM calls: the unified artefact-analysis
 //! prompt (persona preamble, per-column guidance, XML field enumeration,
-//! `<artefact_file>` record) and the validation prompt (pure candidate terms +
-//! the fixed `<validated>` reply contract), plus the record→XML rendering and
-//! escaping helpers they build on.
+//! `<artefact_file>` record), the partition judge's prompt (per-field distinct
+//! components, quota-free), and the validation prompt (per-component candidate
+//! groups + the fixed `<validated>` reply contract), plus the record→XML
+//! rendering and escaping helpers they build on.
 
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::types::{ArtefactColumnSpec, FieldSpec, NetCandidate};
+use super::types::{ArtefactColumnSpec, ComponentNet, FieldSpec};
 
 /// Collect every (column, value) pair from the record as strings. The record
 /// is config-strict by the time it arrives: the frontend wrapper (`lib/ai.ts`
@@ -108,6 +109,15 @@ fn xml_escape_attr(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Fixed instruction appended to multi-component vocab fields' extraction
+/// guidance (see `build_unified_prompt`). The extraction is the retrieval
+/// text, so enumerating every distinct component (e.g. several materials) is
+/// what lets per-component retrieval surface a candidate for each. This is
+/// also the fallback partitioning wording: when the judge is unavailable
+/// (validation off / partition failure), the extraction text itself is split
+/// on these semicolons.
+const COMPONENT_ENUMERATION_CLAUSE: &str = "List every distinct component that applies, separated by semicolons — components differ in kind (a different material, part, colour, or aspect), never in specificity alone; several may apply.";
+
 /// Compose the unified artefact-analysis prompt. Structure (joined by blank lines):
 ///   1. The user-editable persona + output-format preamble (the merged "System
 ///      Prompt" from ArtefactFileTab). This text *already* instructs the model
@@ -160,10 +170,17 @@ pub(crate) fn build_unified_prompt(
     ];
     for f in fields {
         let prompt = f.prompt.trim();
-        let guidance = if prompt.is_empty() {
+        let mut content = prompt.to_string();
+        if f.field_type == "vocab" && f.max_components != 1 {
+            if !content.is_empty() {
+                content.push(' ');
+            }
+            content.push_str(COMPONENT_ENUMERATION_CLAUSE);
+        }
+        let guidance = if content.is_empty() {
             String::new()
         } else {
-            format!(" ({prompt})")
+            format!("({content})")
         };
         if f.field_type == "vocab" {
             enum_lines.push(format!(
@@ -192,35 +209,112 @@ pub(crate) fn build_unified_prompt(
     sections.join("\n\n")
 }
 
-/// Compose the validation prompt. For each vocab field: the field name,
-/// its extracted text (from artefact analysis), an optional per-field `prompt`
-/// (e.g. user preferences), and a list of its candidate **terms only** — no
-/// cosine, no thesaurus badge, to avoid biasing the model toward internal
-/// scores. Ends with the fixed XML reply contract. Pure; built once per
+/// Per-field pick rule rendered into the validation prompt. Multi-component
+/// fields pick at most one term per component group (the structural cap lives
+/// in Rust: groups outnumber the field's `max_components` only before the
+/// post-validation cut); the perceiver is also allowed to collapse groups it
+/// judges to be the same aspect.
+fn selection_line(field: &FieldSpec) -> String {
+    if field.max_components == 1 {
+        "single — pick only the top one term".to_string()
+    } else {
+        "multiple — pick at most one term per component group: the top match for each distinct component. If two groups describe the same aspect of the artefact (e.g. two greys of one background), pick for one and skip the other; a group with no fitting candidate is simply skipped".to_string()
+    }
+}
+
+/// Compose the validation prompt. For each vocab field: the field's extracted
+/// text (from artefact analysis), an optional per-field `prompt` (user
+/// preferences), its selection rule, and its per-component candidate groups —
+/// each group is one distinct component with its own shortlisted candidate
+/// **terms only** (no cosine, no thesaurus, no vectors, to avoid biasing the
+/// model toward internal scores). A single-component field renders today's
+/// flat candidate block; multi-component fields render one labelled block per
+/// component. Ends with the fixed XML reply contract. Pure; built once per
 /// catalogue call.
 pub(crate) fn build_validation_prompt(
-    shortlists: &[(usize, &FieldSpec, &str, &[NetCandidate])],
-    shortlist_count: usize,
+    shortlists: &[(usize, &FieldSpec, &str, &[ComponentNet])],
 ) -> String {
     let mut sections = Vec::new();
-    for (_, field, extracted, candidates) in shortlists {
+    for (_, field, extracted, groups) in shortlists {
         let mut block = format!("[{}] extracted: \"{}\"", field.name, extracted);
         let prompt = field.prompt.trim();
         if !prompt.is_empty() {
             block.push_str(&format!("\nguidance: {prompt}"));
         }
-        if candidates.is_empty() {
-            block.push_str("\ncandidates: (none)");
+        block.push_str(&format!("\nselection: {}", selection_line(field)));
+        let render = |g: &ComponentNet| {
+            if g.candidates.is_empty() {
+                format!("\ncomponent \"{}\" candidates: (none)", g.extraction)
+            } else {
+                let terms: Vec<String> = g
+                    .candidates
+                    .iter()
+                    .map(|c| format!("- {}", c.term))
+                    .collect();
+                format!(
+                    "\ncomponent \"{}\" candidates:\n{}",
+                    g.extraction,
+                    terms.join("\n")
+                )
+            }
+        };
+        if groups.len() > 1 {
+            for g in groups.iter() {
+                block.push_str(&render(g));
+            }
         } else {
-            let terms: Vec<String> = candidates.iter().map(|c| format!("- {}", c.term)).collect();
-            block.push_str(&format!("\ncandidates:\n{}", terms.join("\n")));
+            // Single-component field: today's flat rendering (no group label).
+            match groups.first() {
+                Some(g) if !g.candidates.is_empty() => {
+                    let terms: Vec<String> = g
+                        .candidates
+                        .iter()
+                        .map(|c| format!("- {}", c.term))
+                        .collect();
+                    block.push_str(&format!("\ncandidates:\n{}", terms.join("\n")));
+                }
+                _ => block.push_str("\ncandidates: (none)"),
+            }
         }
         sections.push(block);
     }
-    let contract = format!(
-        "Pick up to {shortlist_count} terms per field that best match the artefact and its extracted text. Pick terms VERBATIM from each field's candidate list — do not invent, reword, or merge terms. If none of a field's candidates fit the artefact, emit an empty <validated> block for it.\n\nReply ONLY with, one block per field in the order above:\n<validated field=\"{{Field Name}}\"><pick term=\"{{verbatim candidate term}}\" /></validated>"
+    let contract = "Pick terms VERBATIM from each field's candidate list — do not invent, reword, or merge terms. Pick at most one term per component group, honoring each field's selection line (single fields get exactly one pick, the top one). Skipping a group is correct when nothing in it fits or it repeats another group — fewer picks than groups is correct, never pad. If none of a field's candidates fit the artefact, emit an empty <validated> block for it.\n\nReply ONLY with, one block per field in the order above:\n<validated field=\"{Field Name}\"><pick term=\"{verbatim candidate term}\" /></validated>";
+    sections.push(contract.to_string());
+    sections.join("\n\n")
+}
+
+/// Compose the partition judge's prompt: one focused vision call naming the
+/// distinct components of the artefact for every multi-component vocab field.
+/// Deliberately quota-free — the builder does not receive `maxComponents`; the
+/// caller caps the parsed components in Rust, so the model can never pad to a
+/// number it was never shown. The artefact record is included because a human
+/// cataloguer reads the row's metadata before deciding what is distinct.
+pub(crate) fn build_partition_prompt(fields: &[FieldSpec], record: &Value) -> String {
+    let mut sections = Vec::new();
+    sections.push(
+        "You are a museum cataloguing assistant. Look at the artefact image and its metadata record, then name the distinct components the artefact has for each field listed below. A component is one genuinely distinct kind of thing — a different material, part, colour, or aspect; never a variety of the same kind (red and crimson are one colour; rectangular and rectangular cuboid are one shape). List the most salient component first, and name as many as are really there — often there is only one. Use short descriptive phrases (e.g. \"jute body\", \"synthetic lining\")."
+            .to_string(),
     );
-    sections.push(contract);
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|f| {
+            let prompt = f.prompt.trim();
+            if prompt.is_empty() {
+                format!("- {}", f.name)
+            } else {
+                format!("- {} (guidance: {prompt})", f.name)
+            }
+        })
+        .collect();
+    sections.push(format!(
+        "For each field below, list its distinct components:\n{}",
+        lines.join("\n")
+    ));
+    sections.push(record_xml(record));
+    sections.push(
+        "Reply ONLY with, one block per field in the order above:\n<components field=\"{Field Name}\"><component>{distinct component}</component></components>"
+            .to_string(),
+    );
     sections.join("\n\n")
 }
 
@@ -228,8 +322,18 @@ pub(crate) fn build_validation_prompt(
 mod tests {
     use super::*;
     use crate::ai::types::fixtures::{column, open_field, vocab_field};
-    use crate::ai::types::{FieldSpec, NetCandidate};
+    use crate::ai::types::{ComponentNet, FieldSpec, NetCandidate};
     use serde_json::json;
+
+    /// Test candidate: term + score, empty vector (the gate needs vectors;
+    /// prompt rendering must not).
+    fn cand(term: &str, score: f32) -> NetCandidate {
+        NetCandidate {
+            term: term.to_string(),
+            score,
+            vector: Vec::new(),
+        }
+    }
 
     #[test]
     fn unified_prompt_omits_empty_prompt_columns_and_includes_record_xml() {
@@ -273,6 +377,7 @@ mod tests {
                 field_type: "open".to_string(),
                 prompt: "Translate into CE date format.".to_string(),
                 vocab_source_ids: Vec::new(),
+                max_components: 1,
             },
             vocab_field("Material"),
         ];
@@ -406,29 +511,25 @@ mod tests {
     #[test]
     fn build_validation_prompt_lists_pure_terms_no_scores() {
         let fields = [vocab_field("Material")];
-        let candidates = vec![
-            NetCandidate {
-                term: "bronze".to_string(),
-                score: 0.9,
-            },
-            NetCandidate {
-                term: "iron".to_string(),
-                score: 0.7,
-            },
-        ];
+        let groups = vec![ComponentNet {
+            extraction: "bronze, patinated".to_string(),
+            candidates: vec![cand("bronze", 0.9), cand("iron", 0.7)],
+        }];
         let extracted = "bronze, patinated";
-        let refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> =
-            vec![(0, &fields[0], extracted, &candidates)];
-        let prompt = build_validation_prompt(&refs, 3);
+        let refs: Vec<(usize, &FieldSpec, &str, &[ComponentNet])> =
+            vec![(0, &fields[0], extracted, &groups)];
+        let prompt = build_validation_prompt(&refs);
         // Terms present.
         assert!(prompt.contains("- bronze"));
         assert!(prompt.contains("- iron"));
-        // Scores and thesaurus badges are NOT present (pure terms only).
+        // Scores, vectors, and thesaurus badges are NOT present (pure terms only).
         assert!(!prompt.contains("0.9"));
         assert!(!prompt.contains("[NHB]"));
         // The fixed XML reply contract is present.
         assert!(prompt.contains("<validated field="));
         assert!(prompt.contains("VERBATIM"));
+        // Single-component fields keep the flat candidate rendering.
+        assert!(!prompt.contains("component \""));
     }
 
     #[test]
@@ -438,14 +539,91 @@ mod tests {
             field_type: "vocab".to_string(),
             prompt: "Prefer the broadest applicable type.".to_string(),
             vocab_source_ids: Vec::new(),
+            max_components: 1,
         }];
-        let candidates = vec![NetCandidate {
-            term: "bowl".to_string(),
-            score: 0.8,
+        let groups = vec![ComponentNet {
+            extraction: "a vessel".to_string(),
+            candidates: vec![cand("bowl", 0.8)],
         }];
-        let refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> =
-            vec![(0, &fields[0], "a vessel", &candidates)];
-        let prompt = build_validation_prompt(&refs, 3);
+        let refs: Vec<(usize, &FieldSpec, &str, &[ComponentNet])> =
+            vec![(0, &fields[0], "a vessel", &groups)];
+        let prompt = build_validation_prompt(&refs);
         assert!(prompt.contains("Prefer the broadest applicable type."));
+    }
+
+    #[test]
+    fn unified_prompt_multi_component_vocab_field_enumerates_components() {
+        let mut multi = vocab_field("Material");
+        multi.max_components = 3;
+        let prompt = build_unified_prompt("", &[], &[multi], &json!({}), true);
+        assert!(prompt.contains("List every distinct component that applies"));
+        // Single-component fields stay untouched.
+        let single = build_unified_prompt("", &[], &[vocab_field("Shape")], &json!({}), true);
+        assert!(!single.contains("List every distinct component"));
+    }
+
+    #[test]
+    fn unified_prompt_multi_component_clause_composes_with_user_prompt() {
+        let mut f = vocab_field("Material");
+        f.max_components = 0;
+        f.prompt = "Focus on metals.".to_string();
+        let prompt = build_unified_prompt("", &[], &[f], &json!({}), true);
+        assert!(prompt.contains(
+            "(Focus on metals. List every distinct component that applies, separated by semicolons — components differ in kind (a different material, part, colour, or aspect), never in specificity alone; several may apply.)"
+        ));
+    }
+
+    #[test]
+    fn validation_prompt_states_per_field_selection_rule() {
+        let mut multi = vocab_field("Material");
+        multi.max_components = 3;
+        let fields = [vocab_field("Shape"), multi];
+        let single_groups = vec![ComponentNet {
+            extraction: "a bowl".to_string(),
+            candidates: vec![cand("cylindrical", 0.8)],
+        }];
+        let multi_groups = vec![
+            ComponentNet {
+                extraction: "jute body".to_string(),
+                candidates: vec![cand("jute", 0.9), cand("hemp", 0.7)],
+            },
+            ComponentNet {
+                extraction: "synthetic lining".to_string(),
+                candidates: vec![cand("nylon", 0.6)],
+            },
+        ];
+        let refs: Vec<(usize, &FieldSpec, &str, &[ComponentNet])> = vec![
+            (0, &fields[0], "a bowl", &single_groups),
+            (1, &fields[1], "jute bag with lining", &multi_groups),
+        ];
+        let prompt = build_validation_prompt(&refs);
+        assert!(prompt.contains("selection: single — pick only the top one term"));
+        assert!(prompt.contains("selection: multiple — pick at most one term per component group"));
+        assert!(prompt.contains("pick for one and skip the other"));
+        // Multi-component fields render labelled per-component groups; the
+        // single-component field keeps the flat block.
+        assert!(prompt.contains("component \"jute body\" candidates:"));
+        assert!(prompt.contains("component \"synthetic lining\" candidates:"));
+        assert!(prompt.contains("never pad"));
+        // Quota-free: the cap lives in Rust, so no cap number reaches the prompt.
+        assert!(!prompt.contains("(at most 3"));
+    }
+
+    #[test]
+    fn partition_prompt_lists_fields_guidance_record_and_contract() {
+        let mut colour = vocab_field("Colour");
+        colour.prompt = "Record at their basic level.".to_string();
+        let shape = vocab_field("Shape");
+        let prompt = build_partition_prompt(&[colour, shape], &json!({"Object Name": "Bowl"}));
+        assert!(prompt.contains("- Colour (guidance: Record at their basic level.)"));
+        assert!(prompt.contains("\n- Shape\n"));
+        // The artefact record reaches the judge (a cataloguer reads the row first).
+        assert!(prompt.contains("<artefact_file>"));
+        assert!(prompt.contains(">Bowl<"));
+        // The reply contract and the kind-vs-specificity rule are present.
+        assert!(prompt.contains("<components field="));
+        assert!(prompt.contains("never a variety of the same kind"));
+        // Quota-free: the builder takes no cap, so no cap language can appear.
+        assert!(!prompt.contains("at most 3"));
     }
 }

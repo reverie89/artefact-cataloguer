@@ -90,7 +90,7 @@ export type ArtefactDraft = {
 
 /** Editable keys of an existing catalogue-field row (vocabSources is handled by
  *  add/remove-vocab-source actions, not the generic setter). */
-export type EditableCatalogueFieldKey = "name" | "type" | "prompt";
+export type EditableCatalogueFieldKey = "name" | "type" | "prompt" | "maxComponents";
 
 /** Editable keys of an existing artefact-column row. */
 export type EditableArtefactFieldKey = "name" | "description" | "prompt" | "includeForAI" | "includeInExport" | "useColumnLetter" | "column";
@@ -338,6 +338,10 @@ export type Action =
       source: "ai" | "vocab" | "manual";
       listName: string;
       similarity: number | null;
+      /** False for single-pick vocab fields (`maxComponents === 1`): the pick
+       *  replaces the selection and the dropdown closes. True for
+       *  multi-component fields: the pick toggles in/out, dropdown stays open. */
+      multi: boolean;
     }
   | { type: "CLEAR_FIELD"; key: string }
   | { type: "SET_OPEN_VALUE"; key: string; value: string }
@@ -415,6 +419,14 @@ function pruneRowEntries<T>(rec: Record<string, T>, uids: Set<string>): Record<s
   return out;
 }
 
+/** The selection shape once more than one term is picked: the display/export
+ *  value is the terms joined, and per-term metadata (source list, similarity)
+ *  no longer describes a single term. Shared by manual multi-picks and the
+ *  AI-result seeding. */
+function multiSelection(values: string[]): FieldSelection {
+  return { source: "multi", value: values.join(" | "), values, listName: "", similarity: null };
+}
+
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "INIT":
@@ -475,9 +487,14 @@ export function reducer(state: AppState, action: Action): AppState {
           if (field.type !== "vocab") continue;
           const key = `${action.uid}_${field.id}`;
           if (fieldSelections[key]) continue;
-          const top = action.ai[field.name]?.[0];
-          if (!top) continue;
-          additions[key] = { source: "ai", value: top.value, values: [top.value], listName: "AI", similarity: top.similarity ?? null };
+          const sugs = action.ai[field.name];
+          if (!sugs || sugs.length === 0) continue;
+          // Every returned suggestion lands as the initial selection — one
+          // term per distinct component for multi-component fields, the
+          // single top pick otherwise (Rust caps single fields to one).
+          additions[key] = sugs.length === 1
+            ? { source: "ai", value: sugs[0].value, values: [sugs[0].value], listName: "AI", similarity: sugs[0].similarity ?? null }
+            : multiSelection(sugs.map((s) => s.value));
         }
         if (Object.keys(additions).length > 0) {
           fieldSelections = { ...fieldSelections, ...additions };
@@ -568,7 +585,24 @@ export function reducer(state: AppState, action: Action): AppState {
     case "CLOSE_ALL_DD":
       return { ...state, fieldDropdownOpen: {} };
     case "TOGGLE_FIELD_VALUE": {
-      // Vocab-type fields are multi-select: picking an already-selected term
+      // Single-pick vocab fields (maxComponents 1): the pick replaces the
+      // selection and the dropdown closes — there is nothing else to pick.
+      // Re-picking the selected term is an idempotent replace, not a deselect.
+      if (!action.multi) {
+        const selection: FieldSelection = {
+          source: action.source,
+          value: action.value,
+          values: [action.value],
+          listName: action.listName,
+          similarity: action.similarity,
+        };
+        return {
+          ...state,
+          fieldSelections: { ...state.fieldSelections, [action.key]: selection },
+          fieldDropdownOpen: {},
+        };
+      }
+      // Multi-component fields toggle: picking an already-selected term
       // removes it, anything else is appended. The dropdown stays open (no
       // fieldDropdownOpen reset) so several terms can be picked in one go.
       const existing = state.fieldSelections[action.key];
@@ -586,7 +620,7 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       const selection: FieldSelection =
         values.length > 1
-          ? { source: "multi", value: values.join(" | "), values, listName: "", similarity: null }
+          ? multiSelection(values)
           : { source: action.source, value: values[0], values, listName: action.listName, similarity: action.similarity };
       return { ...state, fieldSelections: { ...state.fieldSelections, [action.key]: selection } };
     }

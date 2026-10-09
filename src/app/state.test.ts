@@ -1,30 +1,46 @@
 import { describe, expect, it } from "vitest";
 
 import { initialState, providerDraftFromSettings, reducer } from "./state";
-import type { Settings } from "./types";
+import type { CatalogueField, Settings } from "./types";
 
-describe("reducer TOGGLE_FIELD_VALUE", () => {
+describe("reducer TOGGLE_FIELD_VALUE (multi-component fields)", () => {
   it("builds up a multi-select and joins values with ' | ' for display/export", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: true });
     expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "Materials", similarity: null });
 
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null, multi: true });
     expect(s.fieldSelections.u1_material).toEqual({ source: "multi", value: "clay | glaze", values: ["clay", "glaze"], listName: "", similarity: null });
   });
 
   it("toggling an already-selected value removes it, falling back to a single selection", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: true });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "glaze", source: "vocab", listName: "Materials", similarity: null, multi: true });
 
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: true });
     expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "glaze", values: ["glaze"], listName: "Materials", similarity: null });
   });
 
   it("removing the last remaining value clears the field selection entirely", () => {
-    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
-    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null });
+    let s = reducer(initialState, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: true });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: true });
 
     expect(s.fieldSelections.u1_material).toBeUndefined();
+  });
+});
+
+describe("reducer TOGGLE_FIELD_VALUE (single-pick fields)", () => {
+  it("replaces the selection with the picked term and closes the dropdown", () => {
+    const open: typeof initialState = { ...initialState, fieldDropdownOpen: { u1_material: true } };
+    let s = reducer(open, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "clay", source: "vocab", listName: "Materials", similarity: null, multi: false });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "Materials", similarity: null });
+    expect(s.fieldDropdownOpen).toEqual({});
+
+    // A later pick replaces rather than accumulates; re-picking the same term
+    // is an idempotent replace, not a deselect.
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "iron", source: "ai", listName: "AI", similarity: 0.9, multi: false });
+    expect(s.fieldSelections.u1_material).toEqual({ source: "ai", value: "iron", values: ["iron"], listName: "AI", similarity: 0.9 });
+    s = reducer(s, { type: "TOGGLE_FIELD_VALUE", key: "u1_material", value: "iron", source: "ai", listName: "AI", similarity: 0.9, multi: false });
+    expect(s.fieldSelections.u1_material?.values).toEqual(["iron"]);
   });
 });
 
@@ -93,7 +109,7 @@ describe("reducer", () => {
     const before = base.fieldDraft?.fields.length ?? base.settings.fields.length;
     const next = reducer(base, {
       type: "PATCH_FIELD_DRAFT",
-      patch: (d) => ({ ...d, fields: [...d.fields, { id: "x", name: "Material", type: "open", layout: "row", prompt: "", vocabSources: [] }] }),
+      patch: (d) => ({ ...d, fields: [...d.fields, { id: "x", name: "Material", type: "open", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 }] }),
     });
     expect(next.fieldDraft).not.toBeNull();
     expect(next.fieldDraft!.fields.length).toBe(before + 1);
@@ -273,6 +289,46 @@ describe("reducer row removal", () => {
     const next = reducer(populated, { type: "SET_ROW_STATUS", uid: "gone", status: "done", ai: { material: [{ value: "clay" }] } });
     expect(next).toBe(populated);
   });
+
+  it("SET_ROW_STATUS seeds every returned suggestion — multi-component picks land as one multi selection", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 3 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: { Material: [{ value: "iron chain", similarity: 0.9 }, { value: "mirror", similarity: 0.8 }] },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({
+      source: "multi",
+      value: "iron chain | mirror",
+      values: ["iron chain", "mirror"],
+      listName: "",
+      similarity: null,
+    });
+  });
+
+  it("SET_ROW_STATUS seeds the single top pick as before when one suggestion returns", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: { Material: [{ value: "clay", similarity: 0.8 }] },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 });
+  });
 });
 
 describe("reducer search column scope", () => {
@@ -311,7 +367,7 @@ describe("reducer search column scope", () => {
 });
 
 describe("reducer PATCH_SETTINGS search-column reconcile", () => {
-  const field = (id: string, name: string) => ({ id, name, type: "open" as const, layout: "row" as const, prompt: "", vocabSources: [] });
+  const field = (id: string, name: string) => ({ id, name, type: "open" as const, layout: "row" as const, prompt: "", vocabSources: [], maxComponents: 1 });
 
   it("auto-adds a newly-appended catalogue field to the search scope (searchable by default)", () => {
     // Per-card saves append columns through PATCH_SETTINGS — the scope must

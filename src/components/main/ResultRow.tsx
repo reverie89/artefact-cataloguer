@@ -271,6 +271,9 @@ interface FieldControlProps {
 
 function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actions }: FieldControlProps) {
   const srch = search.toLowerCase();
+  // Multi-component fields (maxComponents ≠ 1) accumulate picks; single-pick
+  // fields replace the selection and close the dropdown on pick.
+  const multi = field.maxComponents !== 1;
 
   // Warm the term cache for this field's sources as soon as its dropdown is
   // opened — a defensive fallback for the app-load prefetch in actions.ts
@@ -300,8 +303,8 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
       aiSimilarity: ai ? ai.similarity ?? null : null,
       selected: selectedValues.has(lower),
       onPick: () => (ai
-        ? actions.toggleFieldValue(fieldKey, vt.term, "ai", vt.listName, ai.similarity ?? null)
-        : actions.toggleFieldValue(fieldKey, vt.term, "vocab", vt.listName, null)),
+        ? actions.toggleFieldValue(fieldKey, vt.term, "ai", vt.listName, ai.similarity ?? null, multi)
+        : actions.toggleFieldValue(fieldKey, vt.term, "vocab", vt.listName, null, multi)),
     };
   });
   // AI suggestions with no matching vocab term (source not yet synced/cached,
@@ -318,7 +321,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
         badge: null as string | null,
         aiSimilarity: s.similarity ?? null,
         selected: selectedValues.has(cleaned.toLowerCase()),
-        onPick: () => actions.toggleFieldValue(fieldKey, cleaned, "ai", "AI", s.similarity ?? null),
+        onPick: () => actions.toggleFieldValue(fieldKey, cleaned, "ai", "AI", s.similarity ?? null, multi),
       };
     });
 
@@ -358,7 +361,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
       <div className="text-muted-foreground mb-1.25 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.08em]">
         <span>{field.name}</span>
         <Badge variant="secondary" className="text-[11px] italic normal-case tracking-normal">
-          {field.type === "vocab" ? "Controlled Vocab" : "Open-ended"}
+          {field.type === "vocab" ? (multi ? "Controlled Vocab · Multi" : "Controlled Vocab") : "Open-ended"}
         </Badge>
       </div>
 
@@ -406,6 +409,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
               items={items}
               showUseTyped={showUseTyped}
               hasSelection={!!sel}
+              multi={multi}
               actions={actions}
             />
           )}
@@ -434,10 +438,12 @@ interface DropdownBodyProps {
   items: DropdownItem[];
   showUseTyped: boolean;
   hasSelection: boolean;
+  /** False for single-pick fields: a typed value replaces the selection. */
+  multi: boolean;
   actions: AppActions;
 }
 
-function DropdownBody({ fieldKey, search, items, showUseTyped, hasSelection, actions }: DropdownBodyProps) {
+function DropdownBody({ fieldKey, search, items, showUseTyped, hasSelection, multi, actions }: DropdownBodyProps) {
   // Controlled directly by the store-propagated `search` value: typing dispatches
   // setFieldSearch, which flows back as `search`. A controlled input keeps focus
   // across re-renders without a local-state mirror.
@@ -478,7 +484,7 @@ function DropdownBody({ fieldKey, search, items, showUseTyped, hasSelection, act
           </div>
         ))}
         {showUseTyped && (
-          <div onClick={() => actions.toggleFieldValue(fieldKey, search.trim(), "manual", "", null)} className="border-border/60 text-primary flex cursor-pointer items-center gap-1.5 border-b px-2.5 py-1.75 text-sm">
+          <div onClick={() => actions.toggleFieldValue(fieldKey, search.trim(), "manual", "", null, multi)} className="border-border/60 text-primary flex cursor-pointer items-center gap-1.5 border-b px-2.5 py-1.75 text-sm">
             <Plus className="size-3" /><span>Use &quot;{search.trim()}&quot;</span>
           </div>
         )}

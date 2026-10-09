@@ -79,7 +79,7 @@ describe("composeExportTable", () => {
       { id: "af-m", name: "Material", description: "", prompt: "", includeForAI: true, includeInExport: opts.materialExport ?? true, useColumnLetter: false, column: "" },
       { id: "af-i", name: "Image", description: "", prompt: "", includeForAI: true, includeInExport: opts.imageExport ?? true, useColumnLetter: false, column: "" },
     ];
-    s.fields = [{ id: "fp", name: "Place", type: "open", layout: "row", prompt: "", vocabSources: [] }];
+    s.fields = [{ id: "fp", name: "Place", type: "open", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 }];
     return s;
   }
   const rows: ArtefactRow[] = [
@@ -160,7 +160,7 @@ describe("parsePreFlightError", () => {
     return s;
   }
   const syncedEmbedding: VocabEmbeddingStatus = { status: "synced", providerId: "e1", model: "m", lastSyncedAt: "2026-10-09", rowsEmbedded: 3, lastError: null };
-  const vocabField = { id: "f1", name: "Material", type: "vocab" as const, layout: "row" as const, prompt: "", vocabSources: ["s1"] };
+  const vocabField = { id: "f1", name: "Material", type: "vocab" as const, layout: "row" as const, prompt: "", vocabSources: ["s1"], maxComponents: 1 };
   const vocabSource = (embedding: VocabEmbeddingStatus) => ({
     id: "s1", name: "AAT", files: [], fields: [], ingestionField: null, labelField: null, badgeField: null, embedding,
   });

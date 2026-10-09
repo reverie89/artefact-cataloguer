@@ -208,8 +208,8 @@ describe("withoutVocabSource", () => {
   it("drops the source and prunes dangling field references", () => {
     const s = settings([source({ id: "a" }), source({ id: "b" })]);
     s.fields = [
-      { id: "f1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["a", "b"] },
-      { id: "f2", name: "Era", type: "open", layout: "row", prompt: "", vocabSources: [] },
+      { id: "f1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: ["a", "b"], maxComponents: 1 },
+      { id: "f2", name: "Era", type: "open", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 },
     ];
     const out = withoutVocabSource(s, "a");
     expect(out.vocabSources.map((v) => v.id)).toEqual(["b"]);

@@ -1,7 +1,8 @@
-//! Parsing the LLM's XML response contract into domain values: the unified
+//! Parsing the LLM's XML response contracts into domain values: the unified
 //! artefact-analysis reply (`<image_description>` / `<extraction>` /
-//! `<open_field>` blocks) and validation's `<validated><pick term="…" />`
-//! reply, plus the fence-stripping and tag-walking primitives they share.
+//! `<open_field>` blocks), the partition judge's `<components>` reply, and
+//! validation's `<validated><pick term="…" />` reply, plus the fence-stripping
+//! and tag-walking primitives they share.
 
 use std::collections::HashMap;
 
@@ -161,6 +162,74 @@ pub(crate) fn looks_like_unrecognized_response(content: &str) -> bool {
     !lower.contains("<image_description")
         && !lower.contains("<extraction")
         && !lower.contains("<open_field")
+}
+
+/// Parse the partition judge's reply: per field, the distinct component texts
+/// it perceived (`<components field="…"><component>a</component>…</components>`).
+/// Blocks match the requested fields case-insensitively. A field with no block
+/// or an empty one yields an empty list plus a warning, so the caller's
+/// fallback to the extraction split is traceable in the Logs Viewer. The
+/// caller applies the `maxComponents` cap — the prompt never carries it.
+pub(crate) fn parse_partition_response(
+    content: &str,
+    fields: &[FieldSpec],
+) -> (HashMap<String, Vec<String>>, Vec<String>) {
+    let body = strip_code_fence(content);
+    let block_map = collect_named_blocks(body, "components");
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut warnings = Vec::new();
+    for f in fields {
+        let key = f.name.to_ascii_lowercase();
+        match block_map.get(&key) {
+            Some(inner) => {
+                let components = collect_component_texts(inner);
+                if components.is_empty() {
+                    warnings.push(format!(
+                        "{}: <components> block empty — falling back to the extraction split",
+                        f.name
+                    ));
+                }
+                out.insert(f.name.clone(), components);
+            }
+            None => {
+                warnings.push(format!(
+                    "{}: <components> missing — falling back to the extraction split",
+                    f.name
+                ));
+                out.insert(f.name.clone(), Vec::new());
+            }
+        }
+    }
+    (out, warnings)
+}
+
+/// Read every `<component>…</component>` inner text from a `<components>`
+/// block, trimmed and in order. Case-insensitive tags; empty components are
+/// skipped; an unclosed tag stops the walk (the remainder is prose).
+fn collect_component_texts(block: &str) -> Vec<String> {
+    let lower = block.to_ascii_lowercase();
+    let open = "<component";
+    let close = "</component>";
+    let mut out = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(open) {
+        let abs = search_from + rel;
+        let open_end = match lower[abs..].find('>') {
+            Some(p) => abs + p,
+            None => break,
+        };
+        let inner_start = open_end + 1;
+        let close_rel = match lower[inner_start..].find(close) {
+            Some(p) => inner_start + p,
+            None => break,
+        };
+        let text = block[inner_start..close_rel].trim();
+        if !text.is_empty() {
+            out.push(text.to_string());
+        }
+        search_from = close_rel + close.len();
+    }
+    out
 }
 
 /// Collect all `<tag field="Name">text</tag>` blocks into a lowercased-name →
@@ -511,5 +580,52 @@ Line two with "quotes" & ampersand</extraction>"#;
         candidates.insert("material".to_string(), vec!["bronze".to_string()]);
         let (picks, _warnings) = parse_validation_response(content, &candidates);
         assert_eq!(picks.get("material").unwrap(), &vec!["bronze".to_string()]);
+    }
+
+    #[test]
+    fn parse_partition_extracts_components_per_field() {
+        let content = r#"<components field="Material">
+<component>jute body</component>
+<component>synthetic lining</component>
+</components>
+<components field="Colour"><component>black</component><component>white</component></components>"#;
+        let fields = vec![vocab_field("Material"), vocab_field("Colour")];
+        let (components, warnings) = parse_partition_response(content, &fields);
+        assert_eq!(
+            components.get("Material").unwrap(),
+            &vec!["jute body".to_string(), "synthetic lining".to_string()]
+        );
+        assert_eq!(
+            components.get("Colour").unwrap(),
+            &vec!["black".to_string(), "white".to_string()]
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_partition_warns_missing_and_empty_blocks() {
+        let content = r#"<components field="Material"><component>bronze</component></components>"#;
+        let fields = vec![vocab_field("Material"), vocab_field("Colour")];
+        let (components, warnings) = parse_partition_response(content, &fields);
+        assert_eq!(
+            components.get("Material").unwrap(),
+            &vec!["bronze".to_string()]
+        );
+        assert!(components.get("Colour").unwrap().is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Colour") && w.contains("missing")));
+    }
+
+    #[test]
+    fn parse_partition_skips_empty_components_case_insensitively() {
+        let content = r#"<components FIELD="Material"><component>  </component><component>bronze</component></components>"#;
+        let fields = vec![vocab_field("Material")];
+        let (components, warnings) = parse_partition_response(content, &fields);
+        assert_eq!(
+            components.get("Material").unwrap(),
+            &vec!["bronze".to_string()]
+        );
+        assert!(warnings.is_empty());
     }
 }

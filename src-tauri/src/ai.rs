@@ -10,18 +10,26 @@
 //!     `<extraction field="…">` per controlled-vocab field (field-specific text
 //!     used to search that field's vocab source), and one `<open_field
 //!     field="…">` per open-ended field (the free-text answer, used directly).
-//!   - **Embedding step** — each vocab field's *own* extraction is embedded in
-//!     one batched call and searched against its LanceDB source(s); the top
-//!     `net_count` candidates (default 20) are kept with their cosine scores.
-//!     This per-field embedding is the primary fix for the global-vector
-//!     mis-matches the previous single-description embedding produced.
-//!   - **Validation (threaded from artefact analysis, optional)** — one batched
-//!     call presenting each vocab field's extracted text plus its ≤`net_count`
-//!     candidate **terms** (no cosine, no thesaurus — pure strings). The vision
-//!     model picks up to `shortlist_count` (default 3) verbatim; if none fit it
-//!     returns an empty block and the field is left blank. Rust attaches each
-//!     pick's cosine as `similarity`. When validation is disabled, the cosine
-//!     top-`shortlist_count` is used directly.
+//!   - **Partition (validation on, multi-component fields)** — one focused
+//!     vision call names each field's distinct components (quota-free: the
+//!     prompt never carries `max_components`; the artefact record is included
+//!     because a cataloguer reads the row's metadata first). Failure falls
+//!     back to splitting the field's extraction on semicolons.
+//!   - **Embedding step** — every component text is embedded in one batched
+//!     call and searched against its field's LanceDB source(s) alongside the
+//!     artefact image; per component, hits fuse by max cosine and the top
+//!     `shortlist_count` become that component's candidate group. Per-component
+//!     embedding is the structural fix for the flat near-duplicate pile the
+//!     previous single-vector search produced.
+//!   - **Validation (threaded from artefact analysis, optional)** — one
+//!     batched call presenting every component group's candidate **terms**
+//!     (no scores, no vectors). The vision model picks at most one term per
+//!     group, verbatim, and may skip groups that don't fit or duplicate
+//!     another. Rust then cuts each field's validated picks to its
+//!     `max_components` best by cosine (logged), and a ≥`NEAR_DUP_THRESHOLD`
+//!     embedding gate merges near-synonym picks (logged). When validation is
+//!     disabled, each group's top cosine candidate is the pick, then the same
+//!     cut + gate.
 //!
 //! Open-ended fields are filled directly from artefact analysis (`similarity`
 //! absent); controlled-vocab fields carry cosine `similarity`. The XML format is
@@ -63,14 +71,14 @@ pub use types::{
     ApiFormat, ArtefactColumnSpec, ArtefactInput, CatalogueResult, ConnectionTest, FieldSpec,
     Provider, Suggestion,
 };
-pub(crate) use types::{NetCandidate, ResolvedVocab};
+pub(crate) use types::{ComponentNet, NetCandidate, ResolvedVocab};
 
 use completion::{do_completion, Turn, TurnRole};
 use logging::{log_stage, PipelineStageEvent, VerbosePayload};
-use prompt::{build_unified_prompt, build_validation_prompt};
+use prompt::{build_partition_prompt, build_unified_prompt, build_validation_prompt};
 use response::{
-    extract_tag_block, looks_like_unrecognized_response, parse_unified_response,
-    parse_validation_response, strip_code_fence,
+    extract_tag_block, looks_like_unrecognized_response, parse_partition_response,
+    parse_unified_response, parse_validation_response, strip_code_fence,
 };
 
 /// Sentinel error string the renderer recognises as a cancellation (vs. a real
@@ -130,62 +138,77 @@ const DEFAULT_VALIDATION_ENABLED: bool = true;
 ///
 /// Unlike the previous pipeline (which embedded the *single* global description
 /// once and reused it for every field — the root cause of poor matches like
-/// "u-shape" for a circular object), this embeds each vocab field's **own**
-/// `<extraction>` text in one batched call and searches that field's LanceDB
-/// tables with it. Results across sources/modalities are fused by **max cosine
-/// similarity**, and the top `net_count` candidates are kept (with their cosine)
-/// as the net for validation (or directly truncated to `shortlist_count` when
-/// validation is off). No thesaurus tiebreak — candidate ranking is the
-/// embedding's alone, and final selection is validation's.
+/// "u-shape" for a circular object), this embeds **each distinct component**
+/// text in one batched call and searches that field's LanceDB tables with it.
+/// Results across sources/modalities are fused by **max cosine similarity**,
+/// and the top `shortlist_count` candidates per component become its candidate
+/// group. No thesaurus tiebreak — candidate ranking is the embedding's alone,
+/// and final selection is validation's (then the post-validation cap + gate).
 ///
-/// Best-effort on the *search* leg (a missing LanceDB table leaves the field
-/// with an empty net, surfaced as "no match"), but the two embedding calls are
-/// hard failures: a failed `embed_texts` aborts the whole row (no candidates
-/// possible), and — since embedding providers must be multimodal — a failed
-/// `embed_image_with_retry` also aborts the row rather than silently degrading
-/// to text-only. A field whose `<extraction>` was empty yields no candidates
-/// and warns.
+/// Component sources: the judge's partition (`components`) when it produced a
+/// list for the field, else the field's `<extraction>` split on semicolons
+/// (`split_components`; single-component fields never split). Near-identical
+/// components (mutual cosine ≥ `NEAR_DUP_THRESHOLD`) are merged before
+/// searching, first kept. Best-effort on the *search* leg (a missing LanceDB
+/// table leaves the field with an empty group, surfaced as "no match"), but
+/// the two embedding calls are hard failures: a failed `embed_texts` aborts
+/// the whole row (no candidates possible), and — since embedding providers
+/// must be multimodal — a failed `embed_image_with_retry` also aborts the row
+/// rather than silently degrading to text-only. A field with no usable
+/// components yields no groups and warns downstream.
 async fn resolve_vocab_fields(
     embedding_provider: &crate::embeddings::EmbeddingProvider,
     fields: &[FieldSpec],
+    components: &HashMap<String, Vec<String>>,
     extractions: &HashMap<String, String>,
     image: Option<&ImageData>,
     net_count: usize,
-) -> Result<Vec<ResolvedVocab>, String> {
+    shortlist_count: usize,
+) -> Result<(Vec<ResolvedVocab>, Vec<String>), String> {
+    let mut warnings: Vec<String> = Vec::new();
     let mut out: Vec<ResolvedVocab> = Vec::new();
-    // Collect the per-field extraction texts to embed in ONE batched call.
-    // (i, field) for vocab fields whose extraction is non-empty.
-    let to_embed: Vec<(usize, &FieldSpec, String)> = fields
+    // Collect the per-field component texts to embed in ONE batched call.
+    // (i, field, components) for vocab fields with sources; fields with no
+    // usable components record empty groups so they surface as "no match".
+    let to_embed: Vec<(usize, &FieldSpec, Vec<String>)> = fields
         .iter()
         .enumerate()
         .filter(|(_, f)| f.field_type == "vocab" && !f.vocab_source_ids.is_empty())
         .filter_map(|(i, f)| {
-            let text = extractions.get(&f.name).cloned().unwrap_or_default();
-            if text.trim().is_empty() {
-                // Empty extraction: record an empty net so the field surfaces as
-                // "no match" with a clear reason, rather than silently dropping it.
+            let comps = match components.get(&f.name) {
+                Some(list) if !list.is_empty() => list.clone(),
+                _ => {
+                    let extraction = extractions.get(&f.name).cloned().unwrap_or_default();
+                    split_components(f, &extraction)
+                }
+            };
+            let comps: Vec<String> = comps.into_iter().filter(|c| !c.trim().is_empty()).collect();
+            if comps.is_empty() {
                 out.push(ResolvedVocab {
                     field_index: i,
-                    candidates: Vec::new(),
+                    groups: Vec::new(),
                 });
                 None
             } else {
-                Some((i, f, text))
+                Some((i, f, comps))
             }
         })
         .collect();
     if to_embed.is_empty() {
-        return Ok(out);
+        return Ok((out, warnings));
     }
 
-    // One batched embedding of all field extractions. A failure here means no
+    // One batched embedding of all component texts. A failure here means no
     // vocab candidates are possible — propagate as a hard row failure.
-    let texts: Vec<String> = to_embed.iter().map(|(_, _, t)| t.clone()).collect();
+    let texts: Vec<String> = to_embed
+        .iter()
+        .flat_map(|(_, _, c)| c.iter().cloned())
+        .collect();
     let text_vectors = crate::embeddings::embed_texts(embedding_provider, &texts)
         .await
-        .map_err(|e| format!("per-field extraction embedding failed: {e}"))?;
+        .map_err(|e| format!("per-component embedding failed: {e}"))?;
     if text_vectors.is_empty() {
-        return Err("per-field extraction embedding returned no vectors".to_string());
+        return Err("per-component embedding returned no vectors".to_string());
     }
 
     // Image embedding is mandatory when an image is present (providers are
@@ -207,40 +230,73 @@ async fn resolve_vocab_fields(
         None => None,
     };
 
-    for ((i, field, _text), text_vector) in to_embed.iter().zip(text_vectors.iter()) {
-        // Fused best cosine per candidate, keyed by lowercased term so the same
-        // term surfacing from multiple sources/modalities merges at its highest
-        // score.
-        let mut fused: HashMap<String, NetCandidate> = HashMap::new();
-        for source_id in &field.vocab_source_ids {
-            if let Ok(hits) =
-                crate::embeddings::search_similar(source_id, text_vector, net_count).await
+    // Walk the flattened component vectors in embedding order, merging
+    // near-identical components (first kept) and searching each survivor.
+    let mut group_lists: Vec<Vec<ComponentNet>> = to_embed
+        .iter()
+        .map(|(_, _, comps)| Vec::with_capacity(comps.len()))
+        .collect();
+    let mut flat = 0usize;
+    for (ti, (_, field, comps)) in to_embed.iter().enumerate() {
+        // Embedding-space merge: two judge components that are the same text
+        // in vector space are one component; keep the first.
+        let mut kept: Vec<(usize, &[f32])> = Vec::new();
+        for (ci, vector) in text_vectors.iter().skip(flat).take(comps.len()).enumerate() {
+            if kept
+                .iter()
+                .any(|(_, kv)| cosine_sim(kv, vector) >= NEAR_DUP_THRESHOLD)
             {
-                fuse_by_max_cosine(&mut fused, &hits);
+                warnings.push(format!(
+                    "{}: merged near-identical component \"{}\" into an earlier one",
+                    field.name, comps[ci]
+                ));
+                continue;
             }
-            if let Some(iv) = &image_vector {
-                if let Ok(hits) = crate::embeddings::search_similar(source_id, iv, net_count).await
+            kept.push((ci, vector));
+        }
+        for (ci, vector) in &kept {
+            // Fused best cosine per candidate, keyed by lowercased term so the
+            // same term surfacing from multiple sources/modalities merges at
+            // its highest score.
+            let mut fused: HashMap<String, NetCandidate> = HashMap::new();
+            for source_id in &field.vocab_source_ids {
+                if let Ok(hits) =
+                    crate::embeddings::search_similar(source_id, vector, net_count).await
                 {
                     fuse_by_max_cosine(&mut fused, &hits);
                 }
+                if let Some(iv) = &image_vector {
+                    if let Ok(hits) =
+                        crate::embeddings::search_similar(source_id, iv, net_count).await
+                    {
+                        fuse_by_max_cosine(&mut fused, &hits);
+                    }
+                }
             }
+            let mut ranked: Vec<NetCandidate> = fused.into_values().collect();
+            // Sort by cosine desc (stable on equal). No thesaurus tiebreak —
+            // validation owns final selection, and the user's per-field prompt
+            // guides it.
+            ranked.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            ranked.truncate(shortlist_count);
+            group_lists[ti].push(ComponentNet {
+                extraction: comps[*ci].clone(),
+                candidates: ranked,
+            });
         }
-        let mut ranked: Vec<NetCandidate> = fused.into_values().collect();
-        // Sort by cosine desc (stable on equal). No thesaurus tiebreak —
-        // validation owns final selection, and the user's per-field prompt
-        // guides it.
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        ranked.truncate(net_count);
+        flat += comps.len();
+    }
+    for ((i, _, _), groups) in to_embed.iter().zip(group_lists) {
         out.push(ResolvedVocab {
             field_index: *i,
-            candidates: ranked,
+            groups,
         });
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 
 /// Fold one ranked candidate list into the running max-cosine map, keeping each
@@ -261,6 +317,7 @@ fn fuse_by_max_cosine(
             .or_insert_with(|| NetCandidate {
                 term: hit.term.clone(),
                 score: hit.score,
+                vector: hit.vector.clone(),
             });
     }
 }
@@ -344,12 +401,15 @@ pub async fn catalogue_artefact(
     // mid-embed, or mid-validation. Dropping the future on cancel aborts its
     // in-flight reqwest request (the client closes the connection on drop).
     //
-    // Three steps feed one result:
+    // Four steps feed one result:
     //   - Artefact analysis: XML description + per-vocab-field <extraction> +
     //     per-open-field <open_field>.
-    //   - Embedding: each vocab field's extraction → candidate net (cosine).
-    //   - Validation (optional, threaded): vision picks top-N from each
-    //     field's net; when off, cosine top-N is used directly.
+    //   - Partition (optional): the judge names each multi-component field's
+    //     distinct components; fallback = the extraction split on semicolons.
+    //   - Embedding: each component text → its own candidate group (cosine).
+    //   - Validation (optional, threaded): vision picks ≤1 term per group;
+    //     then the max_components cut and the near-duplicate gate. When off,
+    //     each group's top cosine is the pick, then the same cut + gate.
     let app_for_pipeline = app.clone();
     let pipeline = async move {
         // --- Artefact analysis: unified prompt (image attached here, once) ---
@@ -391,28 +451,65 @@ pub async fn catalogue_artefact(
             ));
         }
 
-        // --- Embedding: per-field extraction → candidate net ---
+        // --- Partition (validation on, multi-component fields) ---
+        // One focused vision call names each multi-component field's distinct
+        // components. Quota-free by construction: the prompt builder never
+        // sees `max_components`, so the model can't pad to a number it wasn't
+        // shown — the post-validation cut enforces the cap instead. Any
+        // failure (or a field the judge didn't answer) falls back to the
+        // extraction's semicolon split, with a warning for traceability.
+        let multi_specs: Vec<FieldSpec> = fields
+            .iter()
+            .filter(|f| f.field_type == "vocab" && f.max_components != 1)
+            .cloned()
+            .collect();
+        let mut components_by_field: HashMap<String, Vec<String>> = HashMap::new();
+        let mut partition_warnings: Vec<String> = Vec::new();
+        if validation_enabled && !multi_specs.is_empty() {
+            let partition_prompt = build_partition_prompt(&multi_specs, &artefact.record);
+            let turns2 = vec![Turn {
+                role: TurnRole::User,
+                text: partition_prompt,
+                image: image.clone(),
+            }];
+            match do_completion(&app_for_pipeline, &provider, "Component Partition", &turns2).await
+            {
+                Ok((partition_content, _partition_group)) => {
+                    let (comps, mut warns) =
+                        parse_partition_response(&partition_content, &multi_specs);
+                    partition_warnings.append(&mut warns);
+                    components_by_field = comps;
+                }
+                Err(e) => partition_warnings.push(format!(
+                    "Component partition failed: {e} — falling back to the extraction split"
+                )),
+            }
+        }
+
+        // --- Embedding: per-component text → candidate group ---
         // Only when there's at least one vocab field with a usable source AND an
         // embedding provider. Otherwise validation is pointless and is skipped.
         let has_vocab = fields
             .iter()
             .any(|f| f.field_type == "vocab" && !f.vocab_source_ids.is_empty());
-        let resolved_vocab: Vec<ResolvedVocab> = if has_vocab {
+        let (resolved_vocab, resolve_warnings): (Vec<ResolvedVocab>, Vec<String>) = if has_vocab {
             match embedding_provider.as_ref() {
                 Some(ep) => {
                     resolve_vocab_fields(
                         ep,
                         &fields,
+                        &components_by_field,
                         &parsed.extractions,
                         image.as_ref(),
                         net_count,
+                        shortlist_count,
                     )
                     .await?
                 }
-                None => Vec::new(),
+                None => (Vec::new(), Vec::new()),
             }
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         // --- Validation (optional), threaded & trimmed from artefact analysis ---
@@ -426,8 +523,11 @@ pub async fn catalogue_artefact(
         let mut vocab_suggestions: HashMap<String, Vec<Suggestion>> = HashMap::new();
         let mut vocab_warnings: Vec<String> = Vec::new();
         if validation_enabled && has_vocab && !resolved_vocab.is_empty() {
-            // Build the per-field shortlist references for the prompt.
-            let shortlist_refs: Vec<(usize, &FieldSpec, &str, &[NetCandidate])> = resolved_vocab
+            // Build the per-field group references for the prompt. No cap
+            // here: the perceiver sees every component group the judge (or
+            // the fallback split) produced — the max_components cut applies
+            // to its validated picks afterwards.
+            let shortlist_refs: Vec<(usize, &FieldSpec, &str, &[ComponentNet])> = resolved_vocab
                 .iter()
                 .filter_map(|rv| {
                     let field = fields.get(rv.field_index)?;
@@ -436,11 +536,11 @@ pub async fn catalogue_artefact(
                         .get(&field.name)
                         .map(String::as_str)
                         .unwrap_or("");
-                    Some((rv.field_index, field, extracted, rv.candidates.as_slice()))
+                    Some((rv.field_index, field, extracted, rv.groups.as_slice()))
                 })
                 .collect();
             if !shortlist_refs.is_empty() {
-                let validation_prompt = build_validation_prompt(&shortlist_refs, shortlist_count);
+                let validation_prompt = build_validation_prompt(&shortlist_refs);
                 let trimmed_assistant = trim_for_validation(&content1);
                 let turns3 = vec![
                     Turn {
@@ -466,32 +566,25 @@ pub async fn catalogue_artefact(
                 // Map field name (lowercased) → candidate terms, for the
                 // hallucination guard in the parser.
                 let mut field_candidates: HashMap<String, Vec<String>> = HashMap::new();
-                for (_, field, _, candidates) in &shortlist_refs {
+                for (_, field, _, groups) in &shortlist_refs {
                     field_candidates.insert(
                         field.name.to_ascii_lowercase(),
-                        candidates.iter().map(|c| c.term.clone()).collect(),
+                        groups
+                            .iter()
+                            .flat_map(|g| g.candidates.iter().map(|c| c.term.clone()))
+                            .collect(),
                     );
                 }
                 let (picks_by_field, mut pick_warnings) =
                     parse_validation_response(&validation_content, &field_candidates);
                 vocab_warnings.append(&mut pick_warnings);
 
-                // Stamp each pick with its cosine from the net, truncate to the
-                // shortlist count, in net order (so they stay cosine-ranked).
-                let cosine_of = |field_lower: &str, term: &str| -> Option<f32> {
-                    shortlist_refs.iter().find_map(|(_, f, _, cands)| {
-                        if f.name.eq_ignore_ascii_case(field_lower) {
-                            cands.iter().find_map(|c| {
-                                c.term
-                                    .trim()
-                                    .eq_ignore_ascii_case(term.trim())
-                                    .then_some(c.score)
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                };
+                // Map each pick to its component group (the first group
+                // containing the term; a term surfacing in two groups can
+                // only be picked once), one winner per group — the higher
+                // cosine wins when the model picks twice from one group.
+                // Then the post-validation cut (`max_components`, logged) and
+                // the near-duplicate gate (logged) produce the record.
                 for rv in &resolved_vocab {
                     let Some(field) = fields.get(rv.field_index) else {
                         continue;
@@ -500,16 +593,36 @@ pub async fn catalogue_artefact(
                         .get(&field.name.to_ascii_lowercase())
                         .cloned()
                         .unwrap_or_default();
-                    let mut sugs: Vec<Suggestion> = picks
-                        .into_iter()
-                        .map(|term| {
-                            let score = cosine_of(&field.name, &term).unwrap_or(0.0);
-                            Suggestion {
-                                value: term,
-                                similarity: Some(score.clamp(0.0, 1.0) as f64),
+                    let mut winners: Vec<Option<NetCandidate>> = vec![None; rv.groups.len()];
+                    for pick in &picks {
+                        for (gi, g) in rv.groups.iter().enumerate() {
+                            if let Some(c) = g
+                                .candidates
+                                .iter()
+                                .find(|c| c.term.trim().eq_ignore_ascii_case(pick.trim()))
+                            {
+                                match &winners[gi] {
+                                    Some(w) if w.score >= c.score => {}
+                                    _ => winners[gi] = Some(c.clone()),
+                                }
+                                break;
                             }
+                        }
+                    }
+                    let picked: Vec<NetCandidate> = winners.into_iter().flatten().collect();
+                    let mut picked = cap_validated_picks(
+                        picked,
+                        field.max_components,
+                        &field.name,
+                        &mut vocab_warnings,
+                    );
+                    picked = dedupe_near_duplicates(picked, &field.name, &mut vocab_warnings);
+                    let mut sugs: Vec<Suggestion> = picked
+                        .into_iter()
+                        .map(|c| Suggestion {
+                            value: c.term,
+                            similarity: Some(c.score.clamp(0.0, 1.0) as f64),
                         })
-                        .take(shortlist_count)
                         .collect();
                     if sugs.is_empty() {
                         vocab_warnings.push(format!(
@@ -517,7 +630,7 @@ pub async fn catalogue_artefact(
                             field.name
                         ));
                     }
-                    // Keep net (cosine) order among the kept picks.
+                    // Keep cosine order among the recorded picks.
                     sugs.sort_by(|a, b| {
                         b.similarity
                             .unwrap_or(0.0)
@@ -528,15 +641,27 @@ pub async fn catalogue_artefact(
                 }
             }
         } else if has_vocab {
-            // Validation disabled: use cosine top-N from each net directly.
+            // Validation disabled: no perceiver at pick time — each group's
+            // top cosine candidate is the pick, then the same post-validation
+            // cut + near-duplicate gate.
             for rv in &resolved_vocab {
                 if let Some(field) = fields.get(rv.field_index) {
-                    let sugs: Vec<Suggestion> = rv
-                        .candidates
+                    let picked: Vec<NetCandidate> = rv
+                        .groups
                         .iter()
-                        .take(shortlist_count)
+                        .filter_map(|g| g.candidates.first().cloned())
+                        .collect();
+                    let mut picked = cap_validated_picks(
+                        picked,
+                        field.max_components,
+                        &field.name,
+                        &mut vocab_warnings,
+                    );
+                    picked = dedupe_near_duplicates(picked, &field.name, &mut vocab_warnings);
+                    let sugs: Vec<Suggestion> = picked
+                        .into_iter()
                         .map(|c| Suggestion {
-                            value: c.term.clone(),
+                            value: c.term,
                             similarity: Some(c.score.clamp(0.0, 1.0) as f64),
                         })
                         .collect();
@@ -546,6 +671,8 @@ pub async fn catalogue_artefact(
         }
 
         let mut all_warnings = parsed.warnings.clone();
+        all_warnings.extend(partition_warnings);
+        all_warnings.extend(resolve_warnings);
         all_warnings.extend(vocab_warnings);
         // Merge: open fields (similarity absent) + vocab fields (cosine).
         let mut field_results = std::collections::BTreeMap::new();
@@ -603,6 +730,123 @@ pub async fn catalogue_artefact(
     }
 
     Ok(result)
+}
+
+/// Mutual-cosine threshold for the embedding-space merges: two components (or
+/// two picked terms) at or above this are near-synonyms in the thesaurus's own
+/// vector space. Conservative by design — it merges "hand weaving"/"weaving",
+/// not red/crimson (that judgment belongs to the perceiver and the user's
+/// per-field prompt).
+const NEAR_DUP_THRESHOLD: f32 = 0.90;
+
+/// Cosine similarity between two embeddings. Dissimilar-length or empty
+/// inputs score 0.0 (never a false "duplicate").
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
+/// Split a vocab field's extraction into per-component retrieval texts. This
+/// is the *fallback* partitioner (validation off, or the judge failed): the
+/// extraction guidance asks for semicolon-separated components, so the split
+/// mirrors that. Single-component fields (max_components 1) never split. A
+/// text with no usable split yields the whole extraction as one component;
+/// an empty extraction yields one empty component (the resolver skips it).
+fn split_components(field: &FieldSpec, extraction: &str) -> Vec<String> {
+    let trimmed = extraction.trim();
+    if field.max_components == 1 {
+        return vec![trimmed.to_string()];
+    }
+    let parts: Vec<String> = extraction
+        .split(';')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        parts
+    }
+}
+
+/// Post-validation cut: the perceiver saw every component group; this keeps
+/// the field's best N validated picks by cosine (N=0 → no cap) and logs each
+/// dropped pick so the cut is auditable.
+fn cap_validated_picks(
+    picks: Vec<NetCandidate>,
+    max_components: u32,
+    field_name: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<NetCandidate> {
+    if max_components == 0 || picks.len() <= max_components as usize {
+        return picks;
+    }
+    let mut sorted = picks;
+    sorted.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let dropped: Vec<String> = sorted[max_components as usize..]
+        .iter()
+        .map(|c| format!("\"{}\"", c.term))
+        .collect();
+    warnings.push(format!(
+        "{field_name}: kept best {} of {} validated picks — dropped: {}",
+        max_components,
+        sorted.len(),
+        dropped.join(", ")
+    ));
+    sorted.truncate(max_components as usize);
+    sorted
+}
+
+/// Near-duplicate gate: greedy pass in cosine-desc order; a pick whose
+/// embedding sits at ≥ `NEAR_DUP_THRESHOLD` to an already-kept pick is a
+/// near-synonym in the thesaurus's own space and is dropped with a warning.
+/// Picks with an empty vector (unreadable column) are always kept — the gate
+/// never guesses.
+fn dedupe_near_duplicates(
+    picks: Vec<NetCandidate>,
+    field_name: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<NetCandidate> {
+    let mut sorted = picks;
+    sorted.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<NetCandidate> = Vec::new();
+    for cand in sorted {
+        let dup = kept.iter().any(|k| {
+            !k.vector.is_empty()
+                && !cand.vector.is_empty()
+                && cosine_sim(&k.vector, &cand.vector) >= NEAR_DUP_THRESHOLD
+        });
+        if dup {
+            warnings.push(format!(
+                "{field_name}: dropped near-duplicate pick \"{}\" (≥ {NEAR_DUP_THRESHOLD} cosine to a kept term)",
+                cand.term
+            ));
+        } else {
+            kept.push(cand);
+        }
+    }
+    kept
 }
 
 /// Trim artefact analysis's XML answer down to just the parts validation needs:
@@ -704,6 +948,7 @@ fn guess_mime(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::types::fixtures::vocab_field;
 
     #[test]
     fn trim_for_validation_drops_open_field_keeps_description_and_extractions() {
@@ -715,5 +960,99 @@ mod tests {
         assert!(trimmed.contains("<extraction field=\"Material\">bronze</extraction>"));
         // Open-field answers are irrelevant to validation and must be dropped.
         assert!(!trimmed.contains("8th c."));
+    }
+
+    /// Test pick: term + score, empty vector (the gate skips empty vectors).
+    fn pick(term: &str, score: f32) -> NetCandidate {
+        NetCandidate {
+            term: term.to_string(),
+            score,
+            vector: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn split_components_follows_the_field_mode() {
+        let mut f = vocab_field("Material");
+        // 1 = single: never split.
+        f.max_components = 1;
+        assert_eq!(
+            split_components(&f, "jute body; synthetic lining"),
+            vec!["jute body; synthetic lining"]
+        );
+        // Multi fields split on semicolons, trimming and dropping empties.
+        f.max_components = 0;
+        assert_eq!(
+            split_components(&f, " jute body ; ; lining "),
+            vec!["jute body", "lining"]
+        );
+        // No semicolons → the whole extraction is one component.
+        assert_eq!(split_components(&f, "jute body"), vec!["jute body"]);
+        // Empty extraction → one empty component (the resolver skips it).
+        assert_eq!(split_components(&f, "  "), vec![""]);
+    }
+
+    #[test]
+    fn cap_validated_picks_keeps_the_strongest_n_and_warns() {
+        let mut warnings = Vec::new();
+        let picks = vec![
+            pick("a", 0.5),
+            pick("b", 0.9),
+            pick("c", 0.7),
+            pick("d", 0.4),
+        ];
+        let kept = cap_validated_picks(picks, 3, "Material", &mut warnings);
+        assert_eq!(
+            kept.iter().map(|c| c.term.as_str()).collect::<Vec<_>>(),
+            ["b", "c", "a"]
+        );
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("kept best 3 of 4") && w.contains("\"d\"")));
+
+        // Under the cap: untouched, no warning.
+        let mut warnings = Vec::new();
+        let kept = cap_validated_picks(vec![pick("a", 0.5)], 3, "Material", &mut warnings);
+        assert_eq!(kept.len(), 1);
+        assert!(warnings.is_empty());
+
+        // 0 = no cap.
+        let mut warnings = Vec::new();
+        let picks = vec![pick("a", 0.5), pick("b", 0.9)];
+        let kept = cap_validated_picks(picks, 0, "Material", &mut warnings);
+        assert_eq!(kept.len(), 2);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn near_duplicate_gate_merges_synonyms_and_keeps_distinct_picks() {
+        let mut warnings = Vec::new();
+        // "weaving" and "hand weaving" are near-synonyms in vector space;
+        // "jute" is orthogonal to both.
+        let picks = vec![
+            NetCandidate {
+                term: "hand weaving".to_string(),
+                score: 0.8,
+                vector: vec![1.0, 0.05],
+            },
+            NetCandidate {
+                term: "weaving".to_string(),
+                score: 0.9,
+                vector: vec![1.0, 0.0],
+            },
+            NetCandidate {
+                term: "jute".to_string(),
+                score: 0.5,
+                vector: vec![0.0, 1.0],
+            },
+        ];
+        let kept = dedupe_near_duplicates(picks, "Technique", &mut warnings);
+        assert_eq!(
+            kept.iter().map(|c| c.term.as_str()).collect::<Vec<_>>(),
+            ["weaving", "jute"]
+        );
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("hand weaving") && w.contains("near-duplicate")));
     }
 }

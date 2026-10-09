@@ -53,6 +53,9 @@ interface RustField {
   type: string;
   prompt: string;
   vocabSourceIds: string[];
+  /** Distinct components the AI picks the top term for: 1 = single,
+   *  2+ = one per component, 0 = unlimited. */
+  maxComponents: number;
 }
 
 interface RustEmbeddingProvider {
@@ -245,6 +248,7 @@ export async function catalogueArtefact(
     // guarantee a vocab field's sources are synced AND an embedding provider
     // is active by call time.
     vocabSourceIds: vocabSourceIdsForRetrieval(f, settings),
+    maxComponents: f.maxComponents,
   }));
   const rustArtefact: RustArtefact = {
     record: recordForAI(record, settings.artefactFields || []),
@@ -303,6 +307,7 @@ export async function buildPromptPreview(settings: Settings): Promise<string> {
     type: f.type,
     prompt: f.prompt,
     vocabSourceIds: [],
+    maxComponents: f.maxComponents,
   }));
   return invoke<string>("build_artefact_analysis_prompt_preview", { columns, fields, artefact: rustArtefact });
 }
