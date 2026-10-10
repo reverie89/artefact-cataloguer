@@ -32,6 +32,14 @@ interface Props {
   convertFileSrc: (path: string) => string;
 }
 
+/** Group pill label: a bare count until processing starts, `n/m … OK` while
+    partly done, plain `m … OK` once every visible record is done. */
+function recordsPill(total: number, done: number): string {
+  const n = `${total} record${total === 1 ? "" : "s"}`;
+  if (done === 0) return n;
+  return done === total ? `${n} OK` : `${done}/${n} OK`;
+}
+
 export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
   const { settings } = state;
   const q = state.resultsSearch.toLowerCase();
@@ -242,28 +250,40 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           </div>
         </div>
       ) : (
-        groups.map((g) => (
-          <div key={g.fileId} className={cn(confirmingDeleteFileId === g.fileId && "bg-destructive/10")}>
-            <div className="bg-muted/30 border-border/60 flex shrink-0 items-center gap-2 border-b px-5 py-1.5">
-              <FileSpreadsheet className="text-primary size-3.5 shrink-0" />
-              <span className="text-muted-foreground min-w-0 truncate text-[13px] font-medium">{g.sourceName}</span>
-              <Badge variant="secondary" className="text-[11px]">{g.rows.length} record{g.rows.length === 1 ? "" : "s"}</Badge>
-              <span className="flex-1" />
-              <Button
-                onClick={() => void handleDeleteGroup(g.fileId)}
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Delete all records from ${g.sourceName}`}
-                className={cn("text-muted-foreground hover:text-destructive", confirmingDeleteFileId === g.fileId && "text-destructive")}
-              >
-                <Trash2 className="size-3" />
-              </Button>
+        groups.map((g) => {
+          // Tallies track the visible (filtered) rows, like the count itself.
+          const done = g.rows.filter((r) => r.status === "done").length;
+          const errors = g.rows.filter((r) => r.status === "error").length;
+          const cancelled = g.rows.filter((r) => r.status === "cancelled").length;
+          return (
+            <div key={g.fileId} className={cn(confirmingDeleteFileId === g.fileId && "bg-destructive/10")}>
+              <div className="bg-muted/30 border-border/60 flex shrink-0 items-center gap-2 border-b px-5 py-1.5">
+                <FileSpreadsheet className="text-primary size-3.5 shrink-0" />
+                <span className="text-muted-foreground min-w-0 truncate text-[13px] font-medium">{g.sourceName}</span>
+                <Badge variant="secondary" className="text-[11px]">{recordsPill(g.rows.length, done)}</Badge>
+                {errors > 0 && (
+                  <Badge variant="destructive" className="text-[11px]">{errors} error{errors === 1 ? "" : "s"}</Badge>
+                )}
+                {cancelled > 0 && (
+                  <Badge variant="outline" className="text-[11px]">{cancelled} cancelled</Badge>
+                )}
+                <span className="flex-1" />
+                <Button
+                  onClick={() => void handleDeleteGroup(g.fileId)}
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Delete all records from ${g.sourceName}`}
+                  className={cn("text-muted-foreground hover:text-destructive", confirmingDeleteFileId === g.fileId && "text-destructive")}
+                >
+                  <Trash2 className="size-3" />
+                </Button>
+              </div>
+              {g.rows.map((row, i) => (
+                <ResultRow key={row.uid} row={row} index={i + 1} state={state} actions={actions} convertFileSrc={convertFileSrc} />
+              ))}
             </div>
-            {g.rows.map((row, i) => (
-              <ResultRow key={row.uid} row={row} index={i + 1} state={state} actions={actions} convertFileSrc={convertFileSrc} />
-            ))}
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );

@@ -47,7 +47,7 @@ describe("ResultsPanel header visibility", () => {
 });
 
 describe("ResultsPanel file groups", () => {
-  it("renders one group header per source file with its record count and delete affordances", () => {
+  it("renders one group header per source file with its progress pill and delete affordances", () => {
     renderWith({
       results: [
         { uid: "u1", fileId: "f1", sourceName: "survey.xlsx", status: "done", record: {} },
@@ -58,12 +58,53 @@ describe("ResultsPanel file groups", () => {
 
     expect(screen.getByText("survey.xlsx")).toBeInTheDocument();
     expect(screen.getByText("loans.xlsx")).toBeInTheDocument();
-    expect(screen.getByText("2 records")).toBeInTheDocument();
+    expect(screen.getByText("1/2 records OK")).toBeInTheDocument();
     expect(screen.getByText("1 record")).toBeInTheDocument();
+    expect(screen.getByText("1 error")).toBeInTheDocument();
     // Delete-all per group, per-row delete per record.
     expect(screen.getByRole("button", { name: /delete all records from survey\.xlsx/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /delete all records from loans\.xlsx/i })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Delete record" })).toHaveLength(3);
+  });
+
+  it("shows a bare record count before processing starts, with no failure pills", () => {
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} },
+      ],
+    });
+
+    expect(screen.getByText("2 records")).toBeInTheDocument();
+    expect(screen.queryByText(/records OK/)).not.toBeInTheDocument();
+    expect(screen.queryByText("1 error")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 cancelled")).not.toBeInTheDocument();
+  });
+
+  it("marks the pill OK once every record is done", () => {
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} },
+      ],
+    });
+
+    expect(screen.getByText("2 records OK")).toBeInTheDocument();
+  });
+
+  it("shows per-group error and cancelled pills alongside the partial progress count", () => {
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "error", record: {} },
+        { uid: "u3", fileId: "f1", sourceName: "a.xlsx", status: "cancelled", record: {} },
+        { uid: "u4", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} },
+      ],
+    });
+
+    expect(screen.getByText("1/4 records OK")).toBeInTheDocument();
+    expect(screen.getByText("1 error")).toBeInTheDocument();
+    expect(screen.getByText("1 cancelled")).toBeInTheDocument();
   });
 
   it("highlights the whole group while its delete-all confirmation is open", async () => {
