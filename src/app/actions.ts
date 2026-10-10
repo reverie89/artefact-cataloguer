@@ -65,11 +65,12 @@ export interface AppActions {
   /** Stop the queue: cancel every in-flight AI call at the transport level
    *  and exit the drainer. Queued rows stay queued so Start can resume. */
   stopQueue(): Promise<void>;
-  /** Requeue every errored/cancelled row at once. Never runs anything — the
-    * queue is started separately, so a failing row can't loop. */
+  /** Requeue every errored/cancelled row at once, then restart the queue if
+    * it was stopped (a live drainer picks the rows up on its own). Restart is
+    * click-driven only — a failing row can't loop. */
   retryFailed(): void;
   /** Put a single row back into the queue (even a `done` one — a manual
-   *  re-run). Picked up by the next Start. */
+   *  re-run) and restart the queue if it was stopped. */
   requeueRow(uid: string): void;
   /** Stop an in-flight `processing` row by cancelling its AI call at the
    *  transport level (the Rust side drops the reqwest future, closing the
@@ -685,6 +686,18 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   // from live state each iteration, so rows imported or requeued mid-run
   // merge into the drain naturally.
   const startQueue = useCallback(async () => {
+    // A Stop leaves the previous drainer exiting while its cancelled row
+    // settles: wait it out, then claim. A live, uncancelled drainer is a
+    // genuine no-op.
+    while (queueControl.current.running && queueControl.current.cancelled) {
+      await delay(50);
+    }
+    // The first scan below reads getState(), mirrored from committed state;
+    // yield once so a dispatch made synchronously before this call — Retry's
+    // requeue — is visible to it.
+    await Promise.resolve();
+    // Re-checked after the waits: from here to the claim there is no await,
+    // so concurrent callers can never both claim the queue.
     if (queueControl.current.running) return;
     const preflightError = parsePreFlightError(state.settings);
     if (preflightError) {
@@ -705,7 +718,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         const row = getState().results.find((r) => r.status === "queued");
         if (!row) break;
         await runRow(row, prov);
-        await delay(300 + Math.random() * 300);
+        // Skip the inter-row pause once a stop is pending — it is the last
+        // wait between the click and the header flipping back to Start.
+        if (!queueControl.current.cancelled) await delay(300 + Math.random() * 300);
       }
     } finally {
       queueControl.current.running = false;
@@ -727,27 +742,26 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         pushLog({ status: "fail", label: "Stop failed", detail: String((e as Error)?.message || e) });
       }
     }
-    // Wait briefly for settlement so the header doesn't flip back to Start
-    // while a row is still finishing.
-    for (let i = 0; i < 100; i++) {
-      if (!getState().results.some((r) => r.status === "processing")) break;
-      await delay(100);
-    }
-    pushLog({ status: "ok", label: "Queue stopped", detail: "Queued rows remain queued — press Start to resume" });
+    pushLog({ status: "ok", label: "Queue stopped", detail: "Queued rows remain queued — Start or Retry resumes" });
   }, [getState]);
 
-  // Pure requeue: Retry never runs anything itself, so a failing row can't
-  // loop — the user starts the queue again when ready.
+  // Requeue every errored/cancelled row, then restart the queue if it isn't
+  // running (a stopped queue resumes; a live drainer picks the rows up on
+  // its own). Explicitly click-driven, so a failing row can't loop.
   const retryFailed = useCallback(() => {
     const uids = getState().results.filter((r) => r.status === "error" || r.status === "cancelled").map((r) => r.uid);
     if (uids.length === 0) return;
     dispatch({ type: "REQUEUE_ROWS", uids });
     pushLog({ status: "busy", label: "Retry failed rows", detail: `${uids.length} row${uids.length === 1 ? "" : "s"} requeued` });
-  }, [dispatch, getState]);
+    void startQueue();
+  }, [dispatch, getState, startQueue]);
 
+  // Restart the queue with the requeued row if it was stopped; a live
+  // drainer picks it up on its own.
   const requeueRow = useCallback((uid: string) => {
     dispatch({ type: "REQUEUE_ROWS", uids: [uid] });
-  }, [dispatch]);
+    void startQueue();
+  }, [dispatch, startQueue]);
 
   const dismissParseError = useCallback(() => dispatch({ type: "SET_PARSE_ERROR", error: null }), [dispatch]);
 

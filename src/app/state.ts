@@ -131,7 +131,8 @@ export interface AppState {
    *  panel; dismissed by the user or cleared on a successful export. */
   exportWarning: string | null;
   /** Whether the catalogue queue drainer (startQueue) is alive. Drives the
-   *  header Stop button; queued rows survive a stop so Start can resume. */
+   *  header Stop button; queued rows survive a stop so Start or Retry can
+   *  resume. */
   queueRunning: boolean;
 
   // Settings

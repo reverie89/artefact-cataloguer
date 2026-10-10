@@ -1,8 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { useCallback, useLayoutEffect, useReducer, useRef } from "react";
 
-import { composeExportTable, computeColumnWidths, csvSafeCell, parsePreFlightError } from "./actions";
+import { composeExportTable, computeColumnWidths, csvSafeCell, parsePreFlightError, useActions, type AppActions } from "./actions";
 import { _DEF } from "./defaults";
+import { initialState, reducer, type Action, type AppState } from "./state";
 import type { AiResults, ArtefactRow, FieldSelection, Settings, VocabEmbeddingStatus } from "./types";
+import { CANCEL_ERROR, catalogueArtefact, cancelCatalogue } from "../lib/ai";
+
+// The queue tests below drive useActions (the catalogue drainer) with the AI
+// transport mocked at the lib/ai boundary; everything else stays the real
+// module, including parsePreFlightError.
+vi.mock("../lib/ai", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  catalogueArtefact: vi.fn(),
+  cancelCatalogue: vi.fn(async () => {}),
+}));
 
 describe("csvSafeCell", () => {
   // OWASP CSV-formula-injection neutralization: a value whose first char is one
@@ -208,5 +221,129 @@ describe("parsePreFlightError", () => {
     s.embeddingProviders = [{ id: "e1", name: "Emb", baseUrl: "https://b", apiKey: "k", model: "m" }];
     s.activeEmbeddingProvider = "e1";
     expect(parsePreFlightError(s)).toBeNull();
+  });
+});
+
+// ─── Queue sequencing (startQueue / stopQueue / retry) ─────────────────────
+// The drainer, its stop path and Retry's auto-restart live in the useActions
+// hook. These tests drive the hook through App's exact wiring — reducer state
+// plus a ref mirrored at commit — with catalogueArtefact/cancelCatalogue
+// mocked, so Retry-after-stop behaves here as it does in the real app.
+
+// catalogueArtefact's per-row return shape: field name → suggestions.
+const FIXTURE_AI: Record<string, { value: string; similarity?: number }[]> = { Place: [{ value: "Java" }] };
+
+// Passes parsePreFlightError: active provider, no vocab fields.
+function queueSettings(): Settings {
+  const s = _DEF();
+  s.providers = [{ id: "p1", name: "Prov", baseUrl: "https://a", apiKey: "k", model: "m" }];
+  s.activeProvider = "p1";
+  s.fields = [];
+  return s;
+}
+
+function queueRow(uid: string, status: ArtefactRow["status"]): ArtefactRow {
+  return { uid, fileId: "f1", sourceName: "a.xlsx", status, record: { Material: "bronze" } };
+}
+
+interface Harness {
+  state: AppState;
+  actions: AppActions;
+  dispatched: { current: Action[] };
+}
+
+// Mirrors App.tsx's wiring: reducer state, a ref mirrored in a layout effect
+// (so getState() sees committed state after one microtask), the drainer
+// reading that ref as its live scan.
+function useHarness(seed: { rows: ArtefactRow[]; settings: Settings }): Harness {
+  const [state, dispatch] = useReducer(reducer, seed, (s) => ({ ...initialState, results: s.rows, settings: s.settings }));
+  const stateRef = useRef(state);
+  useLayoutEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+  const dispatched = useRef<Action[]>([]);
+  const dispatchSpy = useCallback((a: Action) => {
+    dispatched.current.push(a);
+    dispatch(a);
+  }, [dispatch]);
+  const actions = useActions(
+    state,
+    dispatchSpy,
+    { schedule: () => {}, flush: () => Promise.resolve() },
+    async () => true,
+    () => stateRef.current
+  );
+  return { state, actions, dispatched };
+}
+
+describe("queue sequencing (useActions)", () => {
+  afterEach(cleanup);
+
+  beforeEach(() => {
+    vi.mocked(catalogueArtefact).mockReset();
+    vi.mocked(catalogueArtefact).mockResolvedValue(FIXTURE_AI);
+    vi.mocked(cancelCatalogue).mockReset();
+    vi.mocked(cancelCatalogue).mockResolvedValue(undefined);
+  });
+
+  const runningFlags = (h: Harness): boolean[] =>
+    h.dispatched.current.filter((a) => a.type === "SET_QUEUE_RUNNING").map((a) => a.running);
+
+  it("Retry on a stopped queue requeues the failed rows and restarts", async () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "error"), queueRow("u2", "cancelled")], settings: queueSettings() }));
+    act(() => {
+      h.result.current.actions.retryFailed();
+    });
+    await waitFor(() => expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "done"]), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(2);
+    expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("per-row Retry on a stopped queue restarts it", async () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "cancelled")], settings: queueSettings() }));
+    act(() => {
+      h.result.current.actions.requeueRow("u1");
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("done"), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(1);
+    expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("Retry while the queue is running starts no second drainer", async () => {
+    let release!: () => void;
+    vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(FIXTURE_AI); }));
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "queued"), queueRow("u2", "error")], settings: queueSettings() }));
+    act(() => {
+      void h.result.current.actions.startQueue();
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("processing"));
+    act(() => {
+      h.result.current.actions.retryFailed();
+    });
+    release();
+    await waitFor(() => expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "done"]), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(2);
+    expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("Stop flips queueRunning false without the inter-row pause", async () => {
+    let rejectRow!: (e: Error) => void;
+    vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRow = reject; }));
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "queued"), queueRow("u2", "queued")], settings: queueSettings() }));
+    act(() => {
+      void h.result.current.actions.startQueue();
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("processing"));
+    await act(async () => {
+      await h.result.current.actions.stopQueue();
+    });
+    rejectRow(new Error(CANCEL_ERROR));
+    // The flip must land before the 300 ms inter-row pause would elapse —
+    // that tail delay is exactly what this guards against reintroducing.
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 250 });
+    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["cancelled", "queued"]);
   });
 });

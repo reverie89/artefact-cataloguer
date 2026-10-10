@@ -20,7 +20,7 @@
 - **Embedded-image extraction** — `.xlsx` drawing anchors are mapped to media files and snapped to the nearest data row; images are served via the Tauri asset protocol.
 - **Image lightbox** — full-screen viewer with zoom-in/out/reset and a live percentage readout (local `useImageZoom` hook).
 - **Import & grouped records** — browse or drop one or more `.xlsx` files and each is validated + parsed on the spot: valid records join the results panel immediately (grouped by source file, deletable per row or whole-file); invalid files fail loudly with a per-file reason card.
-- **Queue controls** — imported records wait as **queued**; **Start** drains them one AI call at a time (rows imported or requeued mid-run merge in), **Stop** transport-cancels in-flight rows (queued rows stay queued — Start resumes), **Retry** requeues every failed row (never runs anything itself), and per-row **Stop** / **Retry** are available on the rows.
+- **Queue controls** — imported records wait as **queued**; **Start** drains them one AI call at a time (rows imported or requeued mid-run merge in), **Stop** transport-cancels in-flight rows (queued rows stay queued — Start resumes), **Retry** requeues every failed row and restarts a stopped queue, and per-row **Stop** / **Retry** are available on the rows (per-row Retry also restarts a stopped queue).
 - **Review-friendly results** — expandable rows with status dots, searchable field dropdowns, filter + a column-scoped search over results (pick which artefact-file and catalogue columns the search matches), drag-to-reorder vocab/field lists.
 - **Multiple AI providers** — configure several providers, drag them into a preferred order, mark one active, and run a **Test Connection** per provider (fetches the model list).
 - **Settings import/export** — round-trip the settings blob as a zod-validated JSON file.
@@ -66,7 +66,7 @@ An active provider is required before cataloguing — without one, starting the 
 
 Click **Start** to drain the queued rows through the active provider. Results stream in live: each row shows per-field suggestions (controlled-vocab fields ranked by cosine similarity; open-ended fields with the model's free-text answer). For each field, accept an AI pick, choose from its controlled-vocabulary dropdown, or type a value manually. A vocab field with no matching candidate stays empty — the model can only pick from the source's terms. Use the image lightbox to inspect the artefact. Records are grouped by the file they were imported from — delete a single record with its row's delete button, or all of a file's records with the group's delete button (both confirm first).
 
-While the queue runs, **Stop** cancels the in-flight rows (queued rows stay queued — **Start** resumes). A **processing** row offers **Stop** (cancels just that row's in-flight call — the rest of the queue continues); an **errored**/**cancelled** row offers **Retry**, and all failed rows can be requeued at once via **Retry** in the header. A failing row marks only itself as errored — the queue continues.
+While the queue runs, **Stop** cancels the in-flight rows (queued rows stay queued — **Start** resumes). A **processing** row offers **Stop** (cancels just that row's in-flight call — the rest of the queue continues); an **errored**/**cancelled** row offers **Retry**, and all failed rows can be requeued at once via **Retry** in the header — Retry also restarts a stopped queue, so failed rows rerun without a separate Start. A failing row marks only itself as errored — the queue continues.
 
 ### Step 4: Export
 

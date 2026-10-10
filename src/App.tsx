@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -43,10 +43,13 @@ const ARTEFACT_ANALYSIS_STAGE_LABEL: Record<string, string> = {
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  // Keep a ref so the saver always reads the latest bundle.
+  // Keep a ref so the saver and the queue drainer's getState() always read
+  // the latest bundle. useLayoutEffect, not useEffect, so the mirror is in
+  // place at commit: startQueue yields one microtask after a synchronous
+  // dispatch (Retry's requeue) and must then scan the committed rows.
   const stateRef = useRef(state);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     stateRef.current = state;
   }, [state]);
 
