@@ -304,12 +304,14 @@ export function csvSafeCell(value: string): string {
   return value;
 }
 
-/** Derive a human-readable label for a parsed row, for log detail lines.
- *  Reads the most identifying text column from `record` (Object Name or
- *  Title by convention, case-insensitive) since `ArtefactRow` no longer
- *  carries structured id/title fields. Falls back to a positional label so
- *  the log line is never empty. */
-function rowLabel(row: ArtefactRow, index?: number): string {
+/** Derive a human-readable label for a parsed row, for log detail lines and
+ *  Logs Viewer record-group headers. Reads the most identifying text column
+ *  from `record` (Object Name or Title by convention, case-insensitive) since
+ *  `ArtefactRow` no longer carries structured id/title fields. Falls back to a
+ *  positional label so the log line is never empty. Exported so the Logs
+ *  Viewer can label groups from an event's captured `verbose.record` without
+ *  threading live results state in. */
+export function rowLabel(row: Pick<ArtefactRow, "record">, index?: number): string {
   const record = row.record ?? {};
   const find = (re: RegExp) => {
     const k = Object.keys(record).find((kk) => re.test(kk.trim().toLowerCase()));
@@ -665,7 +667,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
     const start = performance.now();
     try {
-      const ai = await catalogueArtefact(prov, state.settings.fields, record, row.imagePath, state.settings, `row-${row.uid}`);
+      const ai = await catalogueArtefact(prov, state.settings.fields, record, row.imagePath, state.settings, jobId, (p) =>
+        dispatch({ type: "SET_CATALOGUE_PROGRESS", uid: row.uid, step: p.step, total: p.total })
+      );
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "done", ai });
       pushLog({
         status: "ok",
@@ -690,6 +694,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       }
       dispatch({ type: "SET_ROW_STATUS", uid: row.uid, status: "error" });
       pushLog({ status: "fail", jobId, label: "Row failed", detail: message, elapsedMs: Math.round(performance.now() - start), verbose: { error: message } });
+    } finally {
+      // The stage counter is transient — cleared whatever way the run ends.
+      dispatch({ type: "CLEAR_CATALOGUE_PROGRESS", uid: row.uid });
     }
   }, [state.settings, dispatch]);
 

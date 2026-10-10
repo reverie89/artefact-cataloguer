@@ -3,6 +3,7 @@
 // can surface them — there is no demo fallback.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AiSuggestion, ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
 import { embeddingModelStale } from "../app/vocabSettings";
 import { normalizeHeader } from "./spreadsheet";
@@ -217,6 +218,15 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
   }
 }
 
+/** Per-record pipeline position emitted by Rust onto `"ac-catalogue-progress"`
+ *  at each catalogue stage start (stage list: ai.rs `stage_plan`). `jobId`
+ *  mirrors the invoke's `jobId` so concurrent runs can be told apart. */
+interface CatalogueProgressEvent {
+  jobId: string;
+  step: number;
+  total: number;
+}
+
 /**
  * Catalogue one artefact via the active provider. The image (when present) is
  * inlined into artefact analysis by the Rust side; the three-step XML pipeline
@@ -229,7 +239,9 @@ export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiForma
  *
  * `cancelKey` identifies this call in Rust's cancel registry (see
  * {@link cancelCatalogue}); cancelling it makes the Rust side drop the in-flight
- * reqwest future and reject this promise with {@link CANCEL_ERROR}.
+ * reqwest future and reject this promise with {@link CANCEL_ERROR}. When
+ * `onProgress` is given, it receives the row's pipeline position (step/total
+ * stage counter) at each stage start, scoped to this call's `cancelKey`.
  */
 export async function catalogueArtefact(
   provider: Provider,
@@ -237,7 +249,8 @@ export async function catalogueArtefact(
   record: Record<string, string>,
   imagePath: string | undefined,
   settings: Settings,
-  cancelKey: string
+  cancelKey: string,
+  onProgress?: (p: { step: number; total: number }) => void
 ): Promise<Record<string, AiSuggestion[]>> {
   const rustFields: RustField[] = fields.map((f) => ({
     name: f.name,
@@ -260,17 +273,29 @@ export async function catalogueArtefact(
     artefactColumns: aiIncludedColumns(settings),
   };
   const embProvider = activeEmbeddingProvider(settings);
-  const res = await invoke<RawCatalogueResult>("catalogue_artefact", {
-    provider: toRustProvider(provider),
-    fields: rustFields,
-    artefact: rustArtefact,
-    jobId: cancelKey,
-    embeddingProvider: embProvider ? toRustEmbeddingProvider(embProvider) : null,
-    netCount: settings.vocabNetCount,
-    shortlistCount: settings.vocabShortlistCount,
-    validationEnabled: settings.validationEnabled,
-  });
-  return res.fieldResults || {};
+  let unlisten: UnlistenFn | undefined;
+  try {
+    if (onProgress) {
+      // Registered before the invoke so the first stage event can't race the
+      // listener; the Rust pipeline emits its first step immediately.
+      unlisten = await listen<CatalogueProgressEvent>("ac-catalogue-progress", (ev) => {
+        if (ev.payload.jobId === cancelKey) onProgress(ev.payload);
+      });
+    }
+    const res = await invoke<RawCatalogueResult>("catalogue_artefact", {
+      provider: toRustProvider(provider),
+      fields: rustFields,
+      artefact: rustArtefact,
+      jobId: cancelKey,
+      embeddingProvider: embProvider ? toRustEmbeddingProvider(embProvider) : null,
+      netCount: settings.vocabNetCount,
+      shortlistCount: settings.vocabShortlistCount,
+      validationEnabled: settings.validationEnabled,
+    });
+    return res.fieldResults || {};
+  } finally {
+    if (unlisten) unlisten();
+  }
 }
 
 /**

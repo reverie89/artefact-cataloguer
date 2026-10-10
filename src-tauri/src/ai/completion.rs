@@ -269,6 +269,7 @@ pub(crate) async fn do_completion<R: Runtime>(
     app: &AppHandle<R>,
     provider: &Provider,
     label: &str,
+    row_id: &str,
     turns: &[Turn],
 ) -> Result<(String, String), String> {
     let base = trim_trailing_slash(&provider.base_url);
@@ -288,6 +289,7 @@ pub(crate) async fn do_completion<R: Runtime>(
         PipelineStageEvent {
             stage: "postSent",
             job_group: job_group.clone(),
+            row_id: Some(row_id.to_string()),
             status: "busy",
             label: if label.is_empty() {
                 None
@@ -326,6 +328,7 @@ pub(crate) async fn do_completion<R: Runtime>(
                 PipelineStageEvent {
                     stage: "failed",
                     job_group: job_group.clone(),
+                    row_id: Some(row_id.to_string()),
                     status: "fail",
                     label: None,
                     detail: Some("transport error".to_string()),
@@ -355,6 +358,7 @@ pub(crate) async fn do_completion<R: Runtime>(
             PipelineStageEvent {
                 stage: "failed",
                 job_group: job_group.clone(),
+                row_id: Some(row_id.to_string()),
                 status: "fail",
                 label: None,
                 detail: Some(format!("HTTP {}", status.as_u16())),
@@ -383,6 +387,7 @@ pub(crate) async fn do_completion<R: Runtime>(
             PipelineStageEvent {
                 stage: "done",
                 job_group: job_group.clone(),
+                row_id: Some(row_id.to_string()),
                 status: "ok",
                 label: None,
                 detail: Some(format!("HTTP {} ({}ms)", status.as_u16(), elapsed)),
@@ -410,6 +415,7 @@ pub(crate) async fn do_completion<R: Runtime>(
                 PipelineStageEvent {
                     stage: "done",
                     job_group: job_group.clone(),
+                    row_id: Some(row_id.to_string()),
                     status: "ok",
                     label: None,
                     detail: Some(format!("HTTP {} ({}ms)", status.as_u16(), elapsed)),
@@ -444,6 +450,7 @@ pub(crate) async fn do_completion<R: Runtime>(
         PipelineStageEvent {
             stage: "done",
             job_group: job_group.clone(),
+            row_id: Some(row_id.to_string()),
             status: "ok",
             label: None,
             detail: Some(detail),

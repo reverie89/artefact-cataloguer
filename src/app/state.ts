@@ -138,6 +138,11 @@ export interface AppState {
    *  queue is served in Start/Retry click order, not results-list order.
    *  Session-only, like results. */
   nextQueueTicket: number;
+  /** Live pipeline position for an in-flight `catalogue_artefact` run, keyed
+   *  by row uid — transient (not persisted), mirroring `vocabSyncProgress`.
+   *  `step`/`total` count the row's pipeline stages (ai.rs `stage_plan`).
+   *  Absent = not processing or the first event hasn't arrived. */
+  catalogueProgress: Record<string, { step: number; total: number }>;
 
   // Settings
   settings: Settings;
@@ -268,6 +273,7 @@ export const initialState: AppState = {
   exportWarning: null,
   queueRunning: false,
   nextQueueTicket: 0,
+  catalogueProgress: {},
 
   settings: _DEF(),
   settingsFieldExpanded: {},
@@ -325,6 +331,8 @@ export type Action =
   | { type: "QUEUE_ROWS"; uids: string[] }
   | { type: "UNQUEUE_ROWS"; uids: string[] }
   | { type: "SET_QUEUE_RUNNING"; running: boolean }
+  | { type: "SET_CATALOGUE_PROGRESS"; uid: string; step: number; total: number }
+  | { type: "CLEAR_CATALOGUE_PROGRESS"; uid: string }
   | { type: "SET_ROW_IMAGE"; uid: string; imagePath: string }
   | { type: "SET_PARSE_ERROR"; error: string | null }
   | { type: "TOGGLE_ROW"; uid: string }
@@ -524,6 +532,7 @@ export function reducer(state: AppState, action: Action): AppState {
         results,
         aiResults: pruneRowEntries(state.aiResults, uids),
         expandedRows: pruneRowEntries(state.expandedRows, uids),
+        catalogueProgress: pruneRowEntries(state.catalogueProgress, uids),
         fieldSelections: pruneRowEntries(state.fieldSelections, uids),
         fieldDropdownOpen: pruneRowEntries(state.fieldDropdownOpen, uids),
         fieldDropdownSearch: pruneRowEntries(state.fieldDropdownSearch, uids),
@@ -712,6 +721,14 @@ export function reducer(state: AppState, action: Action): AppState {
       const vocabSyncProgress = { ...state.vocabSyncProgress };
       delete vocabSyncProgress[action.id];
       return { ...state, vocabSyncProgress };
+    }
+    case "SET_CATALOGUE_PROGRESS":
+      return { ...state, catalogueProgress: { ...state.catalogueProgress, [action.uid]: { step: action.step, total: action.total } } };
+    case "CLEAR_CATALOGUE_PROGRESS": {
+      if (!state.catalogueProgress[action.uid]) return state;
+      const catalogueProgress = { ...state.catalogueProgress };
+      delete catalogueProgress[action.uid];
+      return { ...state, catalogueProgress };
     }
     case "SET_VOCAB_TERMS_LOADING":
       return { ...state, vocabTermCacheLoading: { ...state.vocabTermCacheLoading, [action.id]: true } };

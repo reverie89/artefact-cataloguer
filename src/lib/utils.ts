@@ -7,3 +7,10 @@ import { twMerge } from "tailwind-merge";
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+/** `1.2s`-style duration for elapsed-time displays (`undefined` → an em dash). */
+export function formatDuration(ms?: number): string {
+  if (ms === undefined || ms === null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}

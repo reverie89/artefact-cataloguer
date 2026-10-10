@@ -13,15 +13,17 @@ import { useConfirmDelete } from "./hooks/useConfirmDelete";
 import { pushLog, type LogVerbose } from "./lib/logs";
 
 /** A cataloguing-pipeline stage emitted by Rust onto the "ac-logs" event.
- *  Carries artefact-analysis and validation stages from `ai.rs` and embedding
- *  stages from `embeddings.rs` (each with its own jobGroup). Each maps to one
- *  row in the Logs Viewer; `verbose` carries the redacted request/response
- *  envelope shown on row click. */
+ *  Carries artefact-analysis, partition and validation call stages from
+ *  `ai.rs`. Each maps to one row in the Logs Viewer; `verbose` carries the
+ *  redacted request/response envelope shown on row click. */
 interface PipelineStageEvent {
   stage: string;
   /** Group id tying every stage of one call together, used to resolve earlier
    *  "busy" dots when a terminal stage lands. */
   jobGroup: string;
+  /** Owning record's job id (`row-<uid>`) — the Logs Viewer's per-record
+   *  grouping key; deliberately not the per-call `jobGroup`. */
+  rowId?: string;
   label?: string;
   detail?: string;
   elapsedMs?: number;
@@ -78,11 +80,11 @@ export default function App() {
     };
   }, []);
 
-  // Rust→frontend pipeline-stage bridge. `ai.rs` emits the artefact-analysis and
-  // validation call stages onto "ac-logs" (POST → job-ID → poll → response),
-  // and `embeddings.rs` emits the per-row embedding stages (text batch + image
-  // + retry). Forward each into the Logs Viewer stream so the run transcript
-  // shows the live sub-flows that otherwise only surface as a long busy dot.
+  // Rust→frontend pipeline-stage bridge. `ai.rs` emits the artefact-analysis,
+  // partition and validation call stages onto "ac-logs" (each call POSTs and
+  // awaits its response inline). Forward each into the Logs Viewer stream so
+  // the run transcript shows the live sub-flows that otherwise only surface
+  // as a long busy dot; `rowId` carries the owning record for grouping.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let active = true;
@@ -92,6 +94,7 @@ export default function App() {
         pushLog({
           status: e.status,
           jobId: e.jobGroup,
+          rowId: e.rowId,
           label: e.label ?? ARTEFACT_ANALYSIS_STAGE_LABEL[e.stage] ?? e.stage,
           detail: e.detail,
           elapsedMs: e.elapsedMs,

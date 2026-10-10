@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
 import {
+  buildLogSections,
   clearLogs,
   pushLog,
   useLogErrorCount,
   useLogEvents,
+  type LogEvent,
 } from "./logs";
 
 // `useSyncExternalStore` snapshots a module-level store, so each test starts
@@ -144,5 +146,64 @@ describe("job resolution", () => {
     // The busy flips to ok at the first terminal event; the later failure does
     // NOT retroactively re-flip an already-resolved ok stage.
     expect(result.current.map((e) => e.status)).toEqual(["ok", "ok", "fail"]);
+  });
+});
+
+describe("buildLogSections", () => {
+  const ev = (id: number, over: Partial<LogEvent> = {}): LogEvent => ({
+    id,
+    ts: "10:00:00.000",
+    label: `e${id}`,
+    status: "ok",
+    ...over,
+  });
+
+  it("groups consecutive Rust stage events (rowId, per-call jobIds) under one record", () => {
+    const sections = buildLogSections([
+      ev(1, { rowId: "row-a", jobId: "ac-1" }),
+      ev(2, { rowId: "row-a", jobId: "ac-2" }),
+    ]);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].rowId).toBe("row-a");
+    expect(sections[0].events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it("unifies Rust stage events with frontend run events tagged row- jobIds", () => {
+    const sections = buildLogSections([
+      ev(1, { rowId: "row-a", jobId: "ac-1" }),
+      ev(2, { jobId: "row-a" }),
+    ]);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].rowId).toBe("row-a");
+  });
+
+  it("never groups by Rust per-call ac-N jobIds", () => {
+    const sections = buildLogSections([
+      ev(1, { jobId: "ac-1" }),
+      ev(2, { jobId: "ac-2" }),
+    ]);
+    // Both keyless: one inline run with no header — never a group per call.
+    expect(sections).toHaveLength(1);
+    expect(sections[0].rowId).toBeUndefined();
+    expect(sections[0].events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it("keeps strict chronology: general events split a record's run", () => {
+    const sections = buildLogSections([
+      ev(1, { rowId: "row-a" }),
+      ev(2, { label: "Imported x.xlsx" }),
+      ev(3, { rowId: "row-a" }), // straggler opens a second section
+    ]);
+    expect(sections.map((s) => s.rowId)).toEqual(["row-a", undefined, "row-a"]);
+  });
+
+  it("merges consecutive general events into one inline section", () => {
+    const sections = buildLogSections([ev(1), ev(2), ev(3, { rowId: "row-a" })]);
+    expect(sections).toHaveLength(2);
+    expect(sections[0].events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it("returns no sections for an empty stream", () => {
+    expect(buildLogSections([])).toEqual([]);
   });
 });

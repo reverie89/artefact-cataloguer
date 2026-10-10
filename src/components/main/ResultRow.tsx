@@ -1,4 +1,4 @@
-import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Play, Plus, RotateCcw, Search, Trash2, X, XCircle, Zap } from "lucide-react";
+import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Play, Plus, RotateCcw, Search, Trash2, X, XCircle, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
@@ -22,6 +22,9 @@ interface Props {
 
 export function ResultRow({ row, index, state, actions, convertFileSrc }: Props) {
   const st = _ST[row.status || "queued"] || _ST.queued;
+  // Pipeline position for an in-flight run (absent until Rust's first stage
+  // event lands); rendered beside the processing label on the strip below.
+  const progress = state.catalogueProgress[row.uid];
   const expanded = !!state.expandedRows[row.uid];
 
   // Track asset-protocol load failures so a blocked/missing image falls back to
@@ -94,6 +97,11 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
             style={{ background: st.clr }}
           />
           <span className="text-muted-foreground text-[13px]">{st.label}</span>
+          {row.status === "processing" && progress && (
+            <span className="text-muted-foreground text-[11px] tabular-nums">
+              · {progress.step}/{progress.total}
+            </span>
+          )}
           <span className="ml-auto flex items-center">
             {rowAction && (
               <Button
@@ -123,15 +131,10 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
 
       {expanded && (
         <div className="bg-muted/30 border-l-primary/30 border-border/60 animate-in fade-in border-t border-l-[3px] duration-150">
-          {/* Status bars — informational only; the row's action button lives
-              on the collapsed strip above. The `done` case has no bar (it
-              renders the Catalogue Fields editor further below). */}
-          {row.status === "processing" && (
-            <div className="text-muted-foreground flex items-center gap-2 px-4.5 py-3.5 text-sm">
-              <Loader2 className="size-3 animate-spin" />
-              <span>Running AI on artefact…</span>
-            </div>
-          )}
+          {/* Status bars — informational only; the collapsed strip above owns
+              the in-flight signal (dot + label + stage counter), so there is
+              deliberately no processing bar here. The `done` case has no bar
+              either (it renders the Catalogue Fields editor further below). */}
           {row.status === "queued" && (
             <div className="text-muted-foreground px-4.5 py-3.5 text-sm">Queued</div>
           )}

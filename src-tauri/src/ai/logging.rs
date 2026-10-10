@@ -140,9 +140,10 @@ pub(crate) struct VerbosePayload {
 /// One cataloguing-pipeline stage, surfaced as a row in the Logs Viewer.
 /// `stage`/`label` drive the rendered label; `status` drives the dot colour
 /// (ok/busy/fail). `job_group` ties every stage of one call together so the
-/// renderer can resolve earlier "busy" dots when a terminal stage lands. The
-/// same `"ac-logs"` channel also carries embedding stages emitted from
-/// `embeddings.rs` (each with its own `job_group`).
+/// renderer can resolve earlier "busy" dots when a terminal stage lands;
+/// `row_id` (the catalogue command's `job_id`, `row-<uid>`) ties every call of
+/// one artefact row together for the viewer's per-record grouping without
+/// touching the busy-resolution semantics.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PipelineStageEvent {
@@ -151,6 +152,11 @@ pub(crate) struct PipelineStageEvent {
     /// before the platform job id is known). The renderer resolves prior busy
     /// stages of the same group when a terminal stage arrives.
     pub(crate) job_group: String,
+    /// Owning record's job id (`row-<uid>`), when the stage belongs to a
+    /// catalogue run. Deliberately separate from `job_group`: per-call groups
+    /// keep terminal stages from resolving other calls' in-flight dots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) row_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,12 +168,46 @@ pub(crate) struct PipelineStageEvent {
     pub(crate) verbose: Option<VerbosePayload>,
 }
 
+/// Per-record pipeline position, emitted on `"ac-catalogue-progress"` at each
+/// stage start of `catalogue_artefact`. `step`/`total` are discrete stages —
+/// the long steps are single LLM calls, so no finer unit is honest.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogueProgressEvent {
+    /// The catalogue command's `job_id` (`row-<uid>`).
+    pub(crate) job_id: String,
+    pub(crate) step: usize,
+    pub(crate) total: usize,
+}
+
 /// Emit a pipeline-stage event to the renderer. Best-effort: a logging failure
 /// must never break a provider call, so errors are swallowed. Generic over the
 /// runtime so the live-pipeline probe can run the real command against a mock
 /// app (production infers `R = Wry`).
 pub(crate) fn log_stage<R: Runtime>(app: &AppHandle<R>, event: PipelineStageEvent) {
     let _ = app.emit(LOG_STAGE_EVENT, event);
+}
+
+/// Event name for the per-record catalogue progress stream feeding the
+/// results row's `n/m` stage counter (not part of the Logs Viewer stream).
+const CATALOGUE_PROGRESS_EVENT: &str = "ac-catalogue-progress";
+
+/// Emit one catalogue progress step. Best-effort under the same rule as
+/// `log_stage`: a logging failure must never break a provider call.
+pub(crate) fn emit_catalogue_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    job_id: &str,
+    step: usize,
+    total: usize,
+) {
+    let _ = app.emit(
+        CATALOGUE_PROGRESS_EVENT,
+        CatalogueProgressEvent {
+            job_id: job_id.to_string(),
+            step,
+            total,
+        },
+    );
 }
 
 /// Monotonic per-call group id so the renderer can tie every stage of one AI

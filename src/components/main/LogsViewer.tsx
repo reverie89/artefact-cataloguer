@@ -1,10 +1,12 @@
 // Right-side slide-out drawer that streams catalogue-run activity as a table.
 //
-// One row per stage (upload → validate → parse row → POST → job ID → poll →
-// response → populated fields). Rows with a `verbose` envelope expand on click
-// to reveal the HTTP request/response detail. Built on the shadcn Sheet
-// (Radix), so Esc + backdrop dismiss, focus trapping, and scroll locking are
-// handled by the primitive.
+// The stream is split into sections (lib/logs `buildLogSections`): one
+// record's stages sit under a collapsible header labelled from its captured
+// source record; general events (import, export, vocab sync) stay inline
+// between them with no header. Rows with a `verbose` envelope expand on click
+// to reveal the HTTP request/response detail (LogsVerboseBlock). Built on the
+// shadcn Sheet (Radix), so Esc + backdrop dismiss, focus trapping, and scroll
+// locking are handled by the primitive.
 
 import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Trash2 } from "lucide-react";
@@ -17,8 +19,17 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { cn } from "@/lib/utils";
-import { clearLogs, useLogEvents, type LogStatus, type LogVerbose } from "../../lib/logs";
+import { cn, formatDuration } from "@/lib/utils";
+import { rowLabel } from "../../app/actions";
+import {
+  buildLogSections,
+  clearLogs,
+  useLogEvents,
+  type LogEvent,
+  type LogSection,
+  type LogStatus,
+} from "../../lib/logs";
+import { LogsVerboseBlock } from "./LogsVerboseBlock";
 
 interface Props {
   open: boolean;
@@ -37,26 +48,10 @@ const STATUS_DOT_CLASS: Record<LogStatus, string> = {
   fail: "bg-destructive",
 };
 
-function formatDuration(ms?: number): string {
-  if (ms === undefined || ms === null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-/** Pretty-print JSON-ish values without throwing. */
-function safeStringify(value: unknown): string {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 export function LogsViewer({ open, onClose }: Props) {
   const events = useLogEvents();
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -77,8 +72,11 @@ export function LogsViewer({ open, onClose }: Props) {
   };
 
   const toggle = (id: number) => setExpanded((m) => ({ ...m, [id]: !m[id] }));
+  const toggleGroup = (key: string) =>
+    setCollapsedGroups((m) => ({ ...m, [key]: !m[key] }));
 
   const errorCount = useMemo(() => events.filter((e) => e.status === "fail").length, [events]);
+  const sections = useMemo(() => buildLogSections(events), [events]);
 
   return (
     <Sheet open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -141,55 +139,27 @@ export function LogsViewer({ open, onClose }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {events.map((e) => {
-                  const hasVerbose = Boolean(e.verbose);
-                  const isOpen = Boolean(expanded[e.id]);
-                  const clickable = hasVerbose;
-                  return (
-                    <Fragment key={e.id}>
-                      <tr
-                        onClick={clickable ? () => toggle(e.id) : undefined}
-                        className={cn(
-                          "border-border/60 border-b",
-                          clickable && "cursor-pointer",
-                          isOpen && "bg-primary/10"
-                        )}
-                      >
-                        <td className="text-muted-foreground whitespace-nowrap p-2 text-[11px]">{e.ts}</td>
-                        <td className="overflow-hidden p-2 text-foreground">
-                          <span className="inline-flex min-w-0 items-center gap-1.5">
-                            {hasVerbose &&
-                              (isOpen ? <ChevronDown className="text-muted-foreground size-3" /> : <ChevronRight className="text-muted-foreground size-3" />)}
-                            <span className="truncate">
-                              {e.label}
-                              {e.detail && (
-                                <span className="text-muted-foreground mt-px block truncate text-[11px]">
-                                  {e.detail}
-                                </span>
-                              )}
-                            </span>
-                          </span>
-                        </td>
-                        <td className="text-muted-foreground whitespace-nowrap p-2 text-right text-[11px]">
-                          {formatDuration(e.elapsedMs)}
-                        </td>
-                        <td className="whitespace-nowrap p-2">
-                          <span className="inline-flex items-center gap-1.5">
-                            <span className={cn("size-2 rounded-full", STATUS_DOT_CLASS[e.status])} />
-                            <span className="text-muted-foreground text-[11px]">{STATUS_LABEL[e.status]}</span>
-                          </span>
-                        </td>
-                      </tr>
-                      {isOpen && hasVerbose && e.verbose && (
-                        <tr key={`${e.id}-v`} className="bg-muted/40">
-                          <td colSpan={4} className="border-border p-2.5">
-                            <VerboseBlock verbose={e.verbose} elapsedMs={e.elapsedMs} label={e.label} detail={e.detail} />
-                          </td>
-                        </tr>
-                      )}
+                {sections.map((section) =>
+                  section.rowId === undefined ? (
+                    <Fragment key={`general-${section.events[0].id}`}>
+                      {section.events.map((e) => (
+                        <EventRow key={e.id} e={e} isOpen={!!expanded[e.id]} onToggle={toggle} />
+                      ))}
                     </Fragment>
-                  );
-                })}
+                  ) : (
+                    <Fragment key={`${section.rowId}-${section.events[0].id}`}>
+                      <GroupHeaderRow
+                        section={section}
+                        collapsed={!!collapsedGroups[section.rowId]}
+                        onToggle={toggleGroup}
+                      />
+                      {!collapsedGroups[section.rowId] &&
+                        section.events.map((e) => (
+                          <EventRow key={e.id} e={e} isOpen={!!expanded[e.id]} onToggle={toggle} />
+                        ))}
+                    </Fragment>
+                  )
+                )}
               </tbody>
             </table>
           )}
@@ -211,93 +181,88 @@ export function LogsViewer({ open, onClose }: Props) {
   );
 }
 
-/** Expanded HTTP/row envelope rendered beneath a clicked table row. */
-function VerboseBlock({
-  verbose,
-  elapsedMs,
-  label,
-  detail,
+/** One collapsible group header for a record's section: label derived from the
+ *  group's first captured source record (via the shared `rowLabel` authority)
+ *  so the name survives row deletion and edits. */
+function GroupHeaderRow({
+  section,
+  collapsed,
+  onToggle,
 }: {
-  verbose: LogVerbose;
-  elapsedMs?: number;
-  label?: string;
-  detail?: string;
+  section: LogSection;
+  collapsed: boolean;
+  onToggle: (key: string) => void;
 }) {
-  const hasStage = Boolean(label || detail);
-  const hasRequest = Boolean(verbose.method || verbose.url || verbose.headers || verbose.body);
-  const hasResponse = Boolean(
-    verbose.status !== undefined || verbose.error || verbose.jobId || elapsedMs !== undefined
-  );
-  const hasDescription = Boolean(verbose.description);
-  const hasRecord = Boolean(verbose.record && Object.keys(verbose.record).length);
-  const hasMissing = Boolean(verbose.missingColumns && verbose.missingColumns.length);
-  const hasDiscarded = Boolean(verbose.discardedColumns && Object.keys(verbose.discardedColumns).length);
-
+  const record = section.events.find((e) => e.verbose?.record)?.verbose?.record;
+  const label = record ? rowLabel({ record }) : "Row";
   return (
-    <div className="bg-background rounded-md border p-2.5 text-[11.5px] leading-relaxed">
-      {hasStage && (
-        <div className={cn((hasRequest || hasResponse || hasDescription || hasRecord || hasMissing || hasDiscarded) && "mb-2")}>
-          {label && <Line label="stage" value={label} />}
-          {detail && <Line label="detail" value={detail} />}
-        </div>
-      )}
-      {hasRequest && (
-        <div className={cn((hasResponse || hasDescription || hasRecord || hasMissing || hasDiscarded) && "mb-2")}>
-          <div className="text-primary mb-1 font-semibold">Request</div>
-          {verbose.method && verbose.url && <Line label={verbose.method} value={verbose.url} />}
-          {verbose.headers && <Line label="headers" value={verbose.headers.map(([k, v]) => `${k}: ${v}`).join("\n")} />}
-          {verbose.body !== undefined && (
-            <Line label="body" value={safeStringify(verbose.body)} />
+    <tr
+      onClick={() => onToggle(section.rowId!)}
+      className="bg-muted/50 border-border/60 cursor-pointer border-b"
+    >
+      <td colSpan={4} className="p-2 pl-2.5">
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          {collapsed ? (
+            <ChevronRight className="text-muted-foreground size-3 shrink-0" />
+          ) : (
+            <ChevronDown className="text-muted-foreground size-3 shrink-0" />
           )}
-        </div>
-      )}
-      {hasResponse && (
-        <div className={cn((hasDescription || hasRecord || hasMissing || hasDiscarded) && "mb-2")}>
-          <div className="text-primary mb-1 font-semibold">Response</div>
-          {verbose.status !== undefined && <Line label="status" value={verbose.status} />}
-          {elapsedMs !== undefined && <Line label="elapsed" value={formatDuration(elapsedMs)} />}
-          {verbose.jobId && <Line label="job_id" value={verbose.jobId} />}
-          {verbose.error && <Line label="error" value={verbose.error} />}
-        </div>
-      )}
-      {hasDescription && (
-        <div className={cn((hasRecord || hasMissing || hasDiscarded) && "mb-2")}>
-          <div className="text-primary mb-1 font-semibold">Model output</div>
-          <Line label="text" value={verbose.description} />
-        </div>
-      )}
-      {hasRecord && (
-        <div className={cn((hasMissing || hasDiscarded) && "mb-2")}>
-          <div className="text-primary mb-1 font-semibold">Source fields</div>
-          {Object.entries(verbose.record!).map(([k, v]) => (
-            <Line key={k} label={k} value={v} />
-          ))}
-        </div>
-      )}
-      {hasMissing && (
-        <div className={cn(hasDiscarded && "mb-2")}>
-          <div className="text-destructive mb-1 font-semibold">Missing columns</div>
-          <Line label="missing" value={verbose.missingColumns!.join(", ")} />
-        </div>
-      )}
-      {hasDiscarded && (
-        <div>
-          <div className="text-amber-600 dark:text-amber-400 mb-1 font-semibold">Discarded fields</div>
-          {Object.entries(verbose.discardedColumns!).map(([k, v]) => (
-            <Line key={k} label={k} value={v} />
-          ))}
-        </div>
-      )}
-    </div>
+          <span className="text-foreground truncate text-[12px] font-medium">{label}</span>
+          <span className="text-muted-foreground shrink-0 text-[11px]">
+            · {section.events.length} {section.events.length === 1 ? "event" : "events"}
+          </span>
+        </span>
+      </td>
+    </tr>
   );
 }
 
-/** One label/value row inside a verbose block. */
-function Line({ label, value }: { label: string; value: React.ReactNode }) {
+/** One stream event as a table row; rows with a `verbose` envelope expand into
+ *  a LogsVerboseBlock beneath. */
+function EventRow({ e, isOpen, onToggle }: { e: LogEvent; isOpen: boolean; onToggle: (id: number) => void }) {
+  const hasVerbose = Boolean(e.verbose);
   return (
-    <div className="mb-0.5 flex gap-2">
-      <span className="text-muted-foreground w-16 shrink-0">{label}</span>
-      <span className="min-w-0 break-words whitespace-pre-wrap">{value}</span>
-    </div>
+    <Fragment>
+      <tr
+        onClick={hasVerbose ? () => onToggle(e.id) : undefined}
+        className={cn(
+          "border-border/60 border-b",
+          hasVerbose && "cursor-pointer",
+          isOpen && "bg-primary/10"
+        )}
+      >
+        <td className="text-muted-foreground whitespace-nowrap p-2 text-[11px]">{e.ts}</td>
+        <td className="overflow-hidden p-2 text-foreground">
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            {hasVerbose &&
+              (isOpen ? <ChevronDown className="text-muted-foreground size-3" /> : <ChevronRight className="text-muted-foreground size-3" />)}
+            <span className="truncate">
+              {e.label}
+              {e.detail && (
+                <span className="text-muted-foreground mt-px block truncate text-[11px]">
+                  {e.detail}
+                </span>
+              )}
+            </span>
+          </span>
+        </td>
+        <td className="text-muted-foreground whitespace-nowrap p-2 text-right text-[11px]">
+          {formatDuration(e.elapsedMs)}
+        </td>
+        <td className="whitespace-nowrap p-2">
+          <span className="inline-flex items-center gap-1.5">
+            <span className={cn("size-2 rounded-full", STATUS_DOT_CLASS[e.status])} />
+            <span className="text-muted-foreground text-[11px]">{STATUS_LABEL[e.status]}</span>
+          </span>
+        </td>
+      </tr>
+      {isOpen && hasVerbose && e.verbose && (
+        <tr className="bg-muted/40">
+          <td colSpan={4} className="border-border p-2.5">
+            <LogsVerboseBlock verbose={e.verbose} elapsedMs={e.elapsedMs} label={e.label} detail={e.detail} />
+          </td>
+        </tr>
+      )}
+    </Fragment>
   );
 }

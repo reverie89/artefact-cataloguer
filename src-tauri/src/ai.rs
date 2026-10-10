@@ -77,7 +77,7 @@ pub use types::{
 pub(crate) use types::{ComponentNet, NetCandidate, ResolvedVocab};
 
 use completion::{do_completion, Turn, TurnRole};
-use logging::{log_stage, PipelineStageEvent, VerbosePayload};
+use logging::{emit_catalogue_progress, log_stage, PipelineStageEvent, VerbosePayload};
 use prompt::{build_partition_prompt, build_unified_prompt, build_validation_prompt};
 use response::{
     extract_tag_block, looks_like_unrecognized_response, parse_partition_response,
@@ -325,6 +325,38 @@ fn fuse_by_max_cosine(
     }
 }
 
+/// The catalogue pipeline's stage sequence for one run, in execution order —
+/// each predicate copied verbatim from the corresponding gate in
+/// `catalogue_artefact` (partition: the `validation_enabled && !multi_specs`
+/// block; retrieval: the `has_vocab` + provider match; validation: the
+/// validation block, which additionally requires a non-empty candidate set at
+/// runtime — the one case where the last stage can be skipped and the counter
+/// stops one short while the row completes). Drives the `n/m` stage counter
+/// the renderer shows beside the row's processing dot.
+fn stage_plan(
+    fields: &[FieldSpec],
+    has_embedding: bool,
+    validation_enabled: bool,
+) -> Vec<&'static str> {
+    let has_vocab = fields
+        .iter()
+        .any(|f| f.field_type == "vocab" && !f.vocab_source_ids.is_empty());
+    let has_multi = fields
+        .iter()
+        .any(|f| f.field_type == "vocab" && f.max_components != 1);
+    let mut stages = vec!["analysis"];
+    if validation_enabled && has_multi {
+        stages.push("partition");
+    }
+    if has_vocab && has_embedding {
+        stages.push("retrieval");
+    }
+    if validation_enabled && has_vocab && has_embedding {
+        stages.push("validation");
+    }
+    stages
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn catalogue_artefact<R: Runtime>(
@@ -415,7 +447,11 @@ pub async fn catalogue_artefact<R: Runtime>(
     //     near-duplicate gate. When off, each group's top cosine is the pick,
     //     then the same collapse + cut + gate.
     let app_for_pipeline = app.clone();
+    let total_steps = stage_plan(&fields, embedding_provider.is_some(), validation_enabled).len();
+    let job_id_for_events = job_id.clone();
     let pipeline = async move {
+        let mut step = 1usize;
+        emit_catalogue_progress(&app_for_pipeline, &job_id_for_events, step, total_steps);
         // --- Artefact analysis: unified prompt (image attached here, once) ---
         // Reused verbatim as the first turn of the validation thread so the
         // model keeps the image, the persona, and the <artefact_file> record
@@ -432,8 +468,14 @@ pub async fn catalogue_artefact<R: Runtime>(
             text: unified_prompt.clone(),
             image: image.clone(),
         }];
-        let (content1, _analysis_group) =
-            do_completion(&app_for_pipeline, &provider, "Artefact Analysis", &turns1).await?;
+        let (content1, _analysis_group) = do_completion(
+            &app_for_pipeline,
+            &provider,
+            "Artefact Analysis",
+            &job_id_for_events,
+            &turns1,
+        )
+        .await?;
 
         let parsed = parse_unified_response(&content1, &fields);
 
@@ -470,13 +512,22 @@ pub async fn catalogue_artefact<R: Runtime>(
         let mut components_by_field: HashMap<String, Vec<String>> = HashMap::new();
         let mut partition_warnings: Vec<String> = Vec::new();
         if validation_enabled && !multi_specs.is_empty() {
+            step += 1;
+            emit_catalogue_progress(&app_for_pipeline, &job_id_for_events, step, total_steps);
             let partition_prompt = build_partition_prompt(&multi_specs, &artefact.record);
             let turns2 = vec![Turn {
                 role: TurnRole::User,
                 text: partition_prompt,
                 image: image.clone(),
             }];
-            match do_completion(&app_for_pipeline, &provider, "Component Partition", &turns2).await
+            match do_completion(
+                &app_for_pipeline,
+                &provider,
+                "Component Partition",
+                &job_id_for_events,
+                &turns2,
+            )
+            .await
             {
                 Ok((partition_content, _partition_group)) => {
                     let (comps, mut warns) =
@@ -499,6 +550,13 @@ pub async fn catalogue_artefact<R: Runtime>(
         let (resolved_vocab, resolve_warnings): (Vec<ResolvedVocab>, Vec<String>) = if has_vocab {
             match embedding_provider.as_ref() {
                 Some(ep) => {
+                    step += 1;
+                    emit_catalogue_progress(
+                        &app_for_pipeline,
+                        &job_id_for_events,
+                        step,
+                        total_steps,
+                    );
                     resolve_vocab_fields(
                         ep,
                         &fields,
@@ -544,6 +602,8 @@ pub async fn catalogue_artefact<R: Runtime>(
                 })
                 .collect();
             if !shortlist_refs.is_empty() {
+                step += 1;
+                emit_catalogue_progress(&app_for_pipeline, &job_id_for_events, step, total_steps);
                 let validation_prompt = build_validation_prompt(&shortlist_refs);
                 let trimmed_assistant = trim_for_validation(&content1);
                 let turns3 = vec![
@@ -563,9 +623,14 @@ pub async fn catalogue_artefact<R: Runtime>(
                         image: None,
                     },
                 ];
-                let (validation_content, _validation_group) =
-                    do_completion(&app_for_pipeline, &provider, "Vocab Validation", &turns3)
-                        .await?;
+                let (validation_content, _validation_group) = do_completion(
+                    &app_for_pipeline,
+                    &provider,
+                    "Vocab Validation",
+                    &job_id_for_events,
+                    &turns3,
+                )
+                .await?;
 
                 // Map field name (lowercased) → candidate terms, for the
                 // hallucination guard in the parser.
@@ -739,6 +804,7 @@ pub async fn catalogue_artefact<R: Runtime>(
             PipelineStageEvent {
                 stage: "done",
                 job_group: String::new(),
+                row_id: Some(job_id.clone()),
                 status: "ok",
                 label: Some("field parse warnings".to_string()),
                 detail: Some(warnings.join("; ")),
@@ -1658,5 +1724,49 @@ mod tests {
         assert_eq!(kinds.len(), 3); // a1, b1 (recorded) + a2 (alternate)
         assert_eq!(kinds.get("a2").map(String::as_str), Some("a"));
         assert!(!kinds.contains_key("c1") && !kinds.contains_key("c2"));
+    }
+
+    #[test]
+    fn stage_plan_mirrors_the_pipeline_gates() {
+        use crate::ai::types::fixtures::open_field;
+        let sourced = |name: &str| {
+            let mut f = vocab_field(name);
+            f.vocab_source_ids = vec!["src".to_string()];
+            f
+        };
+        let multi = |name: &str| {
+            let mut f = sourced(name);
+            f.max_components = 3;
+            f
+        };
+
+        // Open fields only: analysis alone.
+        assert_eq!(
+            stage_plan(&[open_field("Name")], false, false),
+            ["analysis"]
+        );
+        // A vocab field without synced sources is invisible to the plan.
+        assert_eq!(
+            stage_plan(&[vocab_field("Colour")], true, true),
+            ["analysis"]
+        );
+        // Vocab + embeddings, validation off: analysis + retrieval.
+        assert_eq!(
+            stage_plan(&[sourced("Material")], true, false),
+            ["analysis", "retrieval"]
+        );
+        // Validation on but no embedding provider: partition still runs for
+        // multi-component fields; retrieval/validation cannot.
+        let mut unsourced_multi = vocab_field("Object Type");
+        unsourced_multi.max_components = 3;
+        assert_eq!(
+            stage_plan(&[unsourced_multi], false, true),
+            ["analysis", "partition"]
+        );
+        // Everything on: all four stages in execution order.
+        assert_eq!(
+            stage_plan(&[open_field("Name"), multi("Object Type")], true, true),
+            ["analysis", "partition", "retrieval", "validation"]
+        );
     }
 }

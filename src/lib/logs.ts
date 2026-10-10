@@ -44,6 +44,11 @@ export interface LogEvent {
    *  (`ok`/`fail`) with a `jobId` lands, every prior `busy` event sharing it is
    *  retroactively resolved to the same outcome, so the in-flight dots clear. */
   jobId?: string;
+  /** Owning record's job id (`row-<uid>`), set by Rust catalogue stage events.
+   *  Correlation key for the viewer's per-record grouping — deliberately
+   *  separate from `jobId`, which stays per-call so busy dots resolve per AI
+   *  call and a mid-run call's terminal event can't flip another stage. */
+  rowId?: string;
   /** Present only for rows that can expand into a verbose payload. */
   verbose?: LogVerbose;
 }
@@ -95,6 +100,46 @@ export function clearLogs(): void {
   if (events.length === 0) return;
   events = [];
   emit();
+}
+
+/** One contiguous run of the stream under a single group key: either one
+ *  record's stages (`rowId` set — rendered with a collapsible group header) or
+ *  an inline run of general events (absent — rendered with no header). */
+export interface LogSection {
+  /** The owning record's job id (`row-<uid>`), when every event in this
+   *  section belongs to that record. */
+  rowId?: string;
+  events: LogEvent[];
+}
+
+/** Record-correlation key for one event: the Rust-provided `rowId`, else a
+ *  row-prefixed `jobId` (the frontend's run events tag themselves `row-<uid>`).
+ *  Rust per-call events keep `jobId = ac-N` for busy-dot resolution and must
+ *  never group by it. Single authority for "which record does this event
+ *  belong to" — the viewer and tests go through here. */
+export function logRowKey(e: LogEvent): string | undefined {
+  return e.rowId ?? (e.jobId?.startsWith("row-") ? e.jobId : undefined);
+}
+
+/** Split the stream into sections at group-key changes, preserving strict
+ *  chronology: a record's events form one section only while consecutive — a
+ *  straggler of an earlier record starts a second section with the same key
+ *  rather than reordering anything. Consecutive keyless events (import,
+ *  export, vocab sync) merge into one inline section. */
+export function buildLogSections(events: LogEvent[]): LogSection[] {
+  const sections: LogSection[] = [];
+  for (const e of events) {
+    const key = logRowKey(e);
+    const last = sections[sections.length - 1];
+    // Keyless events merge into a trailing keyless run; keyed events into
+    // their record's run. Anything else starts a new section.
+    if (last && last.rowId === key) {
+      last.events.push(e);
+    } else {
+      sections.push({ rowId: key, events: [e] });
+    }
+  }
+  return sections;
 }
 
 function subscribe(cb: () => void): () => void {
