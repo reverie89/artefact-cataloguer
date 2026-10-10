@@ -3,12 +3,12 @@
 // can surface them — there is no demo fallback.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
+import type { AiSuggestion, ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, ThinkingEffort } from "../app/types";
 import { embeddingModelStale } from "../app/vocabSettings";
 import { normalizeHeader } from "./spreadsheet";
 
 interface RawCatalogueResult {
-  fieldResults: Record<string, { value: string; similarity?: number }[]>;
+  fieldResults: Record<string, { value: string; similarity?: number; picked?: boolean; kind?: string }[]>;
 }
 
 /** The provider payload the Rust commands accept — mirrors
@@ -238,7 +238,7 @@ export async function catalogueArtefact(
   imagePath: string | undefined,
   settings: Settings,
   cancelKey: string
-): Promise<Record<string, { value: string; similarity?: number }[]>> {
+): Promise<Record<string, AiSuggestion[]>> {
   const rustFields: RustField[] = fields.map((f) => ({
     name: f.name,
     type: f.type,

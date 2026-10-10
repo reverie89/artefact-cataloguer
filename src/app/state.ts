@@ -5,7 +5,7 @@
 import { _DEF, _DEF_AF } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
 import type { VocabTermEntry } from "../lib/vocab";
-import type { AiResults, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
+import type { AiResults, AiSuggestion, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
 
 /** One editable provider row in the unified providers draft. Mirrors a
  *  persisted Provider, plus the model list discovered by a successful Test
@@ -314,7 +314,7 @@ export type Action =
   | { type: "REMOVE_FILE"; id: string }
   | { type: "SET_UPLOAD_DRAG"; drag: boolean }
   | { type: "PARSE_FILES"; rows: ArtefactRow[] }
-  | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, { value: string; similarity?: number }[]> }
+  | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, AiSuggestion[]> }
   | { type: "REMOVE_ROWS"; uids: string[] }
   | { type: "REQUEUE_ROWS"; uids: string[] }
   | { type: "SET_QUEUE_RUNNING"; running: boolean }
@@ -489,12 +489,15 @@ export function reducer(state: AppState, action: Action): AppState {
           if (fieldSelections[key]) continue;
           const sugs = action.ai[field.name];
           if (!sugs || sugs.length === 0) continue;
-          // Every returned suggestion lands as the initial selection — one
-          // term per distinct component for multi-component fields, the
-          // single top pick otherwise (Rust caps single fields to one).
-          additions[key] = sugs.length === 1
-            ? { source: "ai", value: sugs[0].value, values: [sugs[0].value], listName: "AI", similarity: sugs[0].similarity ?? null }
-            : multiSelection(sugs.map((s) => s.value));
+          // Only the picked suggestions are recorded — `picked: false`
+          // alternates are swap choices offered in the field's dropdown,
+          // never auto-selected. Legacy payloads without the flag behave
+          // exactly as before (every suggestion counts as picked).
+          const rec = sugs.filter((s) => s.picked !== false);
+          const base = rec.length > 0 ? rec : sugs;
+          additions[key] = base.length === 1
+            ? { source: "ai", value: base[0].value, values: [base[0].value], listName: "AI", similarity: base[0].similarity ?? null }
+            : multiSelection(base.map((s) => s.value));
         }
         if (Object.keys(additions).length > 0) {
           fieldSelections = { ...fieldSelections, ...additions };

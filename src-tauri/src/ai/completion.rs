@@ -13,7 +13,7 @@
 use base64::Engine;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 use super::logging::{
     log_headers, log_stage, next_call_group, redact_body, PipelineStageEvent, VerbosePayload,
@@ -263,8 +263,10 @@ fn gemini_entries_text(arr: Option<&Value>) -> Option<&str> {
         })
 }
 
-pub(crate) async fn do_completion(
-    app: &AppHandle,
+/// Generic over the runtime so the live-pipeline probe can run the real
+/// command against a mock app (production infers `R = Wry`).
+pub(crate) async fn do_completion<R: Runtime>(
+    app: &AppHandle<R>,
     provider: &Provider,
     label: &str,
     turns: &[Turn],

@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 
 use super::transport::APP_USER_AGENT;
 
@@ -163,8 +163,10 @@ pub(crate) struct PipelineStageEvent {
 }
 
 /// Emit a pipeline-stage event to the renderer. Best-effort: a logging failure
-/// must never break a provider call, so errors are swallowed.
-pub(crate) fn log_stage(app: &AppHandle, event: PipelineStageEvent) {
+/// must never break a provider call, so errors are swallowed. Generic over the
+/// runtime so the live-pipeline probe can run the real command against a mock
+/// app (production infers `R = Wry`).
+pub(crate) fn log_stage<R: Runtime>(app: &AppHandle<R>, event: PipelineStageEvent) {
     let _ = app.emit(LOG_STAGE_EVENT, event);
 }
 

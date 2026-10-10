@@ -221,6 +221,14 @@ export interface AiSuggestion {
    *  (0–1). Absent for open-ended fields (never similarity-scored — the answer
    *  is taken verbatim from the model). */
   similarity?: number;
+  /** `false` marks a shortlisted alternate — a swap choice offered in the
+   *  field's dropdown that is never auto-recorded. Absent/true marks one of
+   *  the field's recorded picks (the review row pre-selects it). */
+  picked?: boolean;
+  /** The component group's own phrase this candidate came from (e.g.
+   *  "rattan/vine binding") — drives the dropdown's per-kind shading. Absent
+   *  for open-ended fields. */
+  kind?: string;
 }
 
 /** AI results keyed by artefact id → field name → suggestions. */

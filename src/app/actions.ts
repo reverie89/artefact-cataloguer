@@ -663,7 +663,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         elapsedMs: Math.round(performance.now() - start),
         verbose: {
           record: Object.fromEntries(
-            Object.entries(ai).map(([k, v]) => [k, (v || []).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
+            Object.entries(ai).map(([k, v]) => [k, (v || []).filter((s) => s.picked !== false).map((s) => `${s.value}${s.similarity != null ? ` (${Math.round(s.similarity * 100)}%)` : ""}`).join(" · ")])
           ),
         },
       });

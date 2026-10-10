@@ -11,10 +11,12 @@
 //!     used to search that field's vocab source), and one `<open_field
 //!     field="…">` per open-ended field (the free-text answer, used directly).
 //!   - **Partition (validation on, multi-component fields)** — one focused
-//!     vision call names each field's distinct components (quota-free: the
-//!     prompt never carries `max_components`; the artefact record is included
-//!     because a cataloguer reads the row's metadata first). Failure falls
-//!     back to splitting the field's extraction on semicolons.
+//!     vision call names each field's distinct components under per-field
+//!     component definitions (substances for Material, silhouettes for Shape,
+//!     …) so a field can't be split by part. Quota-free: the prompt never
+//!     carries `max_components`; the artefact record is included because a
+//!     cataloguer reads the row's metadata first. Failure falls back to
+//!     splitting the field's extraction on semicolons.
 //!   - **Embedding step** — every component text is embedded in one batched
 //!     call and searched against its field's LanceDB source(s) alongside the
 //!     artefact image; per component, hits fuse by max cosine and the top
@@ -25,11 +27,12 @@
 //!     batched call presenting every component group's candidate **terms**
 //!     (no scores, no vectors). The vision model picks at most one term per
 //!     group, verbatim, and may skip groups that don't fit or duplicate
-//!     another. Rust then cuts each field's validated picks to its
-//!     `max_components` best by cosine (logged), and a ≥`NEAR_DUP_THRESHOLD`
-//!     embedding gate merges near-synonym picks (logged). When validation is
-//!     disabled, each group's top cosine candidate is the pick, then the same
-//!     cut + gate.
+//!     another. Rust then collapses same-kind picks (a variety of another
+//!     picked term — `oak (wood)` beside `wood (plant material)` — is dropped,
+//!     logged), cuts each field's picks to its `max_components` best by
+//!     cosine (logged), and a ≥`NEAR_DUP_THRESHOLD` embedding gate merges
+//!     near-synonym picks (logged). When validation is disabled, each group's
+//!     top cosine candidate is the pick, then the same collapse + cut + gate.
 //!
 //! Open-ended fields are filled directly from artefact analysis (`similarity`
 //! absent); controlled-vocab fields carry cosine `similarity`. The XML format is
@@ -54,10 +57,10 @@ mod response;
 mod transport;
 mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Runtime, State};
 use tokio::sync::oneshot;
 
 // Items consumed by sibling modules (`embeddings`, `lib.rs`) are re-exported
@@ -324,8 +327,8 @@ fn fuse_by_max_cosine(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn catalogue_artefact(
-    app: AppHandle,
+pub async fn catalogue_artefact<R: Runtime>(
+    app: AppHandle<R>,
     cancel_registry: State<'_, CancelRegistry>,
     job_id: String,
     provider: Provider,
@@ -408,8 +411,9 @@ pub async fn catalogue_artefact(
     //     distinct components; fallback = the extraction split on semicolons.
     //   - Embedding: each component text → its own candidate group (cosine).
     //   - Validation (optional, threaded): vision picks ≤1 term per group;
-    //     then the max_components cut and the near-duplicate gate. When off,
-    //     each group's top cosine is the pick, then the same cut + gate.
+    //     then the same-kind collapse, the max_components cut, and the
+    //     near-duplicate gate. When off, each group's top cosine is the pick,
+    //     then the same collapse + cut + gate.
     let app_for_pipeline = app.clone();
     let pipeline = async move {
         // --- Artefact analysis: unified prompt (image attached here, once) ---
@@ -593,50 +597,49 @@ pub async fn catalogue_artefact(
                         .get(&field.name.to_ascii_lowercase())
                         .cloned()
                         .unwrap_or_default();
-                    let mut winners: Vec<Option<NetCandidate>> = vec![None; rv.groups.len()];
-                    for pick in &picks {
-                        for (gi, g) in rv.groups.iter().enumerate() {
-                            if let Some(c) = g
-                                .candidates
-                                .iter()
-                                .find(|c| c.term.trim().eq_ignore_ascii_case(pick.trim()))
-                            {
-                                match &winners[gi] {
-                                    Some(w) if w.score >= c.score => {}
-                                    _ => winners[gi] = Some(c.clone()),
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    let picked: Vec<NetCandidate> = winners.into_iter().flatten().collect();
-                    let mut picked = cap_validated_picks(
+                    let winners = assign_group_winners(&rv.groups, &picks);
+                    // Winner term → the kind (group phrase) it was assigned to.
+                    let winner_kinds: HashMap<String, String> = winners
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(gi, w)| {
+                            w.as_ref().map(|c| {
+                                (
+                                    c.term.to_ascii_lowercase(),
+                                    rv.groups[gi].extraction.clone(),
+                                )
+                            })
+                        })
+                        .collect();
+                    let picked: Vec<NetCandidate> = winners.iter().flatten().cloned().collect();
+                    let (mut picked, fold) =
+                        merge_kind_specializations(picked, &field.name, &mut vocab_warnings);
+                    picked = cap_validated_picks(
                         picked,
                         field.max_components,
                         &field.name,
                         &mut vocab_warnings,
                     );
                     picked = dedupe_near_duplicates(picked, &field.name, &mut vocab_warnings);
-                    let mut sugs: Vec<Suggestion> = picked
-                        .into_iter()
-                        .map(|c| Suggestion {
-                            value: c.term,
-                            similarity: Some(c.score.clamp(0.0, 1.0) as f64),
-                        })
-                        .collect();
+                    // Kinds shown = kinds recorded (see `resolved_group_kinds`).
+                    let recorded: HashSet<String> =
+                        picked.iter().map(|c| c.term.to_ascii_lowercase()).collect();
+                    let group_kinds =
+                        resolved_group_kinds(&winners, &rv.groups, &winner_kinds, &fold, &recorded);
+                    let cand_kinds = candidate_kinds(
+                        &picked,
+                        &rv.groups,
+                        &group_kinds,
+                        &winner_kinds,
+                        &recorded,
+                    );
+                    let sugs = suggestions_with_alternates(picked, &rv.groups, &cand_kinds);
                     if sugs.is_empty() {
                         vocab_warnings.push(format!(
                             "{}: no candidates matched after validation",
                             field.name
                         ));
                     }
-                    // Keep cosine order among the recorded picks.
-                    sugs.sort_by(|a, b| {
-                        b.similarity
-                            .unwrap_or(0.0)
-                            .partial_cmp(&a.similarity.unwrap_or(0.0))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
                     vocab_suggestions.insert(field.name.clone(), sugs);
                 }
             }
@@ -646,11 +649,27 @@ pub async fn catalogue_artefact(
             // cut + near-duplicate gate.
             for rv in &resolved_vocab {
                 if let Some(field) = fields.get(rv.field_index) {
-                    let picked: Vec<NetCandidate> = rv
+                    // Winner term → the kind (group phrase) it was assigned to.
+                    let winners: Vec<Option<NetCandidate>> = rv
                         .groups
                         .iter()
-                        .filter_map(|g| g.candidates.first().cloned())
+                        .map(|g| g.candidates.first().cloned())
                         .collect();
+                    let winner_kinds: HashMap<String, String> = winners
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(gi, w)| {
+                            w.as_ref().map(|c| {
+                                (
+                                    c.term.to_ascii_lowercase(),
+                                    rv.groups[gi].extraction.clone(),
+                                )
+                            })
+                        })
+                        .collect();
+                    let picked: Vec<NetCandidate> = winners.iter().flatten().cloned().collect();
+                    let (picked, fold) =
+                        merge_kind_specializations(picked, &field.name, &mut vocab_warnings);
                     let mut picked = cap_validated_picks(
                         picked,
                         field.max_components,
@@ -658,13 +677,20 @@ pub async fn catalogue_artefact(
                         &mut vocab_warnings,
                     );
                     picked = dedupe_near_duplicates(picked, &field.name, &mut vocab_warnings);
-                    let sugs: Vec<Suggestion> = picked
-                        .into_iter()
-                        .map(|c| Suggestion {
-                            value: c.term,
-                            similarity: Some(c.score.clamp(0.0, 1.0) as f64),
-                        })
-                        .collect();
+                    // Same kinds-shown-equals-kinds-recorded rule as the
+                    // validation branch above.
+                    let recorded: HashSet<String> =
+                        picked.iter().map(|c| c.term.to_ascii_lowercase()).collect();
+                    let group_kinds =
+                        resolved_group_kinds(&winners, &rv.groups, &winner_kinds, &fold, &recorded);
+                    let cand_kinds = candidate_kinds(
+                        &picked,
+                        &rv.groups,
+                        &group_kinds,
+                        &winner_kinds,
+                        &recorded,
+                    );
+                    let sugs = suggestions_with_alternates(picked, &rv.groups, &cand_kinds);
                     vocab_suggestions.insert(field.name.clone(), sugs);
                 }
             }
@@ -690,6 +716,8 @@ pub async fn catalogue_artefact(
                     vec![Suggestion {
                         value: val,
                         similarity: None,
+                        picked: true,
+                        kind: None,
                     }]
                 };
                 field_results.insert(f.name.clone(), sugs);
@@ -849,6 +877,245 @@ fn dedupe_near_duplicates(
     kept
 }
 
+/// Map validated picks onto the component groups they came from: each pick is
+/// assigned to the group where **its cosine is highest**, not the first group
+/// that merely lists the term — a low-ranked mention in an earlier group's net
+/// must not starve the group where the term was the top hit (observed live: a
+/// brown component's 0.61 top hit was swallowed by the black group, where the
+/// same term sat at 0.34, and brown silently vanished from the record). One
+/// winner per group; several picks landing in one group keep the higher
+/// cosine. Greedy per pick — a pick may still displace a group's own top term
+/// when it outscores it, but the verbatim-pick contract makes such
+/// degenerate collisions rare, so no assignment solver (YAGNI).
+fn assign_group_winners(groups: &[ComponentNet], picks: &[String]) -> Vec<Option<NetCandidate>> {
+    let mut winners: Vec<Option<NetCandidate>> = vec![None; groups.len()];
+    for pick in picks {
+        let mut best: Option<(usize, NetCandidate)> = None;
+        for (gi, g) in groups.iter().enumerate() {
+            if let Some(c) = g
+                .candidates
+                .iter()
+                .find(|c| c.term.trim().eq_ignore_ascii_case(pick.trim()))
+            {
+                let better = match &best {
+                    Some((_, b)) => c.score > b.score,
+                    None => true,
+                };
+                if better {
+                    best = Some((gi, c.clone()));
+                }
+            }
+        }
+        if let Some((gi, c)) = best {
+            match &winners[gi] {
+                Some(w) if w.score >= c.score => {}
+                _ => winners[gi] = Some(c),
+            }
+        }
+    }
+    winners
+}
+
+/// Same-kind collapse over the vocabulary's own parent qualifiers: a pick
+/// whose parenthetical qualifier names another pick's head term is a *variety*
+/// of it ("oak (wood)" beside a picked "wood (plant material)") and is dropped
+/// in favour of the generic — "record at their basic level", no cosine needed.
+/// Runs before the `max_components` cut so the cut counts true kinds. Picks
+/// whose qualifier matches nothing picked ("black-and-white (colors)",
+/// "engraving (printing process)") are untouched, as are variety groups whose
+/// generic term was never picked (the collapse never invents a record entry).
+/// Deterministic; each drop is logged. Returns the kept picks plus the fold
+/// map (lowercased dropped term → lowercased surviving term) so the caller can
+/// shade the dropped pick's whole kind group under the survivor.
+fn merge_kind_specializations(
+    picks: Vec<NetCandidate>,
+    field_name: &str,
+    warnings: &mut Vec<String>,
+) -> (Vec<NetCandidate>, HashMap<String, String>) {
+    // (head, Some(qualifier)) per pick, lowercased: "oak (wood)" → ("oak", "wood").
+    let parsed: Vec<(String, Option<String>)> = picks
+        .iter()
+        .map(|c| match c.term.find(" (") {
+            Some(idx) => (
+                c.term[..idx].trim().to_ascii_lowercase(),
+                Some(
+                    c.term[idx + 2..]
+                        .trim_end_matches(')')
+                        .trim()
+                        .to_ascii_lowercase(),
+                ),
+            ),
+            None => (c.term.trim().to_ascii_lowercase(), None),
+        })
+        .collect();
+    let mut kept = Vec::with_capacity(picks.len());
+    let mut fold: HashMap<String, String> = HashMap::new();
+    for (i, cand) in picks.iter().enumerate() {
+        let generic = parsed[i].1.as_ref().and_then(|qualifier| {
+            parsed
+                .iter()
+                .enumerate()
+                .find(|(j, (head, _))| *j != i && head == qualifier)
+                .map(|(j, _)| picks[j].term.clone())
+        });
+        match generic {
+            Some(generic) => {
+                fold.insert(cand.term.to_ascii_lowercase(), generic.to_ascii_lowercase());
+                warnings.push(format!(
+                    "{field_name}: dropped \"{}\" — a variety of picked \"{generic}\"",
+                    cand.term
+                ));
+            }
+            None => kept.push(cand.clone()),
+        }
+    }
+    (kept, fold)
+}
+
+/// Kind phrase per component group after recording — the "kinds shown =
+/// kinds recorded" rule. A group whose winner survived keeps its own phrase;
+/// a group folded by the same-kind collapse shades under the survivor's kind
+/// (its alternates are that kind's varieties); a group dropped by the
+/// `max_components` cut or the near-duplicate gate — or with no winner — is
+/// not a kind and contributes nothing. With nothing recorded at all, every
+/// group keeps its own phrase: the dropdown is a pure choice list.
+fn resolved_group_kinds(
+    winners: &[Option<NetCandidate>],
+    groups: &[ComponentNet],
+    winner_kinds: &HashMap<String, String>,
+    fold: &HashMap<String, String>,
+    recorded: &HashSet<String>,
+) -> Vec<Option<String>> {
+    if recorded.is_empty() {
+        return groups.iter().map(|g| Some(g.extraction.clone())).collect();
+    }
+    winners
+        .iter()
+        .map(|w| {
+            let w = w.as_ref()?;
+            let t = w.term.to_ascii_lowercase();
+            if recorded.contains(&t) {
+                return winner_kinds.get(&t).cloned();
+            }
+            let survivor = fold.get(&t)?;
+            winner_kinds.get(survivor).cloned()
+        })
+        .collect()
+}
+
+/// Candidate term → kind for [`suggestions_with_alternates`]: recorded picks
+/// keep their assigned kind authoritatively; non-orphan groups contribute
+/// their remaining candidates; orphan groups (per [`resolved_group_kinds`])
+/// contribute nothing, so no phantom kind can render.
+fn candidate_kinds(
+    picked: &[NetCandidate],
+    groups: &[ComponentNet],
+    group_kinds: &[Option<String>],
+    winner_kinds: &HashMap<String, String>,
+    recorded: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = picked
+        .iter()
+        .filter_map(|c| {
+            winner_kinds
+                .get(&c.term.to_ascii_lowercase())
+                .map(|k| (c.term.to_ascii_lowercase(), k.clone()))
+        })
+        .collect();
+    for (g, kind) in groups.iter().zip(group_kinds) {
+        let Some(kind) = kind else { continue };
+        for c in &g.candidates {
+            let lc = c.term.to_ascii_lowercase();
+            if recorded.contains(&lc) || map.contains_key(&lc) {
+                continue;
+            }
+            map.insert(lc, kind.clone());
+        }
+    }
+    map
+}
+
+/// Build the field's suggestion list: the recorded picks (`picked: true`,
+/// cosine-desc — the review row pre-selects them, and `sugs[0]` is always the
+/// winner even when validation overrode the top cosine), then each kind's
+/// remaining shortlisted candidates as swap choices (`picked: false`).
+/// Alternates are bounded by the user's Vocab shortlist count — each group's
+/// candidates are already truncated to it in `resolve_vocab_fields` — keep
+/// their own cosine, and are deduped across groups at the max cosine. The
+/// gates and the `max_components` cut keep governing the *record* only: a
+/// variety dropped by the same-kind collapse still shows up as an alternate
+/// choice ("wood, rattan, hardwood" on a 1-distinct-component field). Every
+/// suggestion carries its kind (the group's own phrase, via the term→kind map
+/// for picks, the group itself for alternates) for the dropdown's shading.
+fn suggestions_with_alternates(
+    picked: Vec<NetCandidate>,
+    groups: &[ComponentNet],
+    kinds: &HashMap<String, String>,
+) -> Vec<Suggestion> {
+    let mut picks: Vec<&NetCandidate> = picked.iter().collect();
+    picks.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out: Vec<Suggestion> = picks
+        .iter()
+        .map(|c| Suggestion {
+            value: c.term.clone(),
+            similarity: Some(c.score.clamp(0.0, 1.0) as f64),
+            picked: true,
+            kind: kinds.get(&c.term.to_ascii_lowercase()).cloned(),
+        })
+        .collect();
+    // Alternates across all kinds, keyed case-insensitively (matching the
+    // pick assignment), deduped at the max cosine, excluding recorded terms.
+    // The kinds map covers only groups with a surviving recorded pick — a
+    // group orphaned by the collapse, the cut, or the gate contributes no
+    // candidates, so no phantom kind can render.
+    let mut alternates: HashMap<String, Suggestion> = HashMap::new();
+    for g in groups {
+        for c in &g.candidates {
+            if picked
+                .iter()
+                .any(|p| p.term.trim().eq_ignore_ascii_case(c.term.trim()))
+            {
+                continue;
+            }
+            let Some(kind) = kinds.get(&c.term.to_ascii_lowercase()) else {
+                continue;
+            };
+            let score = c.score.clamp(0.0, 1.0) as f64;
+            match alternates.get_mut(&c.term.to_ascii_lowercase()) {
+                Some(existing) => {
+                    if score > existing.similarity.unwrap_or(0.0) {
+                        existing.similarity = Some(score);
+                    }
+                }
+                None => {
+                    alternates.insert(
+                        c.term.to_ascii_lowercase(),
+                        Suggestion {
+                            value: c.term.clone(),
+                            similarity: Some(score),
+                            picked: false,
+                            kind: Some(kind.clone()),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut alternates: Vec<Suggestion> = alternates.into_values().collect();
+    alternates.sort_by(|a, b| {
+        b.similarity
+            .unwrap_or(0.0)
+            .partial_cmp(&a.similarity.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out.extend(alternates);
+    out
+}
+
 /// Trim artefact analysis's XML answer down to just the parts validation needs:
 /// the `<image_description>` and every `<extraction>` block. `<open_field>`
 /// answers are dropped (irrelevant to vocab validation). Falls back to the full
@@ -944,6 +1211,10 @@ fn guess_mime(path: &str) -> String {
         "image/png".to_string()
     }
 }
+
+// Live, ignored-by-default end-to-end probe (see `ai_probe.rs`).
+#[cfg(test)]
+mod ai_probe;
 
 #[cfg(test)]
 mod tests {
@@ -1054,5 +1325,338 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| w.contains("hand weaving") && w.contains("near-duplicate")));
+    }
+
+    /// Test component group: extraction text + its shortlisted candidates.
+    fn net(extraction: &str, candidates: Vec<NetCandidate>) -> ComponentNet {
+        ComponentNet {
+            extraction: extraction.to_string(),
+            candidates,
+        }
+    }
+
+    #[test]
+    fn assign_group_winners_sends_each_pick_to_its_best_group() {
+        // Live case: "brown (color)" is the TOP hit of the brown group (0.6065)
+        // but also sits low in the black group's net (0.3356). First-group-wins
+        // starved the brown group; best-group keeps both winners.
+        let groups = vec![
+            net(
+                "black",
+                vec![pick("black (color)", 0.5252), pick("brown (color)", 0.3356)],
+            ),
+            net(
+                "brown",
+                vec![pick("brown (color)", 0.6065), pick("beige (color)", 0.3185)],
+            ),
+        ];
+        let winners = assign_group_winners(
+            &groups,
+            &["black (color)".to_string(), "brown (color)".to_string()],
+        );
+        assert_eq!(winners[0].as_ref().unwrap().term, "black (color)");
+        assert_eq!(winners[0].as_ref().unwrap().score, 0.5252);
+        assert_eq!(winners[1].as_ref().unwrap().term, "brown (color)");
+        assert_eq!(winners[1].as_ref().unwrap().score, 0.6065);
+    }
+
+    #[test]
+    fn assign_group_winners_skips_unknown_picks_and_keeps_the_higher_competitor() {
+        let groups = vec![net(
+            "shape",
+            vec![pick("rectangular", 0.6449), pick("square (shape)", 0.4185)],
+        )];
+        let winners = assign_group_winners(
+            &groups,
+            &[
+                "not-in-net".to_string(),
+                "square (shape)".to_string(),
+                "rectangular".to_string(),
+            ],
+        );
+        // "rectangular" outscored "square (shape)" for the single group's slot.
+        assert_eq!(winners[0].as_ref().unwrap().term, "rectangular");
+    }
+
+    #[test]
+    fn assign_group_winners_without_picks_yields_all_none() {
+        let groups = vec![net("a", vec![pick("x", 0.5)])];
+        assert!(assign_group_winners(&groups, &[])
+            .iter()
+            .all(|w| w.is_none()));
+    }
+
+    #[test]
+    fn merge_kind_specializations_drops_varieties_of_a_picked_generic() {
+        // The live wood-varieties failure: five same-kind Material picks from
+        // part-level components. Only the generic + the distinct kind survive.
+        let picks = vec![
+            pick("wood (plant material)", 0.609),
+            pick("oak (wood)", 0.513),
+            pick("olive (wood)", 0.496),
+            pick("rosewood (wood)", 0.480),
+            pick("pear (wood)", 0.470),
+            pick("palm fiber", 0.440),
+        ];
+        let mut warnings = Vec::new();
+        let (kept, fold) = merge_kind_specializations(picks, "Material", &mut warnings);
+        assert_eq!(
+            kept.iter().map(|c| c.term.as_str()).collect::<Vec<_>>(),
+            ["wood (plant material)", "palm fiber"]
+        );
+        assert_eq!(warnings.len(), 4);
+        assert!(warnings[0].contains("Material: dropped \"oak (wood)\""));
+        assert!(warnings[0].contains("a variety of picked \"wood (plant material)\""));
+        // The fold map drives the orphan-group re-shading: every dropped
+        // variety maps to the generic it collapsed into.
+        assert_eq!(fold.len(), 4);
+        assert_eq!(
+            fold.get("oak (wood)").map(String::as_str),
+            Some("wood (plant material)")
+        );
+    }
+
+    #[test]
+    fn merge_kind_specializations_leaves_distinct_kinds_and_unmatched_qualifiers() {
+        let picks = vec![
+            pick("metal", 0.675),
+            pick("wood (plant material)", 0.609),
+            pick("textile materials", 0.451),
+            // Qualifier "colors" matches no picked head term → untouched.
+            pick("black-and-white (colors)", 0.448),
+        ];
+        let mut warnings = Vec::new();
+        let (kept, fold) = merge_kind_specializations(picks, "Material", &mut warnings);
+        assert_eq!(kept.len(), 4);
+        assert!(warnings.is_empty());
+        assert!(fold.is_empty());
+    }
+
+    #[test]
+    fn merge_kind_specializations_needs_the_generic_picked() {
+        // Varieties whose generic term was never picked stay: the collapse
+        // never invents a record entry.
+        let picks = vec![pick("oak (wood)", 0.513), pick("olive (wood)", 0.496)];
+        let mut warnings = Vec::new();
+        let (kept, fold) = merge_kind_specializations(picks, "Material", &mut warnings);
+        assert_eq!(kept.len(), 2);
+        assert!(warnings.is_empty());
+        assert!(fold.is_empty());
+    }
+
+    #[test]
+    fn suggestions_with_alternates_offer_the_shortlist_per_kind() {
+        // Single-kind field (maxComponents = 1 case): the validated winner
+        // comes FIRST even though an alternate carries a higher cosine
+        // (validation override), then the group's remaining shortlisted
+        // candidates as unpicked alternates, cosine-desc. Every suggestion
+        // carries its kind for the dropdown's shading.
+        let groups = vec![net(
+            "wood; rattan",
+            vec![
+                pick("hardwood", 0.62),
+                pick("wood (plant material)", 0.609),
+                pick("rattan", 0.563),
+                pick("oak (wood)", 0.513),
+                pick("olive (wood)", 0.496),
+            ],
+        )];
+        let kinds = HashMap::from([
+            ("hardwood".to_string(), "wood; rattan".to_string()),
+            (
+                "wood (plant material)".to_string(),
+                "wood; rattan".to_string(),
+            ),
+            ("rattan".to_string(), "wood; rattan".to_string()),
+            ("oak (wood)".to_string(), "wood; rattan".to_string()),
+            ("olive (wood)".to_string(), "wood; rattan".to_string()),
+        ]);
+        let sugs = suggestions_with_alternates(
+            vec![pick("wood (plant material)", 0.609)],
+            &groups,
+            &kinds,
+        );
+        assert_eq!(sugs[0].value, "wood (plant material)");
+        assert!(sugs[0].picked);
+        assert_eq!(sugs[0].kind.as_deref(), Some("wood; rattan"));
+        assert_eq!(
+            sugs[1..]
+                .iter()
+                .map(|s| (s.value.as_str(), s.picked, s.kind.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("hardwood", false, Some("wood; rattan")),
+                ("rattan", false, Some("wood; rattan")),
+                ("oak (wood)", false, Some("wood; rattan")),
+                ("olive (wood)", false, Some("wood; rattan")),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggestions_with_alternates_mark_multi_picks_and_dedupe_cross_group() {
+        // Multi-kind field: one recorded pick per kind (cosine-desc among
+        // picks), and a term that surfaces in two groups' nets is neither
+        // duplicated nor offered as an alternate of itself — it keeps the
+        // kind it was recorded under, never an alternate group's kind.
+        let groups = vec![
+            net(
+                "wood",
+                vec![
+                    pick("wood (plant material)", 0.609),
+                    pick("oak (wood)", 0.513),
+                ],
+            ),
+            net(
+                "rattan",
+                vec![pick("rattan", 0.563), pick("wood (plant material)", 0.336)],
+            ),
+        ];
+        let kinds = HashMap::from([
+            ("wood (plant material)".to_string(), "wood".to_string()),
+            ("oak (wood)".to_string(), "wood".to_string()),
+            ("rattan".to_string(), "rattan".to_string()),
+        ]);
+        let sugs = suggestions_with_alternates(
+            vec![pick("rattan", 0.563), pick("wood (plant material)", 0.609)],
+            &groups,
+            &kinds,
+        );
+        let picked: Vec<(&str, Option<&str>)> = sugs
+            .iter()
+            .filter(|s| s.picked)
+            .map(|s| (s.value.as_str(), s.kind.as_deref()))
+            .collect();
+        assert_eq!(
+            picked,
+            vec![
+                ("wood (plant material)", Some("wood")),
+                ("rattan", Some("rattan")),
+            ]
+        );
+        let alternates: Vec<(&str, Option<&str>)> = sugs
+            .iter()
+            .filter(|s| !s.picked)
+            .map(|s| (s.value.as_str(), s.kind.as_deref()))
+            .collect();
+        assert_eq!(alternates, vec![("oak (wood)", Some("wood"))]);
+    }
+
+    #[test]
+    fn suggestions_with_alternates_with_no_picks_yields_alternates_only() {
+        // Validation matched nothing (empty record path): the shortlist is
+        // still offered as choices — nothing is auto-recorded either way.
+        let groups = vec![net("wood", vec![pick("wood (plant material)", 0.609)])];
+        let kinds = HashMap::from([("wood (plant material)".to_string(), "wood".to_string())]);
+        let sugs = suggestions_with_alternates(Vec::new(), &groups, &kinds);
+        assert_eq!(sugs.len(), 1);
+        assert!(!sugs[0].picked);
+        assert_eq!(sugs[0].value, "wood (plant material)");
+        assert_eq!(sugs[0].kind.as_deref(), Some("wood"));
+    }
+
+    #[test]
+    fn resolved_group_kinds_folds_a_collapsed_group_under_the_survivor() {
+        // Judge named three kinds; the same-kind collapse folded "oak" into
+        // "wood" — the recorded kinds are wood and rattan, so the oak group's
+        // shade follows the survivor and no third kind can render.
+        let winners = vec![
+            Some(pick("wood (plant material)", 0.609)),
+            Some(pick("oak (wood)", 0.55)),
+            Some(pick("rattan", 0.563)),
+        ];
+        let groups = vec![
+            net("wood", vec![pick("wood (plant material)", 0.609)]),
+            net("oak", vec![pick("oak (wood)", 0.55), pick("ash", 0.4)]),
+            net("rattan", vec![pick("rattan", 0.563)]),
+        ];
+        let winner_kinds = HashMap::from([
+            ("wood (plant material)".to_string(), "wood".to_string()),
+            ("oak (wood)".to_string(), "oak".to_string()),
+            ("rattan".to_string(), "rattan".to_string()),
+        ]);
+        let fold = HashMap::from([(
+            "oak (wood)".to_string(),
+            "wood (plant material)".to_string(),
+        )]);
+        let recorded: HashSet<String> =
+            ["wood (plant material)".to_string(), "rattan".to_string()].into();
+        let kinds = resolved_group_kinds(&winners, &groups, &winner_kinds, &fold, &recorded);
+        assert_eq!(
+            kinds.iter().map(|k| k.as_deref()).collect::<Vec<_>>(),
+            [Some("wood"), Some("wood"), Some("rattan")]
+        );
+    }
+
+    #[test]
+    fn resolved_group_kinds_drops_groups_orphaned_by_the_cap_or_gate() {
+        // Cap 2 with three groups: the third group's pick was cut, so it is
+        // not a kind — it contributes no shade and no candidates.
+        let winners = vec![
+            Some(pick("a1", 0.7)),
+            Some(pick("b1", 0.6)),
+            Some(pick("c1", 0.5)),
+        ];
+        let groups = vec![
+            net("a", vec![pick("a1", 0.7)]),
+            net("b", vec![pick("b1", 0.6)]),
+            net("c", vec![pick("c1", 0.5)]),
+        ];
+        let winner_kinds = HashMap::from([
+            ("a1".to_string(), "a".to_string()),
+            ("b1".to_string(), "b".to_string()),
+            ("c1".to_string(), "c".to_string()),
+        ]);
+        let recorded: HashSet<String> = ["a1".to_string(), "b1".to_string()].into();
+        let kinds =
+            resolved_group_kinds(&winners, &groups, &winner_kinds, &HashMap::new(), &recorded);
+        assert_eq!(
+            kinds.iter().map(|k| k.as_deref()).collect::<Vec<_>>(),
+            [Some("a"), Some("b"), None]
+        );
+    }
+
+    #[test]
+    fn resolved_group_kinds_with_nothing_recorded_keeps_every_kind() {
+        // Pure choice list: nothing recorded, every group offers its own
+        // shortlist under its own phrase.
+        let groups = vec![
+            net("a", vec![pick("a1", 0.7)]),
+            net("b", vec![pick("b1", 0.6)]),
+        ];
+        let kinds = resolved_group_kinds(
+            &[],
+            &groups,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            kinds.iter().map(|k| k.as_deref()).collect::<Vec<_>>(),
+            [Some("a"), Some("b")]
+        );
+    }
+
+    #[test]
+    fn candidate_kinds_skips_orphan_groups_and_recorded_terms() {
+        // The cap-orphan "c" group contributes nothing even though its
+        // candidates exist; the recorded pick keeps its assigned kind.
+        let picked = vec![pick("a1", 0.7), pick("b1", 0.6)];
+        let groups = vec![
+            net("a", vec![pick("a1", 0.7), pick("a2", 0.4)]),
+            net("b", vec![pick("b1", 0.6)]),
+            net("c", vec![pick("c1", 0.5), pick("c2", 0.3)]),
+        ];
+        let group_kinds = vec![Some("a".to_string()), Some("b".to_string()), None];
+        let winner_kinds = HashMap::from([
+            ("a1".to_string(), "a".to_string()),
+            ("b1".to_string(), "b".to_string()),
+            ("c1".to_string(), "c".to_string()),
+        ]);
+        let recorded: HashSet<String> = ["a1".to_string(), "b1".to_string()].into();
+        let kinds = candidate_kinds(&picked, &groups, &group_kinds, &winner_kinds, &recorded);
+        assert_eq!(kinds.len(), 3); // a1, b1 (recorded) + a2 (alternate)
+        assert_eq!(kinds.get("a2").map(String::as_str), Some("a"));
+        assert!(!kinds.contains_key("c1") && !kinds.contains_key("c2"));
     }
 }

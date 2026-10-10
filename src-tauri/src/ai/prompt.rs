@@ -278,9 +278,35 @@ pub(crate) fn build_validation_prompt(
         }
         sections.push(block);
     }
-    let contract = "Pick terms VERBATIM from each field's candidate list — do not invent, reword, or merge terms. Pick at most one term per component group, honoring each field's selection line (single fields get exactly one pick, the top one). Skipping a group is correct when nothing in it fits or it repeats another group — fewer picks than groups is correct, never pad. If none of a field's candidates fit the artefact, emit an empty <validated> block for it.\n\nReply ONLY with, one block per field in the order above:\n<validated field=\"{Field Name}\"><pick term=\"{verbatim candidate term}\" /></validated>";
+    let contract = "Pick terms VERBATIM from each field's candidate list — do not invent, reword, or merge terms. Pick at most one term per component group, honoring each field's selection line (single fields get exactly one pick, the top one). Skipping a group is correct when nothing in it fits, or when another group of the same field already covers that kind — different terms can still be one kind (oak and olive are both woods; crimson is a red): pick for the group that fits best and skip the rest — fewer picks than groups is correct, never pad. If none of a field's candidates fit the artefact, emit an empty <validated> block for it.\n\nReply ONLY with, one block per field in the order above:\n<validated field=\"{Field Name}\"><pick term=\"{verbatim candidate term}\" /></validated>";
     sections.push(contract.to_string());
     sections.join("\n\n")
+}
+
+/// Per-field definition of what "one distinct component" means, so the judge
+/// cannot split a field by *part*. Observed live: an all-wood artefact came
+/// back as oak/olive/rosewood/pear because each part became a component and
+/// each part's net retrieved a different wood variety. Matched by
+/// case-insensitive substring over the seed field names (checked in this
+/// order, so compound names resolve to their first match); user-created
+/// fields fall back to the generic clause.
+fn partition_field_clause(field_name: &str) -> &'static str {
+    let lower = field_name.to_ascii_lowercase();
+    if lower.contains("material") {
+        "a component is a distinct substance the artefact is made of — parts are not materials, and varieties of one substance are one component (oak, olive and rosewood are all wood): an artefact built entirely of wood has exactly one material component"
+    } else if lower.contains("colour") || lower.contains("color") {
+        "a component is a distinct colour family visible on the artefact (red and crimson are one; two greys of one background are one)"
+    } else if lower.contains("shape") {
+        "a component is a distinct overall form or silhouette (rectangular and rectangular cuboid are one)"
+    } else if lower.contains("technique") {
+        "a component is a distinct making process used on the artefact"
+    } else if lower.contains("place") {
+        "a component is a distinct place the artefact originates from; name none when there is no evidence"
+    } else if lower.contains("type") || lower.contains("work") {
+        "a component is a distinct object kind the artefact is (a multi-part installation is one work type)"
+    } else {
+        "a component is one genuinely distinct kind of thing for this field — never a variety of the same kind"
+    }
 }
 
 /// Compose the partition judge's prompt: one focused vision call naming the
@@ -292,18 +318,18 @@ pub(crate) fn build_validation_prompt(
 pub(crate) fn build_partition_prompt(fields: &[FieldSpec], record: &Value) -> String {
     let mut sections = Vec::new();
     sections.push(
-        "You are a museum cataloguing assistant. Look at the artefact image and its metadata record, then name the distinct components the artefact has for each field listed below. A component is one genuinely distinct kind of thing — a different material, part, colour, or aspect; never a variety of the same kind (red and crimson are one colour; rectangular and rectangular cuboid are one shape). List the most salient component first, and name as many as are really there — often there is only one. Use short descriptive phrases (e.g. \"jute body\", \"synthetic lining\")."
+        "You are a museum cataloguing assistant. Look at the artefact image and its metadata record, then name the distinct components the artefact has for each field listed below. A component is one genuinely distinct kind of thing — never a variety of the same kind (red and crimson are one colour; rectangular and rectangular cuboid are one shape). List the most salient component first, and name as many as are really there — often there is only one. Use short descriptive phrases (e.g. \"jute body\", \"synthetic lining\")."
             .to_string(),
     );
     let lines: Vec<String> = fields
         .iter()
         .map(|f| {
+            let mut line = format!("- {} — {}.", f.name, partition_field_clause(&f.name));
             let prompt = f.prompt.trim();
-            if prompt.is_empty() {
-                format!("- {}", f.name)
-            } else {
-                format!("- {} (guidance: {prompt})", f.name)
+            if !prompt.is_empty() {
+                line.push_str(&format!(" (guidance: {prompt})"));
             }
+            line
         })
         .collect();
     sections.push(format!(
@@ -528,6 +554,8 @@ mod tests {
         // The fixed XML reply contract is present.
         assert!(prompt.contains("<validated field="));
         assert!(prompt.contains("VERBATIM"));
+        // The same-kind cross-group skip rule names the failure it prevents.
+        assert!(prompt.contains("oak and olive are both woods"));
         // Single-component fields keep the flat candidate rendering.
         assert!(!prompt.contains("component \""));
     }
@@ -615,15 +643,34 @@ mod tests {
         colour.prompt = "Record at their basic level.".to_string();
         let shape = vocab_field("Shape");
         let prompt = build_partition_prompt(&[colour, shape], &json!({"Object Name": "Bowl"}));
-        assert!(prompt.contains("- Colour (guidance: Record at their basic level.)"));
-        assert!(prompt.contains("\n- Shape\n"));
+        // Per-field component definitions pin what "distinct" means per field…
+        assert!(prompt.contains(
+            "- Colour — a component is a distinct colour family visible on the artefact (red and crimson are one; two greys of one background are one). (guidance: Record at their basic level.)"
+        ));
+        assert!(prompt.contains(
+            "- Shape — a component is a distinct overall form or silhouette (rectangular and rectangular cuboid are one)."
+        ));
         // The artefact record reaches the judge (a cataloguer reads the row first).
         assert!(prompt.contains("<artefact_file>"));
         assert!(prompt.contains(">Bowl<"));
+        // …and the material clause forbids part-splitting and variety-splitting.
+        let material = vocab_field("Material");
+        let prompt = build_partition_prompt(&[material], &json!({}));
+        assert!(prompt.contains("parts are not materials"));
+        assert!(prompt.contains("exactly one material component"));
         // The reply contract and the kind-vs-specificity rule are present.
         assert!(prompt.contains("<components field="));
         assert!(prompt.contains("never a variety of the same kind"));
         // Quota-free: the builder takes no cap, so no cap language can appear.
         assert!(!prompt.contains("at most 3"));
+    }
+
+    #[test]
+    fn partition_prompt_falls_back_to_generic_clause_for_unknown_fields() {
+        let custom = vocab_field("Curatorial category");
+        let prompt = build_partition_prompt(&[custom], &json!({}));
+        assert!(prompt.contains(
+            "- Curatorial category — a component is one genuinely distinct kind of thing for this field — never a variety of the same kind."
+        ));
     }
 }

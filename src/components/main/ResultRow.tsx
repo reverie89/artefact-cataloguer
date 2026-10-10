@@ -261,7 +261,7 @@ function stripHintSuffix(value: string): string {
 interface FieldControlProps {
   field: import("../../app/types").CatalogueField;
   fieldKey: string;
-  aiSugs: { value: string; similarity?: number }[];
+  aiSugs: import("../../app/types").AiSuggestion[];
   sel: import("../../app/types").FieldSelection | undefined;
   open: boolean;
   search: string;
@@ -291,6 +291,13 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
   const aiByLower = new Map(aiSugs.map((s) => [stripHintSuffix(s.value).toLowerCase(), s]));
   const selectedValues = new Set((sel?.values || []).map((v) => stripHintSuffix(v).toLowerCase()));
 
+  // First-appearance order of each kind across the field's suggestions —
+  // stable regardless of dropdown search/sort, so a kind's shade never shifts.
+  const kindShades = new Map<string, number>();
+  for (const s of aiSugs) {
+    if (s.kind && !kindShades.has(s.kind)) kindShades.set(s.kind, kindShades.size);
+  }
+
   const matchedAiLower = new Set<string>();
   const vocabItems = vocabTerms.map((vt) => {
     const lower = vt.term.toLowerCase();
@@ -301,6 +308,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
       label: vt.label,
       badge: vt.badge,
       aiSimilarity: ai ? ai.similarity ?? null : null,
+      kind: ai ? ai.kind ?? null : null,
       selected: selectedValues.has(lower),
       onPick: () => (ai
         ? actions.toggleFieldValue(fieldKey, vt.term, "ai", vt.listName, ai.similarity ?? null, multi)
@@ -320,6 +328,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
         label: cleaned,
         badge: null as string | null,
         aiSimilarity: s.similarity ?? null,
+        kind: s.kind ?? null,
         selected: selectedValues.has(cleaned.toLowerCase()),
         onPick: () => actions.toggleFieldValue(fieldKey, cleaned, "ai", "AI", s.similarity ?? null, multi),
       };
@@ -407,6 +416,7 @@ function FieldControl({ field, fieldKey, aiSugs, sel, open, search, state, actio
               fieldKey={fieldKey}
               search={search}
               items={items}
+              kindShades={kindShades}
               showUseTyped={showUseTyped}
               hasSelection={!!sel}
               multi={multi}
@@ -428,6 +438,9 @@ interface DropdownItem {
    *  `null` to show no badge. */
   badge: string | null;
   aiSimilarity: number | null;
+  /** The component group's phrase this suggestion came from, or `null` for
+   *  rows without an AI suggestion — drives the per-kind row shading. */
+  kind: string | null;
   selected: boolean;
   onPick: () => void;
 }
@@ -436,6 +449,9 @@ interface DropdownBodyProps {
   fieldKey: string;
   search: string;
   items: DropdownItem[];
+  /** Kind phrase → shade index (first-appearance order across the field's
+   *  full suggestion list, built by FieldControl). */
+  kindShades: Map<string, number>;
   showUseTyped: boolean;
   hasSelection: boolean;
   /** False for single-pick fields: a typed value replaces the selection. */
@@ -443,7 +459,15 @@ interface DropdownBodyProps {
   actions: AppActions;
 }
 
-function DropdownBody({ fieldKey, search, items, showUseTyped, hasSelection, multi, actions }: DropdownBodyProps) {
+/** Hue step between consecutive kinds: the golden angle maximizes hue
+ *  separation, so shades never repeat for any practical component count. */
+const KIND_HUE_STEP = 137.5;
+
+function kindShade(shadeIndex: number): string {
+  return `hsla(${(shadeIndex * KIND_HUE_STEP) % 360}, 65%, 55%, 0.16)`;
+}
+
+function DropdownBody({ fieldKey, search, items, kindShades, showUseTyped, hasSelection, multi, actions }: DropdownBodyProps) {
   // Controlled directly by the store-propagated `search` value: typing dispatches
   // setFieldSearch, which flows back as `search`. A controlled input keeps focus
   // across re-renders without a local-state mirror.
@@ -462,27 +486,40 @@ function DropdownBody({ fieldKey, search, items, showUseTyped, hasSelection, mul
         </div>
       </div>
       <div className="max-h-50 overflow-y-auto">
-        {items.map((it, i) => (
-          <div key={i} onClick={it.onPick} className={cn("border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75", it.selected && "bg-primary/5")}>
-            <span className="flex size-3.5 shrink-0 items-center justify-center">
-              {it.selected && <Check className="text-primary size-3" />}
-            </span>
-            <span className="flex flex-1 min-w-0 items-center gap-1.5 text-sm">
-              <span className="truncate">{it.label}</span>
-              {it.badge && (
-                <Badge variant="secondary" className="shrink-0 text-[10px] font-normal tracking-[0.04em]">{it.badge}</Badge>
+        {items.map((it, i) => {
+          // Kind tint (data-driven colour — the sanctioned inline-style case):
+          // a kind's pick and alternates share one shade; unshaded rows keep
+          // the selected background. The tooltip names the group.
+          const shadeIndex = it.kind != null ? kindShades.get(it.kind) : undefined;
+          const shade = shadeIndex != null ? kindShade(shadeIndex) : undefined;
+          return (
+            <div
+              key={i}
+              onClick={it.onPick}
+              title={it.kind ?? undefined}
+              style={shade != null ? { backgroundColor: shade } : undefined}
+              className={cn("border-border/60 flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.75", shade == null && it.selected && "bg-primary/5")}
+            >
+              <span className="flex size-3.5 shrink-0 items-center justify-center">
+                {it.selected && <Check className="text-primary size-3" />}
+              </span>
+              <span className="flex flex-1 min-w-0 items-center gap-1.5 text-sm">
+                <span className="truncate">{it.label}</span>
+                {it.badge && (
+                  <Badge variant="secondary" className="shrink-0 text-[10px] font-normal tracking-[0.04em]">{it.badge}</Badge>
+                )}
+              </span>
+              {it.aiSimilarity != null && (
+                <>
+                  <div className="bg-border h-0.5 w-9 shrink-0 overflow-hidden rounded-full">
+                    <div className="bg-primary h-full rounded-full" style={{ width: Math.round(it.aiSimilarity * 100) + "%" }} />
+                  </div>
+                  <span className="text-muted-foreground w-14.5 shrink-0 text-right text-[11px]">{Math.round(it.aiSimilarity * 100)}% match</span>
+                </>
               )}
-            </span>
-            {it.aiSimilarity != null && (
-              <>
-                <div className="bg-border h-0.5 w-9 shrink-0 overflow-hidden rounded-full">
-                  <div className="bg-primary h-full rounded-full" style={{ width: Math.round(it.aiSimilarity * 100) + "%" }} />
-                </div>
-                <span className="text-muted-foreground w-14.5 shrink-0 text-right text-[11px]">{Math.round(it.aiSimilarity * 100)}% match</span>
-              </>
-            )}
-          </div>
-        ))}
+            </div>
+          );
+        })}
         {showUseTyped && (
           <div onClick={() => actions.toggleFieldValue(fieldKey, search.trim(), "manual", "", null, multi)} className="border-border/60 text-primary flex cursor-pointer items-center gap-1.5 border-b px-2.5 py-1.75 text-sm">
             <Plus className="size-3" /><span>Use &quot;{search.trim()}&quot;</span>

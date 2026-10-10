@@ -329,6 +329,60 @@ describe("reducer row removal", () => {
     });
     expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 });
   });
+
+  it("SET_ROW_STATUS records only the picked suggestion on a 1-component field — alternates are dropdown choices", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: {
+        Material: [
+          { value: "wood (plant material)", similarity: 0.61, picked: true },
+          { value: "rattan", similarity: 0.56, picked: false },
+          { value: "hardwood", similarity: 0.52, picked: false },
+        ],
+      },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "wood (plant material)", values: ["wood (plant material)"], listName: "AI", similarity: 0.61 });
+    // The alternates stay available as swap choices in the dropdown.
+    expect(next.aiResults.u1.Material).toHaveLength(3);
+  });
+
+  it("SET_ROW_STATUS records only picked suggestions on a multi-component field — alternates never join the selection", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 3 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: {
+        Material: [
+          { value: "wood (plant material)", similarity: 0.61, picked: true },
+          { value: "rattan", similarity: 0.56, picked: true },
+          { value: "oak (wood)", similarity: 0.51, picked: false },
+        ],
+      },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({
+      source: "multi",
+      value: "wood (plant material) | rattan",
+      values: ["wood (plant material)", "rattan"],
+      listName: "",
+      similarity: null,
+    });
+  });
 });
 
 describe("reducer search column scope", () => {

@@ -32,6 +32,14 @@ blake3 = "1"
 futures = "0.3"
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "linux-native"] }
 
+[dev-dependencies]
+# `test` exposes `tauri::test` (mock runtime) for the live-pipeline probe
+# (`src/ai/ai_probe.rs`); normal builds never see it.
+tauri = { version = "2", features = ["test"] }
+# Same version keyring pulls in transitively; the probe's keychain-visibility
+# diagnostic walks the kernel keyutils rings directly (descriptions only).
+linux-keyutils = "0.2"
+
 [features]
 # By default Tauri ships a smaller binary without custom protocol overhead we don't need.
 default = []

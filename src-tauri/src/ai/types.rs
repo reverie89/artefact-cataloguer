@@ -201,11 +201,19 @@ pub struct ArtefactInput {
 /// open-ended fields (never similarity-scored; the answer is taken verbatim
 /// from the model's `<open_field>` reply). Serialized as `similarity`, omitted
 /// from JSON entirely when `None` so open-field suggestions carry no key.
+/// `picked` marks the field's recorded picks (the review row pre-selects
+/// them); `picked: false` marks a shortlisted alternate — a swap choice in
+/// the review dropdown that is never auto-recorded. `kind` is the component
+/// group's own phrase the candidate came from (e.g. "rattan/vine binding"),
+/// driving the dropdown's per-kind shading; `None` for open-ended fields.
 #[derive(Serialize)]
 pub struct Suggestion {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f64>,
+    pub picked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Per-field suggestions: field name → ranked list.
