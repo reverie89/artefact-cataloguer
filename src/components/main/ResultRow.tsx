@@ -1,4 +1,4 @@
-import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Plus, RotateCcw, Search, Trash2, X, XCircle, Zap } from "lucide-react";
+import { Ban, Check, ChevronDown, ChevronUp, Image as ImageIcon, Loader2, Play, Plus, RotateCcw, Search, Trash2, X, XCircle, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/actions";
 import type { AppState } from "../../app/state";
@@ -59,11 +59,33 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
     .filter((_, i) => i !== imageIdx)
     .map((f) => ({ key: f.name || "Untitled column", value: recordValueFor(record, f.name), forAI: f.includeForAI }));
 
+  // The strip's single status-driven action — the record's entire control
+  // surface lives on the collapsed row so no expansion is needed to act on it
+  // (the expanded body is informational only). Start/Retry queue the row and
+  // the drainer runs it automatically (FIFO); Stop cancels the in-flight call
+  // or un-queues the row back to `ready`, per its status.
+  const rowAction: { icon: React.ReactNode; text: string; label: string; run: () => void } | null =
+    row.status === "processing"
+      ? { icon: <Ban className="size-3" />, text: "Stop", label: "Stop this record", run: () => void actions.stopRow(row.uid) }
+      : row.status === "ready"
+        ? { icon: <Play className="size-3" />, text: "Start", label: "Start this record", run: () => actions.queueRow(row.uid) }
+        : row.status === "queued"
+          ? { icon: <Ban className="size-3" />, text: "Stop", label: "Stop queueing this record", run: () => actions.dequeueRow(row.uid) }
+          : row.status === "error" || row.status === "cancelled" || row.status === "done"
+            ? { icon: <RotateCcw className="size-3" />, text: "Retry", label: "Retry this record", run: () => actions.queueRow(row.uid) }
+            : null;
+
   return (
     <div className={cn("border-border/60 border-b", confirmingDelete && "bg-destructive/10")}>
       <div
         onClick={() => actions.toggleRow(row.uid)}
-        className="grid min-w-0 cursor-pointer grid-cols-[80px_1fr] items-center overflow-hidden px-5 py-2.5"
+        className={cn(
+          "grid min-w-0 cursor-pointer grid-cols-[80px_1fr] items-center overflow-hidden px-5 py-2.5",
+          // Zebra: tint every 2nd visible row (per group, aligned with S/N) so
+          // the eye can track across the wide row. The delete-confirmation
+          // tint paints the whole row beneath, so the stripe yields to it.
+          !confirmingDelete && index % 2 === 0 && "bg-muted/50"
+        )}
       >
         <span className="text-muted-foreground truncate text-sm">{index}</span>
         <div className="flex items-center gap-1.25">
@@ -73,6 +95,18 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
           />
           <span className="text-muted-foreground text-[13px]">{st.label}</span>
           <span className="ml-auto flex items-center">
+            {rowAction && (
+              <Button
+                onClick={(e) => { e.stopPropagation(); rowAction.run(); }}
+                variant="outline"
+                size="xs"
+                aria-label={rowAction.label}
+                className="mr-1.5"
+              >
+                {rowAction.icon}
+                <span>{rowAction.text}</span>
+              </Button>
+            )}
             <Button
               onClick={(e) => { e.stopPropagation(); void handleDelete(); }}
               variant="ghost"
@@ -89,54 +123,25 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
 
       {expanded && (
         <div className="bg-muted/30 border-l-primary/30 border-border/60 animate-in fade-in border-t border-l-[3px] duration-150">
-          {/* Progress / error bar — shown above the source record so the row's
-              current state is visible before its contents. The `done` case has
-              no bar (it renders the Catalogue Fields editor further below). */}
+          {/* Status bars — informational only; the row's action button lives
+              on the collapsed strip above. The `done` case has no bar (it
+              renders the Catalogue Fields editor further below). */}
           {row.status === "processing" && (
             <div className="text-muted-foreground flex items-center gap-2 px-4.5 py-3.5 text-sm">
               <Loader2 className="size-3 animate-spin" />
               <span>Running AI on artefact…</span>
-              <Button
-                onClick={(e) => { e.stopPropagation(); void actions.stopRow(row.uid); }}
-                variant="outline"
-                size="xs"
-                className="ml-1"
-              >
-                <Ban className="size-3" />
-                <span>Stop</span>
-              </Button>
             </div>
           )}
           {row.status === "queued" && (
             <div className="text-muted-foreground px-4.5 py-3.5 text-sm">Queued</div>
           )}
           {row.status === "cancelled" && (
-            <div className="text-muted-foreground flex items-center gap-2 px-4.5 py-3.5 text-sm">
-              <span>Cancelled</span>
-              <Button
-                onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
-                variant="outline"
-                size="xs"
-                className="ml-1"
-              >
-                <RotateCcw className="size-3" />
-                <span>Retry</span>
-              </Button>
-            </div>
+            <div className="text-muted-foreground px-4.5 py-3.5 text-sm">Cancelled</div>
           )}
           {row.status === "error" && (
             <div className="text-destructive flex items-center gap-2 px-4.5 py-3.5 text-sm">
               <XCircle className="size-3.5" />
               <span>Processing failed — check Logs Viewer</span>
-              <Button
-                onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
-                variant="outline"
-                size="xs"
-                className="ml-1"
-              >
-                <RotateCcw className="size-3" />
-                <span>Retry</span>
-              </Button>
             </div>
           )}
 
@@ -208,19 +213,9 @@ function CatalogueFields({ row, state, actions }: { row: ArtefactRow; state: App
     <div className="flex flex-col gap-3 px-4.5 py-3.5">
       <div className="text-muted-foreground flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.12em]">
         <span>Catalogue Fields</span>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1 normal-case tracking-normal">
-            <Zap className="size-3 text-primary" />
-            <span className="text-muted-foreground text-[11px] font-normal">{activeProvName}</span>
-          </div>
-          <Button
-            onClick={(e) => { e.stopPropagation(); actions.requeueRow(row.uid); }}
-            variant="outline"
-            size="xs"
-          >
-            <RotateCcw className="size-3" />
-            <span>Retry</span>
-          </Button>
+        <div className="flex items-center gap-1 normal-case tracking-normal">
+          <Zap className="size-3 text-primary" />
+          <span className="text-muted-foreground text-[11px] font-normal">{activeProvName}</span>
         </div>
       </div>
       {state.settings.fields.map((f) => {

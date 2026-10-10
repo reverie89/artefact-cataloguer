@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
-import { ExpandCollapseAll } from "./ExpandCollapseAll";
+import { ExpandCollapseAll } from "@/components/common/ExpandCollapseAll";
 import { SortableList } from "./SortableList";
 import { SortableRow } from "./SortableRow";
 import { useScrollNewRowIntoView } from "../../hooks/useScrollNewRowIntoView";

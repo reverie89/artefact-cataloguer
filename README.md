@@ -20,8 +20,8 @@
 - **Embedded-image extraction** — `.xlsx` drawing anchors are mapped to media files and snapped to the nearest data row; images are served via the Tauri asset protocol.
 - **Image lightbox** — full-screen viewer with zoom-in/out/reset and a live percentage readout (local `useImageZoom` hook).
 - **Import & grouped records** — browse or drop one or more `.xlsx` files and each is validated + parsed on the spot: valid records join the results panel immediately (grouped by source file, deletable per row or whole-file); invalid files fail loudly with a per-file reason card.
-- **Queue controls** — imported records wait as **queued**; **Start** drains them one AI call at a time (rows imported or requeued mid-run merge in), **Stop** transport-cancels in-flight rows (queued rows stay queued — Start resumes), **Retry** requeues every failed row and restarts a stopped queue, and per-row **Stop** / **Retry** are available on the rows (per-row Retry also restarts a stopped queue).
-- **Review-friendly results** — expandable rows with status dots, searchable field dropdowns, filter + a column-scoped search over results (pick which artefact-file and catalogue columns the search matches), drag-to-reorder vocab/field lists.
+- **Queue controls** — a job-queue model: imported records wait as **Ready** (nothing runs on import); the toolbar **Start** queues every Ready record, each row's **Start**/**Retry** queues exactly that record, and **processing starts automatically, FIFO, whenever the queue is non-empty** (one AI call at a time; rows queued mid-run merge in). **Stop** cancels the in-flight rows and returns queued rows to Ready.
+- **Review-friendly results** — expandable rows (toolbar **Expand all / Collapse all** included) with status dots and alternating row shades, searchable field dropdowns, filter + a column-scoped search over results (pick which artefact-file and catalogue columns the search matches), drag-to-reorder vocab/field lists.
 - **Multiple AI providers** — configure several providers, drag them into a preferred order, mark one active, and run a **Test Connection** per provider (fetches the model list).
 - **Settings import/export** — round-trip the settings blob as a zod-validated JSON file.
 - **Theme & zoom** — dark mode (default on) and zoom (0.7–1.5), both persisted.
@@ -53,7 +53,7 @@ npm run tauri:dev     # full app (Rust backend + renderer + window); HMR
 ### Step 1: Import an artefact spreadsheet
 
 Drag-and-drop one or more `.xlsx` files (or use the file picker). Each file is validated and parsed on import — there is no separate Parse or Reset
-button. A valid file's records join the results panel immediately as **queued** rows, grouped under the file's name, with embedded images extracted
+button. A valid file's records join the results panel immediately as **Ready** rows, grouped under the file's name, with embedded images extracted
 automatically; an invalid file fails loudly with a dismissible per-file card listing the problems. Each configured column is identified by its Header
 Text matching the header row (case- and whitespace-insensitive) — or, when the column's Identify By toggle is set to Column Letter in Settings →
 Artefact File, read positionally from that Excel column regardless of the header text. A header name repeated across two columns is rejected.
@@ -64,9 +64,9 @@ An active provider is required before cataloguing — without one, starting the 
 
 ### Step 3: Run and review
 
-Click **Start** to drain the queued rows through the active provider. Results stream in live: each row shows per-field suggestions (controlled-vocab fields ranked by cosine similarity; open-ended fields with the model's free-text answer). For each field, accept an AI pick, choose from its controlled-vocabulary dropdown, or type a value manually. A vocab field with no matching candidate stays empty — the model can only pick from the source's terms. Use the image lightbox to inspect the artefact. Records are grouped by the file they were imported from — delete a single record with its row's delete button, or all of a file's records with the group's delete button (both confirm first).
+Click **Start** to queue the Ready rows — the queue then drains automatically, one AI call at a time, in the order records were queued (each Start/Retry click takes the next place; a batch Start queues in list order). Results stream in live: each row shows per-field suggestions (controlled-vocab fields ranked by cosine similarity; open-ended fields with the model's free-text answer). For each field, accept an AI pick, choose from its controlled-vocabulary dropdown, or type a value manually. A vocab field with no matching candidate stays empty — the model can only pick from the source's terms. Use the image lightbox to inspect the artefact. Records are grouped by the file they were imported from — delete a single record with its row's delete button, or all of a file's records with the group's delete button (both confirm first).
 
-While the queue runs, **Stop** cancels the in-flight rows (queued rows stay queued — **Start** resumes). A **processing** row offers **Stop** (cancels just that row's in-flight call — the rest of the queue continues); an **errored**/**cancelled** row offers **Retry**, and all failed rows can be requeued at once via **Retry** in the header — Retry also restarts a stopped queue, so failed rows rerun without a separate Start. A failing row marks only itself as errored — the queue continues.
+While the queue runs, **Stop** cancels the in-flight rows and returns queued rows to **Ready** (otherwise the queue would resume instantly — an empty work list is what makes Stop stick). Every collapsed row carries one status-driven button: **Start** queues a Ready record, **Retry** queues an errored/cancelled/done record for a re-run (manual selections are kept), **Stop** cancels just that row's in-flight call (the rest of the queue continues), and on a **Queued** row the same **Stop** returns it to Ready before the drainer reaches it. All failed rows can be requeued at once via **Retry** in the header. A failing row marks only itself as errored — the queue continues.
 
 ### Step 4: Export
 

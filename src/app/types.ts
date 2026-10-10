@@ -199,10 +199,16 @@ export interface ArtefactRow {
    *  on the row (not looked up from the file list) because file entries are
    *  transient: valid files leave the upload list as soon as they're imported. */
   sourceName: string;
-  /** Set at import time (`queued`); the catalogue queue owns every later
-   *  transition. `cancelled` = stopped before this row was reached (terminal,
-   *  like `done`/`error`). */
-  status?: "queued" | "processing" | "done" | "error" | "cancelled";
+  /** `ready` at import (nothing runs until a Start/Retry queues it); the
+   *  catalogue queue owns every later transition. `queued` = in the drainer's
+   *  work list (processing starts on it automatically, oldest ticket first).
+   *  `cancelled` = was in flight when the user stopped (terminal, like
+   *  `done`/`error`). */
+  status?: "ready" | "queued" | "processing" | "done" | "error" | "cancelled";
+  /** The row's place in the drainer's work list: stamped by QUEUE_ROWS in
+   *  Start/Retry click order, cleared when the row is unqueued. The drainer
+   *  runs the lowest ticket first. */
+  queueTicket?: number;
   /** Arbitrary source columns from the sheet (key → value) — every non-image
    *  column the parser found, in the sheet's own header casing. */
   record?: Record<string, string>;

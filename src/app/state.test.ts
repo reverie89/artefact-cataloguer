@@ -220,25 +220,56 @@ describe("reducer", () => {
   });
 });
 
-describe("reducer requeueing", () => {
+describe("reducer queueing", () => {
   const base: typeof initialState = {
     ...initialState,
     results: [
-      { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: {} },
-      { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "error" as const, record: {} },
-      { uid: "u3", fileId: "f1", sourceName: "a.xlsx", status: "cancelled" as const, record: {} },
-      { uid: "u4", fileId: "f1", sourceName: "a.xlsx", status: "queued" as const, record: {} },
-      { uid: "u5", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} },
+      { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "ready" as const, record: {} },
+      { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "done" as const, record: {} },
+      { uid: "u3", fileId: "f1", sourceName: "a.xlsx", status: "error" as const, record: {} },
+      { uid: "u4", fileId: "f1", sourceName: "a.xlsx", status: "cancelled" as const, record: {} },
+      { uid: "u5", fileId: "f1", sourceName: "a.xlsx", status: "queued" as const, record: {} },
+      { uid: "u6", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} },
     ],
   };
   const statuses = (s: typeof base) => s.results.map((r) => r.status);
 
-  it("REQUEUE_ROWS flips terminal rows to queued in one pass", () => {
-    // Done rows only ever arrive here from an explicit single-row requeue
-    // (re-run); Retry-failed never collects them. Already-queued rows stay
-    // queued; an in-flight row is untouched (its owner owns that status).
-    const next = reducer(base, { type: "REQUEUE_ROWS", uids: ["u1", "u2", "u3", "u4", "nope"] });
-    expect(statuses(next)).toEqual(["queued", "queued", "queued", "queued", "processing"]);
+  it("QUEUE_ROWS flips ready/terminal rows to queued in one pass", () => {
+    // The queue is the drainer's work list; every queueing action funnels
+    // here. Already-queued rows stay queued; an in-flight row is untouched
+    // (its owner owns that status). Unknown uids no-op.
+    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u1", "u2", "u3", "u4", "u5", "nope"] });
+    expect(statuses(next)).toEqual(["queued", "queued", "queued", "queued", "queued", "processing"]);
+  });
+
+  it("QUEUE_ROWS stamps increasing tickets in list order; queued/processing rows keep theirs", () => {
+    // Tickets make queue order click order: the drainer runs the lowest
+    // ticket first, so a later Start never overtakes an earlier-queued row.
+    const next = reducer(base, { type: "QUEUE_ROWS", uids: ["u1", "u3", "u5", "u6", "nope"] });
+    expect(next.results.map((r) => r.queueTicket)).toEqual([1, undefined, 2, undefined, undefined, undefined]);
+    expect(next.nextQueueTicket).toBe(2);
+  });
+
+  it("UNQUEUE_ROWS returns queued rows to ready and clears their tickets", () => {
+    const stamped: typeof base = {
+      ...base,
+      results: base.results.map((r) => (r.uid === "u5" ? { ...r, queueTicket: 7 } : r)),
+    };
+    const all = reducer(stamped, { type: "UNQUEUE_ROWS", uids: ["u1", "u2", "u3", "u4", "u5", "u6", "nope"] });
+    expect(statuses(all)).toEqual(["ready", "done", "error", "cancelled", "ready", "processing"]);
+    expect(all.results.find((r) => r.uid === "u5")?.queueTicket).toBeUndefined();
+    // A row Cancel unqueues just its own row.
+    const one = reducer(stamped, { type: "UNQUEUE_ROWS", uids: ["u5"] });
+    expect(statuses(one)).toEqual(["ready", "done", "error", "cancelled", "ready", "processing"]);
+    expect(one.results.find((r) => r.uid === "u5")?.queueTicket).toBeUndefined();
+  });
+
+  it("re-queueing an unqueued row takes a fresh, later ticket", () => {
+    let next = reducer(base, { type: "QUEUE_ROWS", uids: ["u1", "u3"] });
+    expect(next.results.find((r) => r.uid === "u1")?.queueTicket).toBe(1);
+    next = reducer(next, { type: "UNQUEUE_ROWS", uids: ["u1"] });
+    next = reducer(next, { type: "QUEUE_ROWS", uids: ["u1"] });
+    expect(next.results.find((r) => r.uid === "u1")?.queueTicket).toBe(3);
   });
 });
 
@@ -447,5 +478,21 @@ describe("reducer PATCH_SETTINGS search-column reconcile", () => {
     });
     expect(next.searchColsCat).toEqual(["c1"]);
     expect(next.searchColsAf).toEqual(["a1"]);
+  });
+});
+
+describe("reducer SET_ALL_EXPANDED", () => {
+  it("replaces the whole scope map, including the results panel's expandedRows", () => {
+    const seeded: typeof initialState = { ...initialState, expandedRows: { u1: true, u9: true } };
+    const s = reducer(seeded, { type: "SET_ALL_EXPANDED", scope: "expandedRows", ids: ["u1", "u2"], expanded: true });
+    // Replace semantics (same as the settings tabs): rows hidden by the
+    // search/filter lose their expansion — expand/collapse all applies to the
+    // currently visible rows.
+    expect(s.expandedRows).toEqual({ u1: true, u2: true });
+  });
+
+  it("collapse-all writes explicit false for every given id", () => {
+    const s = reducer(initialState, { type: "SET_ALL_EXPANDED", scope: "expandedRows", ids: ["u1", "u2"], expanded: false });
+    expect(s.expandedRows).toEqual({ u1: false, u2: false });
   });
 });

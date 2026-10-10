@@ -245,7 +245,7 @@ export async function parseArtefactFile(file: File, settings: Settings): Promise
 
     rows.push({
       uid: gid(),
-      status: "queued",
+      status: "ready",
       record,
     });
 

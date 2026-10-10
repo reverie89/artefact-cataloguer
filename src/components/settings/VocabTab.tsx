@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { UnsavedBadge } from "./UnsavedBadge";
-import { ExpandCollapseAll } from "./ExpandCollapseAll";
+import { ExpandCollapseAll } from "@/components/common/ExpandCollapseAll";
 import { SortableList } from "./SortableList";
 import { SortableRow } from "./SortableRow";
 

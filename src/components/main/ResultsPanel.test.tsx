@@ -70,8 +70,8 @@ describe("ResultsPanel file groups", () => {
   it("shows a bare record count before processing starts, with no failure pills", () => {
     renderWith({
       results: [
-        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} },
-        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} },
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "ready", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "ready", record: {} },
       ],
     });
 
@@ -145,24 +145,44 @@ describe("ResultsPanel file groups", () => {
 });
 
 describe("ResultsPanel queue controls", () => {
-  it("shows a pulsing Start (and no Stop) when rows are queued and the queue is idle", () => {
+  // Both transport buttons are persistent — disabled rather than hidden — so
+  // their positions never shift. Exact accessible names ("Start"/"Stop")
+  // still separate the toolbar controls from the rows' own strip buttons.
+  it("pulses Start only on a fresh import: ready rows, queue empty", () => {
     renderWith({
-      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {} }],
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "ready", record: {} }],
     });
 
-    const start = screen.getByRole("button", { name: /start/i });
+    const start = screen.getByRole("button", { name: "Start" });
+    expect(start).toBeEnabled();
     expect(start.className).toContain("animate-pulse");
-    expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
   });
 
-  it("swaps Start for Stop while the queue is running", () => {
+  it("keeps Start pulse-free while ready rows exist mid-run", () => {
     renderWith({
       queueRunning: true,
-      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing", record: {} }],
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "ready", record: {} },
+      ],
     });
 
-    expect(screen.getByRole("button", { name: /stop/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
+    const start = screen.getByRole("button", { name: "Start" });
+    expect(start).toBeEnabled();
+    expect(start.className).not.toContain("animate-pulse");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    // The processing row's own Stop button is on the strip.
+    expect(screen.getByRole("button", { name: "Stop this record" })).toBeInTheDocument();
+  });
+
+  it("disables both transport buttons when nothing is startable and nothing runs", () => {
+    renderWith({
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} }],
+    });
+
+    expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
   });
 
   it("shows Retry with the failed count when error/cancelled rows exist", () => {
@@ -173,8 +193,52 @@ describe("ResultsPanel queue controls", () => {
       ],
     });
 
-    const retry = screen.getByRole("button", { name: /retry/i });
+    // The count badge concatenates without whitespace into the accessible
+    // name ("Retry2"), hence the optional space.
+    const retry = screen.getByRole("button", { name: /^Retry ?\d+$/ });
     expect(within(retry).getByText("2")).toBeInTheDocument();
+    // Each failed row carries its own strip Retry.
+    expect(screen.getAllByRole("button", { name: "Retry this record" })).toHaveLength(2);
+  });
+});
+
+describe("ResultsPanel expand/collapse all", () => {
+  const spyActions = () => {
+    const setAllExpanded = vi.fn();
+    const actions = new Proxy<AppActions>({} as AppActions, {
+      get: (_t, prop) => (prop === "setAllExpanded" ? setAllExpanded : () => vi.fn()),
+    });
+    return { actions, setAllExpanded };
+  };
+
+  it("expands and collapses every visible row via setAllExpanded", () => {
+    const { actions, setAllExpanded } = spyActions();
+    renderWith({
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "error", record: {} },
+        { uid: "u3", fileId: "f2", sourceName: "b.xlsx", status: "queued", record: {} },
+      ],
+    }, actions);
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(setAllExpanded).toHaveBeenCalledWith("expandedRows", ["u1", "u2", "u3"], true);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(setAllExpanded).toHaveBeenCalledWith("expandedRows", ["u1", "u2", "u3"], false);
+  });
+
+  it("scopes expand/collapse all to the rows surviving the status filter", () => {
+    const { actions, setAllExpanded } = spyActions();
+    renderWith({
+      resultsFilter: "error",
+      results: [
+        { uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "done", record: {} },
+        { uid: "u2", fileId: "f1", sourceName: "a.xlsx", status: "error", record: {} },
+      ],
+    }, actions);
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(setAllExpanded).toHaveBeenCalledWith("expandedRows", ["u2"], true);
   });
 });
 

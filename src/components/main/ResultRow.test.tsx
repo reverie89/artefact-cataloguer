@@ -14,16 +14,17 @@ const af = (id: string, name: string, extra: Partial<ArtefactField> = {}): Artef
   ...extra,
 });
 
-function renderRow(row: Partial<ArtefactRow>, artefactFields: ArtefactField[] = [af("a", "Accession No"), af("b", "Curator's Obj. Type"), af("m", "Material")], actions: AppActions = noopActions) {
+function renderRow(row: Partial<ArtefactRow>, artefactFields: ArtefactField[] = [af("a", "Accession No"), af("b", "Curator's Obj. Type"), af("m", "Material")], actions: AppActions = noopActions, stateExtra: Partial<AppState> = {}, index = 1) {
   const state: AppState = {
     ...initialState,
     expandedRows: { u1: true },
     settings: { ...initialState.settings, artefactFields },
+    ...stateExtra,
   };
   return render(
     <ResultRow
-      row={{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "queued", record: {}, ...row }}
-      index={1}
+      row={{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "ready", record: {}, ...row }}
+      index={index}
       state={state}
       actions={actions}
       convertFileSrc={(p) => p}
@@ -104,5 +105,81 @@ describe("ResultRow Source Record", () => {
 
     await act(async () => { resolveDelete(); });
     expect(container.firstElementChild).not.toHaveClass("bg-destructive/10");
+  });
+});
+
+describe("ResultRow row actions & stripe", () => {
+  // The row calls actions.queueRow/dequeueRow/stopRow on its strip button;
+  // every other action stays a no-op. The spies are created once per test and
+  // returned alongside the wired proxy.
+  const spyActions = () => {
+    const queueRow = vi.fn();
+    const dequeueRow = vi.fn();
+    const stopRow = vi.fn();
+    const actions = new Proxy<AppActions>({} as AppActions, {
+      get: (_t, prop) =>
+        prop === "queueRow" ? queueRow : prop === "dequeueRow" ? dequeueRow : prop === "stopRow" ? stopRow : () => vi.fn(),
+    });
+    return { actions, queueRow, dequeueRow, stopRow };
+  };
+
+  it("offers Start on a ready row, wired to queueRow", () => {
+    const { actions, queueRow } = spyActions();
+    renderRow({ status: "ready" }, undefined, actions);
+    fireEvent.click(screen.getByRole("button", { name: "Start this record" }));
+    expect(queueRow).toHaveBeenCalledWith("u1");
+  });
+
+  it("keeps a ready row's Start available while the queue runs (it joins the FIFO)", () => {
+    renderRow({ status: "ready" }, undefined, noopActions, { queueRunning: true });
+    expect(screen.getByRole("button", { name: "Start this record" })).toBeInTheDocument();
+  });
+
+  it("offers Stop on a queued row, wired to dequeueRow", () => {
+    const { actions, dequeueRow } = spyActions();
+    renderRow({ status: "queued" }, undefined, actions, { queueRunning: true });
+    // No Start (it is in the work list) and no in-flight Stop variant.
+    expect(screen.queryByRole("button", { name: "Start this record" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop this record" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop queueing this record" }));
+    expect(dequeueRow).toHaveBeenCalledWith("u1");
+  });
+
+  it("offers Retry on error, cancelled and done rows, wired to queueRow", () => {
+    const { actions, queueRow } = spyActions();
+    for (const status of ["error", "cancelled", "done"] as const) {
+      const { unmount } = renderRow({ status }, undefined, actions);
+      fireEvent.click(screen.getByRole("button", { name: "Retry this record" }));
+      unmount();
+    }
+    expect(queueRow).toHaveBeenCalledTimes(3);
+    expect(queueRow).toHaveBeenNthCalledWith(3, "u1");
+  });
+
+  it("offers Stop on a processing row, wired to stopRow", () => {
+    const { actions, stopRow } = spyActions();
+    renderRow({ status: "processing" }, undefined, actions);
+    fireEvent.click(screen.getByRole("button", { name: "Stop this record" }));
+    expect(stopRow).toHaveBeenCalledWith("u1");
+  });
+
+  it("keeps the expanded body informational — no duplicate action buttons inside", () => {
+    const { actions } = spyActions();
+    // renderRow expands by default; the error bar text stays, its button goes.
+    const first = renderRow({ status: "error" }, undefined, actions);
+    expect(screen.getByText("Processing failed — check Logs Viewer")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Retry this record" })).toHaveLength(1);
+    first.unmount();
+    // Done rows: the Catalogue Fields header keeps the provider chip, not a
+    // second Retry.
+    renderRow({ status: "done" }, undefined, actions);
+    expect(screen.getAllByRole("button", { name: "Retry this record" })).toHaveLength(1);
+  });
+
+  it("stripes every 2nd visible row (even S/N) and yields to the delete tint", () => {
+    const { container: odd } = renderRow({ status: "done" });
+    expect(odd.firstElementChild!.firstElementChild).not.toHaveClass("bg-muted/50");
+    const { container: even } = renderRow({ status: "done" }, undefined, noopActions, {}, 2);
+    expect(even.firstElementChild!.firstElementChild).toHaveClass("bg-muted/50");
   });
 });

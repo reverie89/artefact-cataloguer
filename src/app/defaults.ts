@@ -109,12 +109,14 @@ export function _DEF(): Settings {
 // semantic status colours used elsewhere (muted/amber/emerald/red) so the dot
 // reads consistently with Badge/StatusIndicator colours in both themes.
 export const _ST: Record<string, { label: string; clr: string }> = {
+  ready: { label: "Ready", clr: "#8b8ba0" },
+  // Same muted grey family as "ready": queued is a transient work-list state.
   queued: { label: "Queued", clr: "#8b8ba0" },
   processing: { label: "Processing", clr: "#d97706" },
   done: { label: "Done", clr: "#10b981" },
   error: { label: "Error", clr: "#ef4444" },
-  // Same muted grey as "queued" so a cancelled row reads as "never ran" rather
-  // than a failure; the distinct label disambiguates it from a pending row.
+  // Same muted grey as "ready"/"queued" so a cancelled row reads as "never
+  // ran" rather than a failure; the distinct label disambiguates it.
   cancelled: { label: "Cancelled", clr: "#8b8ba0" },
 };
 

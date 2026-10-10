@@ -5,6 +5,7 @@ import type { AppState } from "../../app/state";
 import type { ArtefactRow } from "../../app/types";
 import { recordValueFor } from "../../lib/spreadsheet";
 import { ResultRow } from "./ResultRow";
+import { ExpandCollapseAll } from "@/components/common/ExpandCollapseAll";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -46,7 +47,11 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
   // Retryable = rows that never reached `done`: AI failures plus rows the user
   // stopped (a stop leaves them cancelled; Retry sends them back to the queue).
   const failedCount = state.results.filter((r) => r.status === "error" || r.status === "cancelled").length;
+  const readyCount = state.results.filter((r) => r.status === "ready").length;
   const queuedCount = state.results.filter((r) => r.status === "queued").length;
+  // Rows waiting for the drainer: `ready` is the normal Start target; a stray
+  // `queued` row can only exist between queueing and the drainer's pickup.
+  const startableCount = readyCount + queuedCount;
   const matches = (r: ArtefactRow) => {
     if (state.resultsFilter !== "all" && r.status !== state.resultsFilter) return false;
     if (!q) return true;
@@ -80,6 +85,10 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
     else groups.push({ fileId: r.fileId, sourceName: r.sourceName, rows: [r] });
   }
   const visibleCount = groups.reduce((n, g) => n + g.rows.length, 0);
+  // Expand all/Collapse all scope: the rows the user can currently see (the
+  // SET_ALL_EXPANDED reducer replaces the map, so hidden rows lose expansion —
+  // same semantics as the settings tabs).
+  const visibleUids = groups.flatMap((g) => g.rows.map((r) => r.uid));
 
   // fileId whose delete-all confirmation is currently open: the whole group
   // tints so the target stays identifiable behind the dialog. deleteFileRows
@@ -183,6 +192,7 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="ready">Ready</SelectItem>
             <SelectItem value="done">Done</SelectItem>
             <SelectItem value="processing">Processing</SelectItem>
             <SelectItem value="queued">Queued</SelectItem>
@@ -190,19 +200,27 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
             <SelectItem value="cancelled">Cancelled</SelectItem>
           </SelectContent>
         </Select>
-        {state.queueRunning ? (
-          <Button onClick={() => void actions.stopQueue()} variant="outline" size="sm">
-            <Ban className="size-3" />
-            <span>Stop</span>
-          </Button>
-        ) : queuedCount > 0 && (
-          /* Pulses while rows wait for a start, so a fresh import draws the
-             eye to the one control needed next. */
-          <Button onClick={() => void actions.startQueue()} size="sm" className="animate-pulse">
-            <Zap className="size-3" />
-            <span>Start</span>
-          </Button>
-        )}
+        <ExpandCollapseAll
+          onExpandAll={() => actions.setAllExpanded("expandedRows", visibleUids, true)}
+          onCollapseAll={() => actions.setAllExpanded("expandedRows", visibleUids, false)}
+        />
+        {/* Persistent transport pair — disabled rather than hidden, so the
+            controls never shift and the dimmed state itself reads the queue
+            (Start dimmed: nothing waiting; Stop dimmed: nothing running). The
+            pulse marks a fresh import: work waiting, queue still empty. */}
+        <Button
+          onClick={() => void actions.startQueue()}
+          disabled={startableCount === 0}
+          size="sm"
+          className={cn(!state.queueRunning && readyCount > 0 && "animate-pulse")}
+        >
+          <Zap className="size-3" />
+          <span>Start</span>
+        </Button>
+        <Button onClick={() => void actions.stopQueue()} disabled={!state.queueRunning} variant="outline" size="sm">
+          <Ban className="size-3" />
+          <span>Stop</span>
+        </Button>
         {failedCount > 0 && (
           <Button onClick={actions.retryFailed} variant="secondary" size="sm">
             <RotateCcw className="size-3" />
@@ -226,7 +244,7 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
       )}
       {/* Column header — table chrome for the rows above; hidden alongside it. */}
       {hasResults && (
-      <div className="bg-muted/30 border-border/60 grid grid-cols-[80px_1fr] shrink-0 border-b px-5 py-1.5">
+      <div className="bg-muted/70 border-border/60 grid grid-cols-[80px_1fr] shrink-0 border-b px-5 py-1.5">
         {["S/N", "Status"].map((h) => (
           <span key={h} className="text-muted-foreground text-xs uppercase tracking-[0.1em]">{h}</span>
         ))}
@@ -257,7 +275,7 @@ export function ResultsPanel({ state, actions, convertFileSrc }: Props) {
           const cancelled = g.rows.filter((r) => r.status === "cancelled").length;
           return (
             <div key={g.fileId} className={cn(confirmingDeleteFileId === g.fileId && "bg-destructive/10")}>
-              <div className="bg-muted/30 border-border/60 flex shrink-0 items-center gap-2 border-b px-5 py-1.5">
+              <div className="bg-muted/70 border-border/60 flex shrink-0 items-center gap-2 border-b px-5 py-1.5">
                 <FileSpreadsheet className="text-primary size-3.5 shrink-0" />
                 <span className="text-muted-foreground min-w-0 truncate text-[13px] font-medium">{g.sourceName}</span>
                 <Badge variant="secondary" className="text-[11px]">{recordsPill(g.rows.length, done)}</Badge>

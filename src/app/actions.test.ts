@@ -300,21 +300,135 @@ describe("queue sequencing (useActions)", () => {
     expect(runningFlags(h.result.current)).toEqual([true, false]);
   });
 
-  it("per-row Retry on a stopped queue restarts it", async () => {
-    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "cancelled")], settings: queueSettings() }));
+  it("Start queues every ready row and drains the queue", async () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready"), queueRow("u2", "ready")], settings: queueSettings() }));
     act(() => {
-      h.result.current.actions.requeueRow("u1");
+      void h.result.current.actions.startQueue();
+    });
+    await waitFor(() => expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "done"]), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(2);
+    expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("row Start queues only that record — other ready rows are untouched", async () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready"), queueRow("u2", "ready")], settings: queueSettings() }));
+    act(() => {
+      h.result.current.actions.queueRow("u1");
     });
     await waitFor(() => expect(h.result.current.state.results[0].status).toBe("done"), { timeout: 3000 });
     await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
     expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(1);
+    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "ready"]);
     expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("row Retry re-queues only that row; the drained queue runs just it", async () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "cancelled"), queueRow("u2", "ready")], settings: queueSettings() }));
+    act(() => {
+      h.result.current.actions.queueRow("u1");
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("done"), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(1);
+    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "ready"]);
+  });
+
+  it("a row queued mid-run joins the live drainer's FIFO", async () => {
+    let release!: () => void;
+    vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(FIXTURE_AI); }));
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready"), queueRow("u2", "error")], settings: queueSettings() }));
+    act(() => {
+      void h.result.current.actions.startQueue();
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("processing"));
+    act(() => {
+      h.result.current.actions.queueRow("u2");
+    });
+    release();
+    // The live drainer ran both rows — queueing never claims a second drainer.
+    await waitFor(() => expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "done"]), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(2);
+    expect(runningFlags(h.result.current)).toEqual([true, false]);
+  });
+
+  it("queue order is click order, not list order", async () => {
+    let releaseU2!: () => void;
+    vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((resolve) => { releaseU2 = () => resolve(FIXTURE_AI); }));
+    // Distinct records make each catalogueArtefact call identifiable by row.
+    const row = (uid: string, material: string): ArtefactRow => ({
+      uid, fileId: "f1", sourceName: "a.xlsx", status: "ready" as const, record: { Material: material },
+    });
+    const h = renderHook(() =>
+      useHarness({ rows: [row("u1", "one"), row("u2", "two"), row("u3", "three")], settings: queueSettings() })
+    );
+    // The reported scenario: u2 starts (claims the drainer), u3 queues next,
+    // then u1 — above both in the list — queues last.
+    act(() => {
+      h.result.current.actions.queueRow("u2");
+    });
+    await waitFor(() => expect(h.result.current.state.results[1].status).toBe("processing"));
+    act(() => {
+      h.result.current.actions.queueRow("u3");
+      h.result.current.actions.queueRow("u1");
+    });
+    releaseU2();
+    await waitFor(() => expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "done", "done"]), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    // u3 ran before u1: tickets decide the order — the old first-in-list pick
+    // ran u1 first because it sits above the others.
+    expect(vi.mocked(catalogueArtefact).mock.calls.map((c) => c[2].Material)).toEqual(["two", "three", "one"]);
+  });
+
+  it("row Stop removes a queued row from the drainer's work list", async () => {
+    let release!: () => void;
+    vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(FIXTURE_AI); }));
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready"), queueRow("u2", "ready")], settings: queueSettings() }));
+    act(() => {
+      void h.result.current.actions.startQueue();
+    });
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("processing"));
+    expect(h.result.current.state.results[1].status).toBe("queued");
+    act(() => {
+      h.result.current.actions.dequeueRow("u2");
+    });
+    expect(h.result.current.state.results[1].status).toBe("ready");
+    release();
+    await waitFor(() => expect(h.result.current.state.results[0].status).toBe("done"), { timeout: 3000 });
+    await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 3000 });
+    // Only u1 ran — u2 left the queue before the drainer reached it.
+    expect(vi.mocked(catalogueArtefact)).toHaveBeenCalledTimes(1);
+    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["done", "ready"]);
+  });
+
+  it("row Stop never starts the drainer", () => {
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "queued")], settings: queueSettings() }));
+    act(() => {
+      h.result.current.actions.dequeueRow("u1");
+    });
+    expect(h.result.current.state.results[0].status).toBe("ready");
+    expect(h.result.current.state.queueRunning).toBe(false);
+    expect(vi.mocked(catalogueArtefact)).not.toHaveBeenCalled();
+  });
+
+  it("queueing with a failed preflight shows the banner and leaves rows ready", async () => {
+    const settings = _DEF();
+    settings.activeProvider = "";
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready")], settings }));
+    act(() => {
+      h.result.current.actions.queueRow("u1");
+    });
+    await waitFor(() => expect(h.result.current.state.parseError).toBeTruthy(), { timeout: 3000 });
+    expect(vi.mocked(catalogueArtefact)).not.toHaveBeenCalled();
+    expect(h.result.current.state.results[0].status).toBe("ready");
+    expect(h.result.current.state.queueRunning).toBe(false);
   });
 
   it("Retry while the queue is running starts no second drainer", async () => {
     let release!: () => void;
     vi.mocked(catalogueArtefact).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(FIXTURE_AI); }));
-    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "queued"), queueRow("u2", "error")], settings: queueSettings() }));
+    const h = renderHook(() => useHarness({ rows: [queueRow("u1", "ready"), queueRow("u2", "error")], settings: queueSettings() }));
     act(() => {
       void h.result.current.actions.startQueue();
     });
@@ -344,6 +458,8 @@ describe("queue sequencing (useActions)", () => {
     // The flip must land before the 300 ms inter-row pause would elapse —
     // that tail delay is exactly what this guards against reintroducing.
     await waitFor(() => expect(h.result.current.state.queueRunning).toBe(false), { timeout: 250 });
-    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["cancelled", "queued"]);
+    // Stop empties the work list: queued rows return to `ready` (under
+    // auto-FIFO a leftover queued row would resume instantly).
+    expect(h.result.current.state.results.map((r) => r.status)).toEqual(["cancelled", "ready"]);
   });
 });

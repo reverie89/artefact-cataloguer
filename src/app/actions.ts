@@ -57,21 +57,30 @@ export interface AppActions {
   /** Dismiss a rejected file's error card from the upload panel. */
   removeFile(id: string): void;
   dismissParseError(): void;
-  /** Run the catalogue queue: drain every `queued` row in the results panel,
-   *  one AI call in flight. Fail-soft — a failing row marks only itself
-   *  `error` and the queue continues. Rows imported or requeued mid-run merge
-   *  in naturally (the drainer re-reads live state each iteration). */
+  /** Queue every `ready` record, then drain the work list — one AI call in
+   *  flight, FIFO by import order. Fail-soft — a failing row marks only
+   *  itself `error` and the queue continues. Rows queued mid-run merge in
+   *  naturally (the drainer re-reads live state each iteration). The
+   *  preflight gate runs before anything is queued: on failure the banner
+   *  shows and rows stay `ready`. */
   startQueue(): Promise<void>;
   /** Stop the queue: cancel every in-flight AI call at the transport level
-   *  and exit the drainer. Queued rows stay queued so Start can resume. */
+   *  and exit the drainer. Queued rows return to `ready` (under auto-FIFO a
+   *  leftover queued row would resume instantly); the next Start queues them
+   *  again. */
   stopQueue(): Promise<void>;
-  /** Requeue every errored/cancelled row at once, then restart the queue if
-    * it was stopped (a live drainer picks the rows up on its own). Restart is
-    * click-driven only — a failing row can't loop. */
+  /** Queue every errored/cancelled row at once, then ensure the drainer is
+    * running (a stopped drainer resumes; a live one picks the rows up on its
+    * own). Restart is click-driven only — a failing row can't loop. */
   retryFailed(): void;
-  /** Put a single row back into the queue (even a `done` one — a manual
-   *  re-run) and restart the queue if it was stopped. */
-  requeueRow(uid: string): void;
+  /** Queue one record — a `ready` row's Start, or a terminal row's Retry —
+   *  and ensure the drainer is running: processing is automatic whenever the
+   *  queue is non-empty, FIFO. With the queue otherwise empty this runs
+   *  exactly that record; mid-run it joins the queue behind the current row. */
+  queueRow(uid: string): void;
+  /** A queued row's Stop: return it to `ready`, removing it from the
+   *  drainer's work list. No-op if the row already left the queued status. */
+  dequeueRow(uid: string): void;
   /** Stop an in-flight `processing` row by cancelling its AI call at the
    *  transport level (the Rust side drops the reqwest future, closing the
    *  socket). The row's awaiting runRow catch turns the cancel sentinel into
@@ -113,9 +122,10 @@ export interface AppActions {
   setOpenFieldValue(key: string, val: string): void;
 
   // settings: shared across the Fields/Vocab/Artefact File card-list tabs
-  /** Bulk-set every given id's expanded state within one of the three
-   *  per-tab expanded maps. Backs the shared Expand all/Collapse all controls. */
-  setAllExpanded(scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded", ids: string[], expanded: boolean): void;
+  /** Bulk-set every given id's expanded state within one expanded map — the
+   *  three per-tab settings maps plus the results panel's `expandedRows`.
+   *  Backs the shared Expand all/Collapse all controls. */
+  setAllExpanded(scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded" | "expandedRows", ids: string[], expanded: boolean): void;
 
   // settings: fields
   toggleSF(id: string): void;
@@ -553,7 +563,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
   // --- files (import = validate + parse in one step) ---
   // A valid file's records land in the results panel immediately (status
-  // "queued", grouped by the file they came from); an invalid one fails loudly
+  // "ready", grouped by the file they came from); an invalid one fails loudly
   // with a per-file error card. There is no separate Parse click.
   const addFiles = useCallback(
     async (list: FileList | File[]) => {
@@ -588,8 +598,9 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
             continue;
           }
 
-          // Valid — promote straight into the results panel as queued rows.
-          const rows = parsed.rows.map((r) => ({ ...r, status: "queued" as const, fileId: id, sourceName: file.name }));
+          // Valid — promote straight into the results panel as ready rows
+          // (nothing runs until a Start/Retry queues them).
+          const rows = parsed.rows.map((r) => ({ ...r, status: "ready" as const, fileId: id, sourceName: file.name }));
           dispatch({ type: "REMOVE_FILE", id });
           dispatch({ type: "PARSE_FILES", rows });
           const discarded = Object.keys(parsed.discardedColumns);
@@ -682,32 +693,41 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.settings, dispatch]);
 
-  // Drain every `queued` row, one AI call in flight. The next row is taken
-  // from live state each iteration, so rows imported or requeued mid-run
-  // merge into the drain naturally.
-  const startQueue = useCallback(async () => {
-    // A Stop leaves the previous drainer exiting while its cancelled row
-    // settles: wait it out, then claim. A live, uncancelled drainer is a
-    // genuine no-op.
-    while (queueControl.current.running && queueControl.current.cancelled) {
-      await delay(50);
-    }
-    // The first scan below reads getState(), mirrored from committed state;
-    // yield once so a dispatch made synchronously before this call — Retry's
-    // requeue — is visible to it.
-    await Promise.resolve();
-    // Re-checked after the waits: from here to the claim there is no await,
-    // so concurrent callers can never both claim the queue.
-    if (queueControl.current.running) return;
+  // Shared gate for the queueing actions: show the banner and report failure
+  // so rows keep their current status — nothing is ever stranded half-queued.
+  // On pass, parsePreFlightError guarantees an active provider.
+  const preflightOrBanner = useCallback((): boolean => {
     const preflightError = parsePreFlightError(state.settings);
     if (preflightError) {
       dispatch({ type: "SET_PARSE_ERROR", error: preflightError });
-      return;
+      return false;
     }
-    // parsePreFlightError guarantees an active provider from here on.
+    return true;
+  }, [state.settings, dispatch]);
+
+  // The one drainer: claim and run `queued` rows in ticket order (one AI call
+  // in flight) until the work list is empty. Called by every queueing action
+  // after its dispatch — processing starts automatically whenever the queue is
+  // non-empty and no drainer holds the claim. The next row is taken from live
+  // state each iteration, so rows queued mid-run merge in behind whatever was
+  // queued before them, whatever their position in the list.
+  const drain = useCallback(async () => {
+    // A Stop leaves the previous drainer exiting while its cancelled row
+    // settles: wait it out, then claim. A live, uncancelled drainer is a
+    // genuine no-op — it rescans between rows and picks up newly queued rows
+    // on its own.
+    while (queueControl.current.running && queueControl.current.cancelled) {
+      await delay(50);
+    }
+    // Yield once so the caller's QUEUE_ROWS dispatch (made synchronously
+    // before this call) is committed and visible to the live-state scans.
+    await Promise.resolve();
+    // Re-checked after the waits: from here to the claim there is no await,
+    // so concurrent callers can never both claim the drainer.
+    if (queueControl.current.running) return;
     const prov = activeProvider(state.settings);
     if (!prov) return;
-    // A previous run's banner is stale once Start succeeds.
+    // A previous run's banner is stale once a run starts.
     dispatch({ type: "SET_PARSE_ERROR", error: null });
 
     queueControl.current = { running: true, cancelled: false };
@@ -715,8 +735,14 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     try {
       for (;;) {
         if (queueControl.current.cancelled) break;
-        const row = getState().results.find((r) => r.status === "queued");
-        if (!row) break;
+        const queued = getState().results.filter((r) => r.status === "queued");
+        if (queued.length === 0) break;
+        // Lowest ticket first: queue order is Start/Retry click order, not
+        // results-list order. Every queued row carries a ticket — QUEUE_ROWS
+        // is the only writer of `queued`.
+        const row = queued.reduce((a, b) =>
+          (a.queueTicket ?? Number.MAX_SAFE_INTEGER) <= (b.queueTicket ?? Number.MAX_SAFE_INTEGER) ? a : b
+        );
         await runRow(row, prov);
         // Skip the inter-row pause once a stop is pending — it is the last
         // wait between the click and the header flipping back to Start.
@@ -728,9 +754,23 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     }
   }, [state.settings, dispatch, getState, runRow]);
 
+  // Toolbar Start: queue every `ready` record, then drain. Nothing else
+  // queues ready rows — the row/Retry actions queue exactly what they name.
+  const startQueue = useCallback(async () => {
+    if (!preflightOrBanner()) return;
+    const readyUids = getState().results.filter((r) => r.status === "ready").map((r) => r.uid);
+    if (readyUids.length > 0) dispatch({ type: "QUEUE_ROWS", uids: readyUids });
+    await drain();
+  }, [dispatch, getState, preflightOrBanner, drain]);
+
   const stopQueue = useCallback(async () => {
     if (!queueControl.current.running) return;
     queueControl.current.cancelled = true;
+    // Queued rows return to `ready`: under auto-FIFO any leftover queued row
+    // would resume processing immediately, so an empty work list is what
+    // makes Stop stick. Ready rows re-queue on the next Start/Retry.
+    const queuedUids = getState().results.filter((r) => r.status === "queued").map((r) => r.uid);
+    if (queuedUids.length > 0) dispatch({ type: "UNQUEUE_ROWS", uids: queuedUids });
     // Transport-cancel every in-flight row; the awaiting runRow catch is the
     // single writer of the resulting `cancelled` status.
     for (const r of getState().results.filter((r) => r.status === "processing")) {
@@ -742,26 +782,37 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
         pushLog({ status: "fail", label: "Stop failed", detail: String((e as Error)?.message || e) });
       }
     }
-    pushLog({ status: "ok", label: "Queue stopped", detail: "Queued rows remain queued — Start or Retry resumes" });
-  }, [getState]);
+    pushLog({ status: "ok", label: "Queue stopped", detail: "Queued rows returned to ready — Start queues them again" });
+  }, [dispatch, getState]);
 
-  // Requeue every errored/cancelled row, then restart the queue if it isn't
-  // running (a stopped queue resumes; a live drainer picks the rows up on
-  // its own). Explicitly click-driven, so a failing row can't loop.
+  // Queue every errored/cancelled row, then drain. Explicitly click-driven,
+  // so a failing row can't loop.
   const retryFailed = useCallback(() => {
     const uids = getState().results.filter((r) => r.status === "error" || r.status === "cancelled").map((r) => r.uid);
     if (uids.length === 0) return;
-    dispatch({ type: "REQUEUE_ROWS", uids });
-    pushLog({ status: "busy", label: "Retry failed rows", detail: `${uids.length} row${uids.length === 1 ? "" : "s"} requeued` });
-    void startQueue();
-  }, [dispatch, getState, startQueue]);
+    if (!preflightOrBanner()) return;
+    dispatch({ type: "QUEUE_ROWS", uids });
+    pushLog({ status: "busy", label: "Retry failed rows", detail: `${uids.length} row${uids.length === 1 ? "" : "s"} queued` });
+    void drain();
+  }, [dispatch, getState, preflightOrBanner, drain]);
 
-  // Restart the queue with the requeued row if it was stopped; a live
-  // drainer picks it up on its own.
-  const requeueRow = useCallback((uid: string) => {
-    dispatch({ type: "REQUEUE_ROWS", uids: [uid] });
-    void startQueue();
-  }, [dispatch, startQueue]);
+  // Queue one record — a `ready` row's Start, or a terminal row's Retry —
+  // then drain: with the queue otherwise empty this runs exactly that record;
+  // mid-run it joins the queue behind everything already queued (ticket
+  // order, not list order).
+  const queueRow = useCallback((uid: string) => {
+    if (!preflightOrBanner()) return;
+    dispatch({ type: "QUEUE_ROWS", uids: [uid] });
+    void drain();
+  }, [dispatch, preflightOrBanner, drain]);
+
+  // A queued row's Stop: return it to `ready`, removing it from the drainer's
+  // work list. No drain call — removing work never starts processing. If the
+  // drainer already grabbed the row (it is `processing` now), the reducer
+  // no-ops and the row's own cancel-in-flight Stop applies instead.
+  const dequeueRow = useCallback((uid: string) => {
+    dispatch({ type: "UNQUEUE_ROWS", uids: [uid] });
+  }, [dispatch]);
 
   const dismissParseError = useCallback(() => dispatch({ type: "SET_PARSE_ERROR", error: null }), [dispatch]);
 
@@ -1011,7 +1062,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
 
   // --- settings: shared across card-list tabs ---
   const setAllExpanded = useCallback(
-    (scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded", ids: string[], expanded: boolean) =>
+    (scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "artefactFieldExpanded" | "expandedRows", ids: string[], expanded: boolean) =>
       dispatch({ type: "SET_ALL_EXPANDED", scope, ids, expanded }),
     [dispatch]
   );
@@ -2195,7 +2246,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   return {
     setAllExpanded,
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
-    onUploadClick, onDragOver, onDragLeave, onDrop, removeFile, dismissParseError, startQueue, stopQueue, retryFailed, requeueRow, stopRow, deleteRow, deleteFileRows, onResizeStart,
+    onUploadClick, onDragOver, onDragLeave, onDrop, removeFile, dismissParseError, startQueue, stopQueue, retryFailed, queueRow, dequeueRow, stopRow, deleteRow, deleteFileRows, onResizeStart,
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,

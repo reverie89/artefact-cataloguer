@@ -134,6 +134,10 @@ export interface AppState {
    *  header Stop button; queued rows survive a stop so Start or Retry can
    *  resume. */
   queueRunning: boolean;
+  /** Monotonic source of row queue tickets (ArtefactRow.queueTicket): the
+   *  queue is served in Start/Retry click order, not results-list order.
+   *  Session-only, like results. */
+  nextQueueTicket: number;
 
   // Settings
   settings: Settings;
@@ -263,6 +267,7 @@ export const initialState: AppState = {
   parseError: null,
   exportWarning: null,
   queueRunning: false,
+  nextQueueTicket: 0,
 
   settings: _DEF(),
   settingsFieldExpanded: {},
@@ -317,7 +322,8 @@ export type Action =
   | { type: "PARSE_FILES"; rows: ArtefactRow[] }
   | { type: "SET_ROW_STATUS"; uid: string; status: ArtefactRow["status"]; ai?: Record<string, AiSuggestion[]> }
   | { type: "REMOVE_ROWS"; uids: string[] }
-  | { type: "REQUEUE_ROWS"; uids: string[] }
+  | { type: "QUEUE_ROWS"; uids: string[] }
+  | { type: "UNQUEUE_ROWS"; uids: string[] }
   | { type: "SET_QUEUE_RUNNING"; running: boolean }
   | { type: "SET_ROW_IMAGE"; uid: string; imagePath: string }
   | { type: "SET_PARSE_ERROR"; error: string | null }
@@ -383,7 +389,7 @@ export type Action =
   | { type: "PATCH_ARTEFACT_DRAFT"; patch: (d: ArtefactDraft) => ArtefactDraft }
   | { type: "CLEAR_ARTEFACT_DRAFT" }
   | { type: "SET_ARTEFACT_CARD_STATUS"; id: string; status: SaveState }
-  | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "embProviderExpanded" | "artefactFieldExpanded"; ids: string[]; expanded: boolean };
+  | { type: "SET_ALL_EXPANDED"; scope: "settingsFieldExpanded" | "settingsVocabExpanded" | "embProviderExpanded" | "artefactFieldExpanded" | "expandedRows"; ids: string[]; expanded: boolean };
 
 /** Keep the search-column scope in step with the settings' column ids: keep
  *  selection for columns that still exist, and add any new columns
@@ -466,7 +472,7 @@ export function reducer(state: AppState, action: Action): AppState {
     case "SET_UPLOAD_DRAG":
       return { ...state, uploadDragOver: action.drag };
 
-    // Imported rows join the results panel as-is (already stamped queued with
+    // Imported rows join the results panel as-is (already stamped with
     // fileId/sourceName). Append-only: earlier imports' rows, selections and
     // AI results are never touched. A stale queue pre-flight banner doesn't
     // survive an import — Start re-surfaces it if the config problem persists.
@@ -523,17 +529,35 @@ export function reducer(state: AppState, action: Action): AppState {
         fieldDropdownSearch: pruneRowEntries(state.fieldDropdownSearch, uids),
       };
     }
-    // Requeueing: flip the listed rows to `queued` in one dispatch so a Retry
-    // click visibly requeues everything at once. Terminal rows move (done rows
-    // only ever arrive here from an explicit single-row requeue); a queued or
-    // in-flight row is untouched (its owner owns that status).
-    case "REQUEUE_ROWS": {
+    // Queueing: flip the listed rows to `queued` in one dispatch so a Start/
+    // Retry click visibly queues everything at once. Each newly-queued row
+    // takes the next ticket (list order within one click) and the drainer
+    // runs lowest ticket first — so queue order is click order, and a row
+    // queued mid-run waits behind everything already queued regardless of
+    // its position in the results list. `queued`/`processing` rows are
+    // untouched (their owner owns that status — and their ticket).
+    case "QUEUE_ROWS": {
+      const uids = new Set(action.uids);
+      let ticket = state.nextQueueTicket;
+      const results = state.results.map((r) =>
+        uids.has(r.uid) && r.status !== "queued" && r.status !== "processing"
+          ? { ...r, status: "queued" as const, queueTicket: ++ticket }
+          : r
+      );
+      return { ...state, results, nextQueueTicket: ticket };
+    }
+    // Unqueueing: flip the listed rows back to `ready` and drop their tickets
+    // (a later re-queue takes fresh ones). Stop empties the whole work list
+    // (under auto-drain a leftover queued row would resume instantly) and a
+    // queued row's Stop leaves it without waiting for the drainer. Non-queued
+    // rows are untouched (their owner owns that status).
+    case "UNQUEUE_ROWS": {
       const uids = new Set(action.uids);
       return {
         ...state,
         results: state.results.map((r) =>
-          uids.has(r.uid) && (r.status === "error" || r.status === "cancelled" || r.status === "done")
-            ? { ...r, status: "queued" }
+          uids.has(r.uid) && r.status === "queued"
+            ? { ...r, status: "ready", queueTicket: undefined }
             : r
         ),
       };

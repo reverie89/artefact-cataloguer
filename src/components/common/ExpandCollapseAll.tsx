@@ -5,9 +5,9 @@ interface ExpandCollapseAllProps {
   onCollapseAll: () => void;
 }
 
-/** Shared "Expand all / Collapse all" control for a card-list tab. Placed
- *  above the rows Card; each tab wires its own ids + expanded-map scope into
- *  actions.setAllExpanded via the two callbacks. */
+/** Shared "Expand all / Collapse all" control for a card-list surface. Each
+ *  consumer wires its own ids + expanded-map scope into actions.setAllExpanded
+ *  via the two callbacks. */
 export function ExpandCollapseAll({ onExpandAll, onCollapseAll }: ExpandCollapseAllProps) {
   return (
     <div className="flex items-center justify-start gap-2">
