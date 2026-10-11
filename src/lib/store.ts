@@ -192,10 +192,12 @@ export function saveState(settings: Settings, darkMode: boolean, zoom: number, s
 
 /** Saver handed to useActions after settings mutations. `schedule()` coalesces
  *  high-frequency edits (typing, toggles); `flush()` persists immediately for
- *  structural ops whose Rust-side disk effects already landed — and lets the
- *  action await the write so per-card save status isn't a lie. Both read
- *  `getState()` at call time, so saves always carry the reducer's latest
- *  settings rather than some render's snapshot. */
+ *  structural ops — and lets the action await the write so per-card save
+ *  status isn't a lie. Both save only after React has committed:
+ *  `schedule()` fires from a timer long after the edits, and `flush()` yields
+ *  one macrotask first (patchNow dispatches and flushes in the same tick,
+ *  before the commit), so the write reads committed settings and never a
+ *  pre-commit snapshot. */
 export interface DebouncedSaver {
   schedule(): void;
   /** Persist now, resolving with the write's outcome (rejects on failure).
@@ -233,7 +235,18 @@ export function makeDebouncedSaver(
         clearTimeout(timer);
         timer = null;
       }
-      return saveNow();
+      // Yield one macrotask before writing: patchNow dispatches and flushes in
+      // the same tick, and stateRef only mirrors state at React commit — a
+      // synchronous saveNow() here would persist the pre-patch bundle while
+      // the UI reports success. Discrete-event updates commit at event end
+      // and scheduler-driven updates in the task React queued at dispatch
+      // time; both precede this timer. A no-op patch simply writes unchanged
+      // (correct) state.
+      return new Promise<void>((resolve, reject) => {
+        setTimeout(() => {
+          saveNow().then(resolve, reject);
+        }, 0);
+      });
     },
   };
 }
