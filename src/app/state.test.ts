@@ -105,7 +105,7 @@ describe("reducer", () => {
   });
 
   it("appends a catalogue field to the draft via PATCH_FIELD_DRAFT", () => {
-    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
+    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1, sourceLabelW: 130, imagePaneW: 210 });
     const before = base.fieldDraft?.fields.length ?? base.settings.fields.length;
     const next = reducer(base, {
       type: "PATCH_FIELD_DRAFT",
@@ -117,7 +117,7 @@ describe("reducer", () => {
   });
 
   it("appends a column to the draft via PATCH_ARTEFACT_DRAFT", () => {
-    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
+    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1, sourceLabelW: 130, imagePaneW: 210 });
     const before = base.artefactDraft?.artefactFields.length ?? base.settings.artefactFields.length;
     const next = reducer(base, {
       type: "PATCH_ARTEFACT_DRAFT",
@@ -129,7 +129,7 @@ describe("reducer", () => {
   });
 
   it("seeds the artefact-analysis instruction into the artefact draft and lets it be patched", () => {
-    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1 });
+    const base = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1, sourceLabelW: 130, imagePaneW: 210 });
     // The draft is null until the first PATCH self-heals it from settings.
     expect(base.artefactDraft).toBeNull();
     const seeded = reducer(base, {
@@ -167,7 +167,7 @@ describe("reducer", () => {
       providers: [{ id: "p1", name: "Prov", baseUrl: "https://a", apiKey: "k", model: "m" }],
       activeProvider: "p1",
     };
-    const base = reducer(initialState, { type: "INIT", settings, darkMode: true, zoom: 1 });
+    const base = reducer(initialState, { type: "INIT", settings, darkMode: true, zoom: 1, sourceLabelW: 130, imagePaneW: 210 });
     // Mirror what testConn does: write the outcome + modelOptions onto the entry.
     const next = reducer(base, {
       type: "PATCH_PROVIDER_DRAFT",
@@ -186,7 +186,7 @@ describe("reducer", () => {
       providers: [{ id: "p1", name: "Prov", baseUrl: "https://a", apiKey: "k", model: "m", connStatus: "ok" }],
       activeProvider: "p1",
     };
-    const base = reducer(initialState, { type: "INIT", settings, darkMode: true, zoom: 1 });
+    const base = reducer(initialState, { type: "INIT", settings, darkMode: true, zoom: 1, sourceLabelW: 130, imagePaneW: 210 });
     // A live "testing" state lands in the transient map, not the draft entry.
     const next = reducer(base, { type: "SET_PROV_STATUS", id: "p1", test: "testing" });
     expect(next.provStatus["p1"]).toEqual({ test: "testing" });
@@ -475,9 +475,26 @@ describe("reducer PATCH_SETTINGS search-column reconcile", () => {
       settings: { ...initialState.settings, fields: [field("c1", "Material")], artefactFields: [{ id: "a1", name: "Obj. Number", description: "", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" }] },
       darkMode: true,
       zoom: 1,
+      sourceLabelW: 130,
+      imagePaneW: 210,
     });
     expect(next.searchColsCat).toEqual(["c1"]);
     expect(next.searchColsAf).toEqual(["a1"]);
+  });
+});
+
+describe("reducer Source Record column widths", () => {
+  it("INIT seeds the persisted widths", () => {
+    const next = reducer(initialState, { type: "INIT", settings: initialState.settings, darkMode: true, zoom: 1, sourceLabelW: 260, imagePaneW: 352 });
+    expect(next.sourceLabelW).toBe(260);
+    expect(next.imagePaneW).toBe(352);
+  });
+
+  it("SET_SOURCE_LABEL_W / SET_IMAGE_PANE_W assign the drag's final values", () => {
+    let s = reducer(initialState, { type: "SET_SOURCE_LABEL_W", w: 240 });
+    expect(s.sourceLabelW).toBe(240);
+    s = reducer(s, { type: "SET_IMAGE_PANE_W", w: 320 });
+    expect(s.imagePaneW).toBe(320);
   });
 });
 

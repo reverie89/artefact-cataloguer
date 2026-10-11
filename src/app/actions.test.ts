@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { useCallback, useLayoutEffect, useReducer, useRef } from "react";
 
-import { composeExportTable, computeColumnWidths, csvSafeCell, parsePreFlightError, useActions, type AppActions } from "./actions";
+import { composeExportTable, computeColumnWidths, csvSafeCell, dragClamp, parsePreFlightError, useActions, type AppActions } from "./actions";
 import { _DEF } from "./defaults";
 import { initialState, reducer, type Action, type AppState } from "./state";
 import type { AiResults, ArtefactRow, FieldSelection, Settings, VocabEmbeddingStatus } from "./types";
@@ -55,6 +55,28 @@ describe("csvSafeCell", () => {
     expect(csvSafeCell("")).toBe("");
     expect(csvSafeCell("=")).toBe("'=");
     expect(csvSafeCell("a")).toBe("a");
+  });
+});
+
+describe("dragClamp", () => {
+  const min = 90;
+  const max = 400;
+
+  it("applies the raw delta at zoom 1, clamped", () => {
+    expect(dragClamp(130, 70, 1, min, max)).toBe(200);
+    expect(dragClamp(130, 500, 1, min, max)).toBe(max);
+    expect(dragClamp(130, -500, 1, min, max)).toBe(min);
+  });
+
+  it("divides the screen delta by the app zoom so the divider tracks the cursor", () => {
+    // At zoom 2 a 100px screen drag is 50 layout px inside the zoomed root.
+    expect(dragClamp(130, 100, 2, min, max)).toBe(180);
+    expect(dragClamp(200, -100, 1.25, min, max)).toBe(120);
+  });
+
+  it("guards a non-positive zoom to 1", () => {
+    expect(dragClamp(130, 70, 0, min, max)).toBe(200);
+    expect(dragClamp(130, 70, -1, min, max)).toBe(200);
   });
 });
 

@@ -148,12 +148,13 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
             </div>
           )}
 
-          {/* Source record + image */}
-          <div className="border-border/60 grid grid-cols-[1fr_210px] border-b">
+          {/* Source record + image. Column widths come from the shared
+              --src-label-w / --img-pane-w vars (persisted; see defaults.ts). */}
+          <div className="border-border/60 relative grid grid-cols-[1fr_var(--img-pane-w)] border-b">
             <div className="border-border/60 p-3 pr-4.5 border-r">
               <div className="text-muted-foreground mb-2 text-[11px] font-semibold uppercase tracking-[0.12em]">Source Record</div>
               {sourceFields.map((sf) => (
-                <div key={sf.key} className="border-border/60 grid grid-cols-[130px_1fr] gap-1.5 border-b py-1">
+                <div key={sf.key} className="border-border/60 grid grid-cols-[var(--src-label-w)_1fr] gap-1.5 border-b py-1">
                   <span className="text-muted-foreground flex min-w-0 items-center gap-1.25 pt-0.25 text-[11px] uppercase tracking-[0.05em]">
                     <span className="truncate" title={sf.key}>{sf.key}</span>
                     {!sf.forAI && (
@@ -179,7 +180,7 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
                   <img
                     src={convertFileSrc(row.imagePath)}
                     alt="Artefact image"
-                    className="w-full object-contain max-h-[200px]"
+                    className="w-full object-contain max-h-[var(--img-pane-w)]"
                     onError={() => setImgFailed(true)}
                   />
                 </button>
@@ -189,6 +190,26 @@ export function ResultRow({ row, index, state, actions, convertFileSrc }: Props)
                   <span className="text-center text-[11px] leading-tight [word-break:break-all]">no image</span>
                 </div>
               )}
+            </div>
+            {/* Column drag handles: absolute strips centered on each boundary
+                (they don't participate in the grid), driving the shared
+                --src-label-w / --img-pane-w vars so every expanded row resizes
+                together; nothing dispatches until release. */}
+            <div
+              onMouseDown={actions.onSourceLabelResizeStart}
+              title="Drag to resize the column names"
+              className="absolute inset-y-0 z-10 flex w-2 -translate-x-1/2 cursor-col-resize items-start justify-center hover:bg-primary/10"
+              style={{ left: "calc(0.75rem + var(--src-label-w) + 3px)" }}
+            >
+              <div className="bg-border mt-2.5 h-6 w-0.5 rounded-full" />
+            </div>
+            <div
+              onMouseDown={actions.onImagePaneResizeStart}
+              title="Drag to resize the image pane"
+              className="absolute inset-y-0 z-10 flex w-2 -translate-x-1/2 cursor-col-resize items-start justify-center hover:bg-primary/10"
+              style={{ left: "calc(100% - var(--img-pane-w))" }}
+            >
+              <div className="bg-border mt-2.5 h-6 w-0.5 rounded-full" />
             </div>
           </div>
 

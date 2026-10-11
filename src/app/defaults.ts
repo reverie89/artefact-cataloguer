@@ -129,3 +129,14 @@ export function gid(): string {
 export function fmt(b: number): string {
   return b < 1024 ? b + " B" : b < 1048576 ? Math.round(b / 1024) + " KB" : (b / 1048576).toFixed(1) + " MB";
 }
+
+// Draggable Source Record geometry on the main screen, persisted in the
+// settings bundle (ac_sourceLabelW / ac_imagePaneW) and applied as CSS vars —
+// one home for the clamps: store clamps loads against these, the drag handlers
+// clamp live (actions.dragClamp).
+
+/** Width (px) of the field-name column inside an expanded row's Source Record. */
+export const SOURCE_LABEL_W = { default: 130, min: 90, max: 400 } as const;
+
+/** Width (px) of the image pane beside an expanded row's Source Record. */
+export const IMAGE_PANE_W = { default: 210, min: 140, max: 480 } as const;

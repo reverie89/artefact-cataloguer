@@ -2,7 +2,7 @@
 // Persistence (load/save beside the binary) is handled in store.ts and wired
 // by an effect in App.tsx.
 
-import { _DEF, _DEF_AF } from "./defaults";
+import { _DEF, _DEF_AF, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
 import type { VocabTermEntry } from "../lib/vocab";
 import type { AiResults, AiSuggestion, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
@@ -238,6 +238,11 @@ export interface AppState {
   logsOpen: boolean;
 
   zoom: number;
+
+  // Main-screen Source Record geometry, persisted in the bundle; the clamps
+  // live in defaults.ts (SOURCE_LABEL_W / IMAGE_PANE_W).
+  sourceLabelW: number;
+  imagePaneW: number;
 }
 
 export interface UploadFile {
@@ -310,16 +315,21 @@ export const initialState: AppState = {
   logsOpen: false,
 
   zoom: 1.0,
+
+  sourceLabelW: SOURCE_LABEL_W.default,
+  imagePaneW: IMAGE_PANE_W.default,
 };
 
 // --- Actions -----------------------------------------------------------------
 
 export type Action =
-  | { type: "INIT"; settings: Settings; darkMode: boolean; zoom: number }
+  | { type: "INIT"; settings: Settings; darkMode: boolean; zoom: number; sourceLabelW: number; imagePaneW: number }
   | { type: "SET_DARK"; darkMode: boolean }
   | { type: "SET_SCREEN"; screen: Screen }
   | { type: "SET_TAB"; tab: SettingsTab }
   | { type: "SET_ZOOM"; zoom: number }
+  | { type: "SET_SOURCE_LABEL_W"; w: number }
+  | { type: "SET_IMAGE_PANE_W"; w: number }
   | { type: "SET_LOGS_OPEN"; open: boolean }
   | { type: "SET_FILES"; files: UploadFile[] }
   | { type: "SET_FILE_STATUS"; id: string; status: UploadFile["status"]; errors: { message: string }[] }
@@ -448,7 +458,7 @@ export function reducer(state: AppState, action: Action): AppState {
       // Reconcile so the loaded settings' columns are searchable by default —
       // without this the scope stayed empty after a load and non-empty queries
       // matched nothing until some later settings write happened to reconcile.
-      return reconcileSearchCols({ ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, loaded: true, fieldDraft: null, providerDraft: null, embProviderDraft: null, vocabDraft: null, artefactDraft: null });
+      return reconcileSearchCols({ ...state, settings: action.settings, darkMode: action.darkMode, zoom: action.zoom, sourceLabelW: action.sourceLabelW, imagePaneW: action.imagePaneW, loaded: true, fieldDraft: null, providerDraft: null, embProviderDraft: null, vocabDraft: null, artefactDraft: null });
     case "SET_DARK":
       return { ...state, darkMode: action.darkMode };
     case "SET_SCREEN":
@@ -457,6 +467,10 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, settingsTab: action.tab };
     case "SET_ZOOM":
       return { ...state, zoom: action.zoom };
+    case "SET_SOURCE_LABEL_W":
+      return { ...state, sourceLabelW: action.w };
+    case "SET_IMAGE_PANE_W":
+      return { ...state, imagePaneW: action.w };
     case "SET_LOGS_OPEN":
       return { ...state, logsOpen: action.open };
 

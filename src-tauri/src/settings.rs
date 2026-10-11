@@ -24,6 +24,22 @@ pub struct StateBundle {
     /// Stringified float, e.g. `"1.05"`.
     #[serde(rename = "ac_zoom")]
     pub zoom: String,
+    /// Stringified px widths of the main screen's Source Record columns
+    /// (field-name column, image pane). `default` keeps settings.json files
+    /// written before these keys parseable — a hard field would fail
+    /// deserialization and boot the app into a full defaults reset.
+    #[serde(rename = "ac_sourceLabelW", default = "default_source_label_w")]
+    pub source_label_w: String,
+    #[serde(rename = "ac_imagePaneW", default = "default_image_pane_w")]
+    pub image_pane_w: String,
+}
+
+fn default_source_label_w() -> String {
+    "130".to_string()
+}
+
+fn default_image_pane_w() -> String {
+    "210".to_string()
 }
 
 /// Resolves the directory the executable lives in.
@@ -114,6 +130,8 @@ impl Default for StateBundle {
             settings: serde_json::json!({}),
             dark_mode: "true".to_string(),
             zoom: "1".to_string(),
+            source_label_w: default_source_label_w(),
+            image_pane_w: default_image_pane_w(),
         }
     }
 }
@@ -291,5 +309,34 @@ mod tests {
             Some("literal\\nname")
         );
         assert_eq!(settings["fields"][0]["prompt"].as_str(), Some("prompt"));
+    }
+
+    #[test]
+    fn bundle_without_width_keys_parses_with_defaults() {
+        // Older settings.json files predate ac_sourceLabelW/ac_imagePaneW; the
+        // serde defaults must absorb their absence or load_state would treat
+        // the whole file as corrupt and reset every setting.
+        let bundle: StateBundle = serde_json::from_str(
+            r#"{ "ac_settings": {}, "ac_darkMode": "false", "ac_zoom": "1.2" }"#,
+        )
+        .unwrap();
+        assert_eq!(bundle.source_label_w, "130");
+        assert_eq!(bundle.image_pane_w, "210");
+        assert_eq!(bundle.zoom, "1.2");
+    }
+
+    #[test]
+    fn width_keys_round_trip() {
+        let bundle = StateBundle {
+            settings: serde_json::json!({}),
+            dark_mode: "true".to_string(),
+            zoom: "1".to_string(),
+            source_label_w: "260".to_string(),
+            image_pane_w: "352".to_string(),
+        };
+        let back: StateBundle =
+            serde_json::from_str(&serde_json::to_string(&bundle).unwrap()).unwrap();
+        assert_eq!(back.source_label_w, "260");
+        assert_eq!(back.image_pane_w, "352");
     }
 }

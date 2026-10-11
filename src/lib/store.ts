@@ -2,7 +2,7 @@
 // via the Rust `load_state` / `save_state` commands. No localStorage.
 
 import { invoke } from "@tauri-apps/api/core";
-import { _DEF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION } from "../app/defaults";
+import { _DEF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, IMAGE_PANE_W, SOURCE_LABEL_W } from "../app/defaults";
 import { PersistedSettingsSchema } from "../app/schema";
 import type { Settings, StateBundle, VocabSource } from "../app/types";
 
@@ -10,6 +10,8 @@ export interface LoadedState {
   settings: Settings;
   darkMode: boolean;
   zoom: number;
+  sourceLabelW: number;
+  imagePaneW: number;
 }
 
 /** Shape of a pre-upgrade `VocabList` — the only fields the migration reads. */
@@ -99,6 +101,14 @@ export function migrateLegacyVisionPromptKey(raw: unknown): unknown {
   return { ...rest, artefactAnalysisSystemPromptInstruction: legacy };
 }
 
+/** Parse a stringified px width from the persisted bundle: clamp to
+ *  [min, max], fall back on anything unparseable — bundle values are
+ *  hand-editable and may predate the key. */
+export function parsePixelWidth(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = raw === undefined ? NaN : parseFloat(raw);
+  return isNaN(n) ? fallback : Math.max(min, Math.min(max, n));
+}
+
 /** Read the persisted bundle, falling back to defaults if anything is off. */
 export async function loadState(): Promise<LoadedState> {
   try {
@@ -118,10 +128,16 @@ export async function loadState(): Promise<LoadedState> {
     const darkMode = bundle.ac_darkMode !== undefined ? bundle.ac_darkMode === "true" : true;
     const zoom = bundle.ac_zoom ? parseFloat(bundle.ac_zoom) : 1.0;
     const z = !isNaN(zoom) && zoom > 0 ? zoom : 1.0;
-    return { settings, darkMode, zoom: z };
+    return {
+      settings,
+      darkMode,
+      zoom: z,
+      sourceLabelW: parsePixelWidth(bundle.ac_sourceLabelW, SOURCE_LABEL_W.default, SOURCE_LABEL_W.min, SOURCE_LABEL_W.max),
+      imagePaneW: parsePixelWidth(bundle.ac_imagePaneW, IMAGE_PANE_W.default, IMAGE_PANE_W.min, IMAGE_PANE_W.max),
+    };
   } catch {
     const defaults = withDefaultSettings(_DEF());
-    return { settings: defaults, darkMode: true, zoom: 1.0 };
+    return { settings: defaults, darkMode: true, zoom: 1.0, sourceLabelW: SOURCE_LABEL_W.default, imagePaneW: IMAGE_PANE_W.default };
   }
 }
 
@@ -161,12 +177,15 @@ export function withDefaultSettings(settings: Settings): Settings {
   };
 }
 
-/** Persist the whole bundle (settings + dark + zoom) atomically. */
-export function saveState(settings: Settings, darkMode: boolean, zoom: number): Promise<void> {
+/** Persist the whole bundle (settings + dark + zoom + Source Record column
+ *  widths) atomically. */
+export function saveState(settings: Settings, darkMode: boolean, zoom: number, sourceLabelW: number, imagePaneW: number): Promise<void> {
   const bundle: StateBundle = {
     ac_settings: settings,
     ac_darkMode: String(darkMode),
     ac_zoom: String(zoom),
+    ac_sourceLabelW: String(sourceLabelW),
+    ac_imagePaneW: String(imagePaneW),
   };
   return invoke<void>("save_state", { bundle });
 }
@@ -185,15 +204,18 @@ export interface DebouncedSaver {
   flush(): Promise<void>;
 }
 
-export function makeDebouncedSaver(getState: () => { settings: Settings; darkMode: boolean; zoom: number }, ms = 300): DebouncedSaver {
+export function makeDebouncedSaver(
+  getState: () => { settings: Settings; darkMode: boolean; zoom: number; sourceLabelW: number; imagePaneW: number },
+  ms = 300
+): DebouncedSaver {
   let timer: ReturnType<typeof setTimeout> | null = null;
   // Settled both ways so one failed save never poisons the chain.
   let tail: Promise<unknown> = Promise.resolve();
   const saveNow = (): Promise<void> => {
-    const { settings, darkMode, zoom } = getState();
+    const { settings, darkMode, zoom, sourceLabelW, imagePaneW } = getState();
     const p = tail.then(
-      () => saveState(settings, darkMode, zoom),
-      () => saveState(settings, darkMode, zoom)
+      () => saveState(settings, darkMode, zoom, sourceLabelW, imagePaneW),
+      () => saveState(settings, darkMode, zoom, sourceLabelW, imagePaneW)
     );
     tail = p.catch(() => undefined);
     return p;

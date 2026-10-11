@@ -42,6 +42,11 @@
      idle content (label + compact 96px drop zone) without an inner scrollbar,
      so the results panel beneath doesn't start taller than needed. */
   --split-h: 180px;
+  /* Source Record column widths (expanded result rows): the field-name column
+     and the image pane, dragged via the handles in ResultRow. Fallbacks only —
+     App.tsx re-asserts the persisted values on load. */
+  --src-label-w: 130px;
+  --img-pane-w: 210px;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);

@@ -10,7 +10,7 @@ import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
 import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
-import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid } from "./defaults";
+import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
 import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
 import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
@@ -32,6 +32,15 @@ function errText(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/** Zoom-corrected clamp for splitter drags: the app root carries
+ *  `style={{ zoom }}` (App.tsx), so one layout px inside it renders as `zoom`
+ *  viewport px — a raw clientX/clientY delta must be divided by zoom for the
+ *  divider to track the cursor. A non-positive zoom guards to 1. Pure for tests. */
+export function dragClamp(start: number, screenDelta: number, zoom: number, min: number, max: number): number {
+  const z = zoom > 0 ? zoom : 1;
+  return Math.max(min, Math.min(max, start + screenDelta / z));
 }
 
 export interface AppActions {
@@ -95,6 +104,10 @@ export interface AppActions {
    *  Confirms first, cancels in-flight rows, then removes them all. */
   deleteFileRows(fileId: string): Promise<void>;
   onResizeStart(e: React.MouseEvent): void;
+  /** Source Record field-name column drag (expanded result rows). */
+  onSourceLabelResizeStart(e: React.MouseEvent): void;
+  /** Source Record image-pane drag (expanded result rows). */
+  onImagePaneResizeStart(e: React.MouseEvent): void;
 
   // results
   toggleRow(uid: string): void;
@@ -885,19 +898,63 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     pushLog({ status: "ok", label: "Records deleted", detail: `${live.length} record${live.length === 1 ? "" : "s"} from ${name}` });
   }, [confirmDelete, dispatch, getState]);
 
-  const onResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--split-h")) || 180;
-    const mv = (ev: MouseEvent) =>
-      document.documentElement.style.setProperty("--split-h", Math.max(120, Math.min(420, startH + (ev.clientY - startY))) + "px");
-    const up = () => {
-      document.removeEventListener("mousemove", mv);
-      document.removeEventListener("mouseup", up);
-    };
-    document.addEventListener("mousemove", mv);
-    document.addEventListener("mouseup", up);
-  }, []);
+  // Shared splitter-drag loop: live-updates a CSS var on <html> from the mouse
+  // delta, clamped, without dispatching — no re-render per mousemove. The
+  // delta is zoom-corrected (dragClamp) because the vars size layout inside
+  // the zoomed app root; zoom is read once at mousedown (it cannot change
+  // mid-drag). `sign` inverts the mapping for right-anchored panes (drag left
+  // = wider). `onEnd` receives the final clamped value.
+  const beginVarDrag = useCallback(
+    (
+      e: React.MouseEvent,
+      opts: { axis: "x" | "y"; sign: 1 | -1; varName: string; fallback: number; min: number; max: number; onEnd?: (v: number) => void }
+    ) => {
+      e.preventDefault();
+      const zoom = getState().zoom;
+      const startPos = opts.axis === "x" ? e.clientX : e.clientY;
+      const start = parseInt(getComputedStyle(document.documentElement).getPropertyValue(opts.varName)) || opts.fallback;
+      let last = start;
+      const mv = (ev: MouseEvent) => {
+        const delta = opts.sign * ((opts.axis === "x" ? ev.clientX : ev.clientY) - startPos);
+        last = dragClamp(start, delta, zoom, opts.min, opts.max);
+        document.documentElement.style.setProperty(opts.varName, last + "px");
+      };
+      const up = () => {
+        document.removeEventListener("mousemove", mv);
+        document.removeEventListener("mouseup", up);
+        opts.onEnd?.(last);
+      };
+      document.addEventListener("mousemove", mv);
+      document.addEventListener("mouseup", up);
+    },
+    [getState]
+  );
+  // Upload-panel height splitter (MainScreen). Not persisted.
+  const onResizeStart = useCallback(
+    (e: React.MouseEvent) => beginVarDrag(e, { axis: "y", sign: 1, varName: "--split-h", fallback: 180, min: 120, max: 420 }),
+    [beginVarDrag]
+  );
+  // Source Record column widths (ResultRow): persisted on release so a restart
+  // restores them; the drag itself stays dispatch-free for smoothness. The
+  // image pane is right-anchored — dragging left widens it.
+  const onSourceLabelResizeStart = useCallback(
+    (e: React.MouseEvent) =>
+      beginVarDrag(e, {
+        axis: "x", sign: 1, varName: "--src-label-w",
+        fallback: SOURCE_LABEL_W.default, min: SOURCE_LABEL_W.min, max: SOURCE_LABEL_W.max,
+        onEnd: (w) => { dispatch({ type: "SET_SOURCE_LABEL_W", w }); persist.schedule(); },
+      }),
+    [beginVarDrag, dispatch, persist]
+  );
+  const onImagePaneResizeStart = useCallback(
+    (e: React.MouseEvent) =>
+      beginVarDrag(e, {
+        axis: "x", sign: -1, varName: "--img-pane-w",
+        fallback: IMAGE_PANE_W.default, min: IMAGE_PANE_W.min, max: IMAGE_PANE_W.max,
+        onEnd: (w) => { dispatch({ type: "SET_IMAGE_PANE_W", w }); persist.schedule(); },
+      }),
+    [beginVarDrag, dispatch, persist]
+  );
 
   // --- results interaction ---
   const toggleRow = useCallback((uid: string) => dispatch({ type: "TOGGLE_ROW", uid }), [dispatch]);
@@ -2253,7 +2310,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   return {
     setAllExpanded,
     toggleDark, goMain, goSettings, setTab, zoomIn, zoomOut, toggleLogs, setLogsOpen,
-    onUploadClick, onDragOver, onDragLeave, onDrop, removeFile, dismissParseError, startQueue, stopQueue, retryFailed, queueRow, dequeueRow, stopRow, deleteRow, deleteFileRows, onResizeStart,
+    onUploadClick, onDragOver, onDragLeave, onDrop, removeFile, dismissParseError, startQueue, stopQueue, retryFailed, queueRow, dequeueRow, stopRow, deleteRow, deleteFileRows, onResizeStart, onSourceLabelResizeStart, onImagePaneResizeStart,
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,

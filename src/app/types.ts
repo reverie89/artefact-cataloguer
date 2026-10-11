@@ -263,6 +263,9 @@ export interface StateBundle {
   ac_settings: Settings;
   ac_darkMode: string;
   ac_zoom: string;
+  /** Stringified px widths of the main screen's Source Record columns. */
+  ac_sourceLabelW: string;
+  ac_imagePaneW: string;
 }
 
 /** Extracted image descriptor returned by Rust. */

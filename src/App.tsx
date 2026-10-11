@@ -72,8 +72,8 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { settings, darkMode, zoom } = await loadState();
-      if (!cancelled) dispatch({ type: "INIT", settings, darkMode, zoom });
+      const { settings, darkMode, zoom, sourceLabelW, imagePaneW } = await loadState();
+      if (!cancelled) dispatch({ type: "INIT", settings, darkMode, zoom, sourceLabelW, imagePaneW });
     })();
     return () => {
       cancelled = true;
@@ -116,6 +116,14 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", state.darkMode);
   }, [state.darkMode]);
+
+  // Apply the persisted Source Record column widths as CSS vars. The splitter
+  // drags (actions.beginVarDrag) write the same vars live; this seeds them on
+  // load and re-asserts after a drag's final dispatch.
+  useEffect(() => {
+    document.documentElement.style.setProperty("--src-label-w", state.sourceLabelW + "px");
+    document.documentElement.style.setProperty("--img-pane-w", state.imagePaneW + "px");
+  }, [state.sourceLabelW, state.imagePaneW]);
 
   const { confirmDelete, dialog } = useConfirmDelete();
   const actions = useActions(state, dispatch, persist, confirmDelete, () => stateRef.current);

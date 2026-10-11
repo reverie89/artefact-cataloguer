@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { migrateLegacyVisionPromptKey } from "./store";
+import { migrateLegacyVisionPromptKey, parsePixelWidth } from "./store";
 
 describe("migrateLegacyVisionPromptKey", () => {
   it("renames the legacy prompt key, carrying the custom value across", () => {
@@ -28,5 +28,22 @@ describe("migrateLegacyVisionPromptKey", () => {
     }) as Record<string, unknown>;
     expect(out.artefactAnalysisSystemPromptInstruction).toBe("current");
     expect(out.visionSystemPromptInstruction).toBeUndefined();
+  });
+});
+
+describe("parsePixelWidth", () => {
+  const min = 90;
+  const max = 400;
+
+  it("parses a valid value, clamped to the range", () => {
+    expect(parsePixelWidth("260", 130, min, max)).toBe(260);
+    expect(parsePixelWidth("5000", 130, min, max)).toBe(max);
+    expect(parsePixelWidth("1", 130, min, max)).toBe(min);
+  });
+
+  it("falls back on garbage and missing values", () => {
+    expect(parsePixelWidth(undefined, 130, min, max)).toBe(130);
+    expect(parsePixelWidth("", 130, min, max)).toBe(130);
+    expect(parsePixelWidth("wide", 130, min, max)).toBe(130);
   });
 });
