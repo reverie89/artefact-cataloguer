@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-11
+
+### Added
+
+- Vocab suggestions follow same-kind discipline: components are defined per field kind, winners join the group with the highest cosine, and same-kind specializations merge below the near-duplicate gate; the review dropdown lists per-kind swap alternates with kind-shaded similarity bars.
+- Start queues every ready row into an automatic FIFO queue drained in start order; rows can also be started or retried individually, and Stop returns queued rows to ready.
+- Group headers show live processing progress and failure counts while a batch runs.
+- Result rows show a per-row stage counter ("Processing · n/m") and the Logs Viewer groups stage entries under per-record headers.
+- Source Record columns are resizable: drag handles resize the field-name column and image pane, persisted across restarts, with drags corrected for app zoom.
+- Import-error cards are hosted inside the upload dropzone.
+
+### Changed
+
+- Dependencies: TypeScript upgraded to 7 and the ESLint toolchain removed.
+
+### Fixed
+
+- Persisted vocabulary-sync and provider-connection claims are re-verified against on-disk state, so stale "synced"/"connected" statuses no longer linger.
+- Stopping processing asks for confirmation before exit, and retrying a failed row auto-restarts it.
+- Saving a settings card persists the edited values; the save previously wrote the pre-edit bundle while the UI reported success.
+- Discard/Save on unchanged cards disable in place instead of leaving an invisible dead-click zone.
+
 ## [1.3.0] - 2026-10-10
 
 ### Added
@@ -101,3 +123,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.2.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.0
 [1.2.1]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.1
 [1.3.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.3.0
+[1.4.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.4.0

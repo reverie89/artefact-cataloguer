@@ -124,7 +124,6 @@ function printBox(lines) {
 }
 
 function stripAnsi(s) {
-  // eslint-disable-next-line no-control-regex -- stripping ANSI codes requires the ESC control char.
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 

@@ -1042,7 +1042,6 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           const bytes = await readFile(r.imagePath);
           const lower = r.imagePath.toLowerCase();
           const extension: "png" | "jpeg" = lower.endsWith(".jpg") || lower.endsWith(".jpeg") ? "jpeg" : "png";
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const id = wb.addImage({ buffer: bytes as any, extension });
           // One-cell anchor with explicit pixel extents: a range-string
           // anchor ("B2:B2") stretches the image to the cell box — a ~19px

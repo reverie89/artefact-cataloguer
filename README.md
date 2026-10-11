@@ -7,7 +7,7 @@
 
 **Artefact Cataloguer** is a Tauri 2 desktop app for AI-assisted museum cataloguing — upload an artefact spreadsheet, extract embedded images, run each row through an OpenAI-compatible model for ranked catalogue-field suggestions, review, and export `.xlsx`.
 
-[https://github.com/user-attachments/assets/1b5a5e8b-ea39-4c9c-b2c7-6dfe8bede803](https://github.com/user-attachments/assets/1b5a5e8b-ea39-4c9c-b2c7-6dfe8bede803)
+[https://github.com/user-attachments/assets/2ed51352-cfd9-4e0c-a0e8-6f46385111ab](https://github.com/user-attachments/assets/2ed51352-cfd9-4e0c-a0e8-6f46385111ab)
 
 ---
 
@@ -129,7 +129,6 @@ requires a real uploaded spreadsheet and a live, active provider — there is no
 | `npm run build` | `tsc -b && vite build` — renderer → `dist/` (compile only, no installer) |
 | `npm test` | vitest unit tests (renderer) |
 | `npm run test:watch` | vitest in watch mode |
-| `npm run lint` | eslint (`eslint .`) |
 | `npm run build:win-all` | NSIS installers — arm64 + x86_64 |
 | `npm run build:linux` | AppImage installer — host arch |
 | `cargo test` *(from `src-tauri/`)* | Rust unit tests |
