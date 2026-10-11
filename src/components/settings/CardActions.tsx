@@ -1,12 +1,11 @@
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type { SaveState } from "./SaveActions.types";
 import { SettingsSaveActions, SaveStatus } from "./SaveActions";
 
 interface CardActionsProps {
   /** Whether this card has unsaved edits. Gates the Save/Discard buttons'
-   *  visibility (kept in-layout via invisible to avoid pop-in). */
+   *  enabled state — they stay visible so the row's geometry never shifts. */
   dirty: boolean;
   onDiscard: () => void;
   onSave: () => void;
@@ -32,8 +31,9 @@ interface CardActionsProps {
  * (a provider card, an expanded field/column row, a vocab inline editor, or a
  * prose card) so Save/Discard/Delete operate on that single card.
  *
- * Save/Discard only become visible once `dirty` is true, but they always occupy
- * the layout (invisible) so nothing shifts when a change is detected.
+ * Save/Discard disable (rather than disappear) on a clean card: the action
+ * row's geometry never shifts, and a saved card has no invisible reserved
+ * gap where clicks land on nothing.
  */
 export function CardActions({ dirty, onDiscard, onSave, status, discardLabel = "Discard", onDelete, deleteLabel = "Delete", errorMessage }: CardActionsProps) {
   const saving = status === "saving";
@@ -51,13 +51,10 @@ export function CardActions({ dirty, onDiscard, onSave, status, discardLabel = "
         disabled={!dirty || saving}
         variant="ghost"
         size="sm"
-        className={cn(!dirty && "invisible")}
-        aria-hidden={!dirty}
-        tabIndex={dirty ? 0 : -1}
       >
         {discardLabel}
       </Button>
-      <SettingsSaveActions status={status} onSave={onSave} hidden={!dirty} hideStatus />
+      <SettingsSaveActions status={status} onSave={onSave} clean={!dirty} hideStatus />
     </div>
   );
 }

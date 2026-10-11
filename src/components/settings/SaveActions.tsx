@@ -8,27 +8,24 @@ interface SettingsSaveActionsProps {
   onSave: () => void;
   disabled?: boolean;
   savingLabel?: string;
-  /** When true, the Save button is hidden from view (invisible) but kept in the
-   *  layout to avoid pop-in. SaveStatus stays visible either way, so a "Saved"
-   *  confirmation can outlive the dirty→clean transition. Mirrors the
-   *  dirty-gated Discard button. */
-  hidden?: boolean;
+  /** When true the card is clean: the Save button stays visible (the action
+   *  row's geometry never shifts) but disabled — a saved card shows an inert
+   *  Save in place instead of an invisible reserved gap that eats clicks. */
+  clean?: boolean;
   /** Skip rendering the inline SaveStatus (e.g. when the consumer places the
    *  status elsewhere in the row). */
   hideStatus?: boolean;
 }
 
-export function SettingsSaveActions({ status, onSave, disabled = false, savingLabel = "Saving...", hidden = false, hideStatus = false }: SettingsSaveActionsProps) {
+export function SettingsSaveActions({ status, onSave, disabled = false, savingLabel = "Saving...", clean = false, hideStatus = false }: SettingsSaveActionsProps) {
   const saving = status === "saving";
   return (
     <>
       {!hideStatus && <SaveStatus status={status} />}
       <Button
         onClick={onSave}
-        disabled={hidden || disabled || saving}
-        className={cn("min-w-28", hidden && "invisible")}
-        aria-hidden={hidden}
-        tabIndex={hidden ? -1 : 0}
+        disabled={clean || disabled || saving}
+        className="min-w-28"
         size="sm"
       >
         {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
