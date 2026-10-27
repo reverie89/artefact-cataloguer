@@ -28,7 +28,7 @@ fn mask_secret(s: &str) -> String {
 /// the raw API key has only the key masked in place (so `Bearer <key>` becomes
 /// `Bearer ••••wxyz`, not a fully obscured blob), then the shared User-Agent +
 /// Accept defaults are appended. Nothing sensitive is emitted.
-pub(crate) fn log_headers(auth: &[(&'static str, String)], api_key: &str) -> Vec<(String, String)> {
+pub(crate) fn log_headers(auth: &[(String, String)], api_key: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = auth
         .iter()
         .map(|(name, value)| {
@@ -37,7 +37,7 @@ pub(crate) fn log_headers(auth: &[(&'static str, String)], api_key: &str) -> Vec
             } else {
                 value.clone()
             };
-            (name.to_string(), v)
+            (name.clone(), v)
         })
         .collect();
     out.push(("User-Agent".to_string(), APP_USER_AGENT.to_string()));

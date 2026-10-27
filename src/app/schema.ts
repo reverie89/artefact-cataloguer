@@ -8,7 +8,7 @@
 import { z } from "zod";
 
 const fieldType = z.enum(["open", "vocab"]);
-const apiFormat = z.enum(["openai", "anthropic", "gemini"]);
+const apiFormat = z.enum(["openai", "anthropic", "gemini", "custom"]);
 const embeddingApiFormat = z.enum(["openai", "gemini"]);
 const thinkingEffort = z.enum(["low", "medium", "high"]);
 
@@ -72,6 +72,10 @@ const ProviderSchema = z.object({
   apiFormat: apiFormat.optional(),
   thinking: thinkingEffort.optional(),
   connStatus: z.enum(["ok", "err", "untested"]).optional(),
+  // Custom-format-only fields; absent for every other format (and for custom
+  // providers saved before they existed).
+  authHeader: z.string().optional(),
+  bodyTemplate: z.string().optional(),
 });
 
 const EmbeddingProviderSchema = z.object({

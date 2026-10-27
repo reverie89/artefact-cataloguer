@@ -99,13 +99,13 @@ pub(crate) async fn response_text_checked(
 pub(crate) async fn fetch_advertised_models(
     client: &reqwest::Client,
     models_url: &str,
-    auth: &[(&'static str, String)],
+    auth: &[(String, String)],
     gemini: bool,
     embedding_only: bool,
 ) -> Result<Vec<String>, String> {
     let mut req = client.get(models_url);
     for (name, value) in auth {
-        req = req.header(*name, value.as_str());
+        req = req.header(name.as_str(), value.as_str());
     }
     let resp = req
         .send()
@@ -123,12 +123,12 @@ pub(crate) async fn fetch_advertised_models(
 pub(crate) async fn fetch_advertised_embedding_models(
     client: &reqwest::Client,
     models_url: &str,
-    auth: &[(&'static str, String)],
+    auth: &[(String, String)],
     gemini: bool,
 ) -> Result<(Vec<String>, Option<Vec<String>>), String> {
     let mut req = client.get(models_url);
     for (name, value) in auth {
-        req = req.header(*name, value.as_str());
+        req = req.header(name.as_str(), value.as_str());
     }
     let resp = req
         .send()

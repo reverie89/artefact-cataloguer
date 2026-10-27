@@ -10,7 +10,7 @@ import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
 import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
-import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, fmt, gid, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
+import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, CUSTOM_MESSAGE_DEFAULT, fmt, gid, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
 import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
 import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
@@ -232,6 +232,10 @@ export interface AppActions {
   setProvApiFormat(id: string, format: ApiFormat): void;
   /** Set this provider's reasoning effort (`null` = off); persists on its card Save. */
   setProvThinking(id: string, effort: ThinkingEffort | null): void;
+  /** Set this provider's custom auth header name ("" = Bearer); persists on its card Save. */
+  setProvAuthHeader(id: string, header: string): void;
+  /** Set this provider's custom JSON message template; persists on its card Save. */
+  setProvBodyTemplate(id: string, body: string): void;
   toggleProvKey(): void;
   testConn(id: string): Promise<void>;
   deleteProv(id: string): Promise<void>;
@@ -1656,7 +1660,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchProvDraft((d) => ({
       ...d,
       // Append an empty standard entry; the user fills it in, then Test → pick model.
-      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null }],
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "" }],
     }));
     dispatch({ type: "TOGGLE_PROV", id });
   }, [patchProvDraft, dispatch]);
@@ -1682,7 +1686,14 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
   const setProvApiFormat = useCallback((id: string, format: ApiFormat) => {
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
-    patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, apiFormat: format, connStatus: "untested" })));
+    patchProvDraft(mapDraftEntry(id, (entry) => ({
+      ...entry,
+      apiFormat: format,
+      connStatus: "untested",
+      // Custom sends a user-typed body: seed the reference template so the
+      // card opens with a working message to modify instead of a blank field.
+      bodyTemplate: format === "custom" && !entry.bodyTemplate.trim() ? CUSTOM_MESSAGE_DEFAULT : entry.bodyTemplate,
+    })));
     dispatch({ type: "CLEAR_PROV_STATUS", id });
   }, [patchProvDraft, mapDraftEntry, dispatch]);
 
@@ -1703,6 +1714,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
     dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, thinking: effort })));
+  }, [patchProvDraft, mapDraftEntry, dispatch]);
+
+  // Custom-format-only fields (auth header name; JSON message template). They
+  // never clear the test status: custom providers have no connection test.
+  const setProvAuthHeader = useCallback((id: string, header: string) => {
+    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
+    patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, authHeader: header })));
+  }, [patchProvDraft, mapDraftEntry, dispatch]);
+
+  const setProvBodyTemplate = useCallback((id: string, body: string) => {
+    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
+    patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, bodyTemplate: body })));
   }, [patchProvDraft, mapDraftEntry, dispatch]);
 
   const toggleProvKey = useCallback(() => dispatch({ type: "SET_SHOW_PROV_KEY", show: !state.showProvKey }), [state.showProvKey, dispatch]);
@@ -1755,6 +1780,20 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (!entry.name.trim()) validationError = "Needs a name";
     else if (!entry.baseUrl.trim()) validationError = "Needs a base URL";
     else if (!entry.apiKey.trim()) validationError = "Needs an API key";
+    // The custom format POSTs the user-typed body: it must exist, parse as
+    // JSON, and carry the prompt token — the three ways a saved card could
+    // otherwise fail opaquely on the first catalogue run.
+    else if (entry.apiFormat === "custom") {
+      if (!entry.bodyTemplate.trim()) validationError = "Needs a message format";
+      else {
+        try {
+          JSON.parse(entry.bodyTemplate);
+          if (!entry.bodyTemplate.includes("{{input}}")) validationError = "Message format must include {{input}}";
+        } catch {
+          validationError = "Message format must be valid JSON";
+        }
+      }
+    }
     if (validationError) {
       dispatch({ type: "SET_PROV_CARD_ERROR", id, error: validationError });
       dispatch({ type: "SET_PROV_CARD_STATUS", id, status: "err" });
@@ -1770,6 +1809,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       id: entry.id, name: entry.name, baseUrl: entry.baseUrl, apiKey: entry.apiKey,
       model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
       connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
+      authHeader: entry.authHeader || undefined, bodyTemplate: entry.bodyTemplate || undefined,
     };
     try {
       await patchNow((s) => ({
@@ -1801,7 +1841,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({
         type: "PATCH_PROVIDER_DRAFT",
         patch: mapDraftEntry(id, () => ({
-          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null,
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "",
         })),
       });
       return;
@@ -1818,6 +1858,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           modelOptions: [...(saved.modelOptions ?? [])],
           connStatus: saved.connStatus ?? "untested",
           thinking: saved.thinking ?? null,
+          authHeader: saved.authHeader ?? "",
+          bodyTemplate: saved.bodyTemplate ?? "",
         } : e)),
       }),
     });
@@ -2313,7 +2355,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
-    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, toggleProvKey, testConn, reorderProv, deleteProv, setActiveProv, saveProvCard, discardProvCard,
+    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, setProvAuthHeader, setProvBodyTemplate, toggleProvKey, testConn, reorderProv, deleteProv, setActiveProv, saveProvCard, discardProvCard,
     toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, reorderEmbProv, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
     toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,

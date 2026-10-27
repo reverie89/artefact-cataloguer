@@ -140,3 +140,28 @@ export const SOURCE_LABEL_W = { default: 130, min: 90, max: 400 } as const;
 
 /** Width (px) of the image pane beside an expanded row's Source Record. */
 export const IMAGE_PANE_W = { default: 210, min: 140, max: 480 } as const;
+
+// Custom-API-format providers (see VisionProvidersSection): the user types the
+// JSON request body, so these baselines give a working starting point per
+// dialect. `{{input}}` is replaced with the prompt text at request time
+// (Rust's build_custom_body); the reference body is the default seed.
+
+/** Baseline JSON message templates a custom provider's Message field can load. */
+export const CUSTOM_MESSAGE_TEMPLATES: { label: string; body: string }[] = [
+  { label: "Reference (flat input)", body: '{"input": "{{input}}"}' },
+  {
+    label: "OpenAI chat",
+    body: '{\n  "messages": [{ "role": "user", "content": "{{input}}" }],\n  "temperature": 0.2\n}',
+  },
+  {
+    label: "Anthropic messages",
+    body: '{\n  "max_tokens": 4096,\n  "messages": [{ "role": "user", "content": "{{input}}" }]\n}',
+  },
+  {
+    label: "Gemini generateContent",
+    body: '{\n  "contents": [{ "parts": [{ "text": "{{input}}" }] }],\n  "generationConfig": { "temperature": 0.2 }\n}',
+  },
+];
+
+/** Seed body when a provider switches to the custom API format. */
+export const CUSTOM_MESSAGE_DEFAULT = CUSTOM_MESSAGE_TEMPLATES[0].body;

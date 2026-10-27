@@ -67,8 +67,10 @@ impl TurnRole {
 /// each provider encodes the turns as its native multi-turn shape (OpenAI /
 /// Anthropic `messages` array; Gemini Interactions `input` array of steps).
 /// An image attached to a turn is inlined as a content block on that turn only
-/// — later text-only turns still see it via the conversation history.
-fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
+/// — later text-only turns still see it via the conversation history. The
+/// custom family flattens the conversation into its single `input` string and
+/// rejects image turns (see the variant doc in `types.rs`).
+fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<Value, String> {
     match provider.api_format {
         ApiFormat::OpenAi => {
             let messages: Vec<Value> = turns
@@ -96,7 +98,7 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
             if let Some(effort) = provider.thinking {
                 body["reasoning_effort"] = json!(effort);
             }
-            body
+            Ok(body)
         }
         // Anthropic requires `max_tokens`.
         ApiFormat::Anthropic => {
@@ -137,7 +139,7 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
                 body["max_tokens"] = json!(32000);
                 body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget_tokens });
             }
-            body
+            Ok(body)
         }
         // Gemini Interactions API: the whole request is one `input` array of
         // steps (multi-turn), text preceding any image per Gemini's guidance.
@@ -160,8 +162,79 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
             if let Some(effort) = provider.thinking {
                 body["generation_config"]["thinking_level"] = json!(effort);
             }
-            body
+            Ok(body)
         }
+        // Custom gateways POST the user-typed JSON message template: the
+        // turns' texts are joined in order and substituted for `{{input}}`.
+        // Image input is not part of any template, and artefact analysis
+        // always carries the image, so this fails loudly rather than sending
+        // a prompt without its image.
+        ApiFormat::Custom => {
+            if turns.iter().any(|t| t.image.is_some()) {
+                return Err(
+                    "the custom API format sends text only and cannot carry the artefact image — use an image-capable API format for analysis"
+                        .to_string(),
+                );
+            }
+            let input = turns
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            build_custom_body(&provider.body_template, &input)
+        }
+    }
+}
+
+/// The request-body token a custom provider's message template must carry —
+/// replaced with the flattened prompt text.
+const CUSTOM_INPUT_TOKEN: &str = "{{input}}";
+
+/// Materialize a custom provider's user-typed JSON message template into the
+/// request body. The template must parse as JSON and carry `{{input}}` — the
+/// substitution happens on the parsed `Value`, so arbitrary prompt text
+/// (quotes, newlines) is re-escaped safely by serde on the way out. Errors
+/// name the exact defect: empty template, invalid JSON, or a missing token
+/// (the prompt would never reach the gateway).
+fn build_custom_body(template: &str, input: &str) -> Result<Value, String> {
+    if template.trim().is_empty() {
+        return Err(
+            "custom provider has no message format — set it on the provider card".to_string(),
+        );
+    }
+    let mut body: Value = serde_json::from_str(template)
+        .map_err(|e| format!("message format is not valid JSON: {e}"))?;
+    let mut found = false;
+    substitute_custom_input(&mut body, input, &mut found);
+    if !found {
+        return Err(format!(
+            "message format must include {CUSTOM_INPUT_TOKEN} — the prompt text has nowhere to go"
+        ));
+    }
+    Ok(body)
+}
+
+/// Walk `v`, replacing every `{CUSTOM_INPUT_TOKEN}` occurrence inside string
+/// values with `input`; sets `found` when any substitution happened.
+fn substitute_custom_input(v: &mut Value, input: &str, found: &mut bool) {
+    match v {
+        Value::String(s) => {
+            if s.contains(CUSTOM_INPUT_TOKEN) {
+                *s = s.replace(CUSTOM_INPUT_TOKEN, input);
+                *found = true;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                substitute_custom_input(item, input, found);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                substitute_custom_input(value, input, found);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -172,72 +245,122 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Value {
 const TRUNCATED_ERR: &str = "response hit max_tokens before finishing — if this model thinks by default (e.g. GLM-5.3), set Thinking to Low or higher to raise the output budget";
 
 /// Pull the model's text answer out of a chat-completions response, by API
-/// family. Pure: takes the parsed JSON, returns the content string or an error.
-///
-/// Reasoning output can share the response with the answer — as leading
-/// `thinking` blocks (Anthropic) or sibling fields beside the content
-/// (OpenAI) — so each arm gathers only the answer text, in order. A
-/// max-tokens stop is an error, not partial content.
+/// family. Pure: takes the parsed JSON, returns the content string or an
+/// error, delegating to the per-dialect helpers (which the custom family
+/// chains across — see `parse_custom_answer`).
 fn parse_completion_content(fmt: ApiFormat, v: &Value) -> Result<String, String> {
-    let content = match fmt {
-        // Content is a plain string or a parts array
-        // [{type:"text",text:"..."}].
-        ApiFormat::OpenAi => {
-            if v["choices"][0]["finish_reason"].as_str() == Some("length") {
-                return Err(TRUNCATED_ERR.to_string());
+    match fmt {
+        ApiFormat::OpenAi => parse_openai_answer(v),
+        ApiFormat::Anthropic => parse_anthropic_answer(v),
+        ApiFormat::Gemini => parse_gemini_answer(v),
+        ApiFormat::Custom => parse_custom_answer(v),
+    }
+}
+
+/// OpenAI dialect: `choices[0].message.content`, a plain string or a parts
+/// array. Reasoning models carry chain-of-thought beside `message.content`;
+/// only `content` is the answer. A `finish_reason` of "length" is the
+/// truncation error, not partial content.
+fn parse_openai_answer(v: &Value) -> Result<String, String> {
+    if v["choices"][0]["finish_reason"].as_str() == Some("length") {
+        return Err(TRUNCATED_ERR.to_string());
+    }
+    let c = &v["choices"][0]["message"]["content"];
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(s) = c.as_str() {
+        parts.push(s);
+    } else if let Some(arr) = c.as_array() {
+        parts.extend(
+            arr.iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str)),
+        );
+    }
+    (!parts.is_empty())
+        .then(|| parts.concat())
+        .ok_or_else(|| "response missing choices[0].message.content".to_string())
+}
+
+/// Anthropic dialect: `content` holds typed blocks; reasoning models put a
+/// "thinking" block ahead of the answer's "text" block(s). A `stop_reason` of
+/// "max_tokens" is the truncation error, not partial content.
+fn parse_anthropic_answer(v: &Value) -> Result<String, String> {
+    if v["stop_reason"].as_str() == Some("max_tokens") {
+        return Err(TRUNCATED_ERR.to_string());
+    }
+    let mut text = String::new();
+    let mut types: Vec<&str> = Vec::new();
+    if let Some(blocks) = v["content"].as_array() {
+        for b in blocks {
+            let ty = b["type"].as_str().unwrap_or("unknown");
+            types.push(ty);
+            if ty == "text" {
+                text.push_str(b["text"].as_str().unwrap_or(""));
             }
-            let c = &v["choices"][0]["message"]["content"];
-            let mut parts: Vec<&str> = Vec::new();
-            if let Some(s) = c.as_str() {
-                parts.push(s);
-            } else if let Some(arr) = c.as_array() {
-                parts.extend(
-                    arr.iter()
-                        .filter_map(|p| p.get("text").and_then(Value::as_str)),
-                );
-            }
-            (!parts.is_empty())
-                .then(|| parts.concat())
-                .ok_or_else(|| "response missing choices[0].message.content".to_string())?
         }
-        // `content` holds typed blocks; reasoning models put a "thinking"
-        // block ahead of the answer's "text" block(s).
-        ApiFormat::Anthropic => {
-            if v["stop_reason"].as_str() == Some("max_tokens") {
-                return Err(TRUNCATED_ERR.to_string());
-            }
-            let mut text = String::new();
-            let mut types: Vec<&str> = Vec::new();
-            if let Some(blocks) = v["content"].as_array() {
-                for b in blocks {
-                    let ty = b["type"].as_str().unwrap_or("unknown");
-                    types.push(ty);
-                    if ty == "text" {
-                        text.push_str(b["text"].as_str().unwrap_or(""));
-                    }
-                }
-            }
-            let got = if types.is_empty() {
-                "no content array".to_string()
-            } else {
-                format!("got {}", types.join(", "))
-            };
-            (!text.is_empty())
-                .then_some(text)
-                .ok_or_else(|| format!("response content has no text ({got})"))?
-        }
-        // Gemini Interactions API: prefer the top-level convenience field, then
-        // the current `steps` array, then the legacy `outputs` array (pre the
-        // 2026-06 schema sunset). The final entry holds the complete answer.
-        ApiFormat::Gemini => v
-            .get("output_text")
-            .and_then(Value::as_str)
-            .or_else(|| gemini_entries_text(v.get("steps")))
-            .or_else(|| gemini_entries_text(v.get("outputs")))
-            .ok_or_else(|| "response missing output_text / steps / outputs".to_string())?
-            .to_string(),
+    }
+    let got = if types.is_empty() {
+        "no content array".to_string()
+    } else {
+        format!("got {}", types.join(", "))
     };
-    Ok(content)
+    (!text.is_empty())
+        .then_some(text)
+        .ok_or_else(|| format!("response content has no text ({got})"))
+}
+
+/// Gemini Interactions API dialect: prefer the top-level convenience field,
+/// then the current `steps` array, then the legacy `outputs` array (pre the
+/// 2026-06 schema sunset). The final entry holds the complete answer.
+fn parse_gemini_answer(v: &Value) -> Result<String, String> {
+    v.get("output_text")
+        .and_then(Value::as_str)
+        .or_else(|| gemini_entries_text(v.get("steps")))
+        .or_else(|| gemini_entries_text(v.get("outputs")))
+        .map(str::to_string)
+        .ok_or_else(|| "response missing output_text / steps / outputs".to_string())
+}
+
+/// Custom gateways answer in whichever dialect their message template speaks:
+/// the flat reference contract answers `{"output": "<text>"}`, and the
+/// OpenAI / Anthropic / Gemini template baselines get their native response
+/// shapes — so the dialect helpers are tried in order. Truncation signals are
+/// checked first so a max-tokens stop surfaces instead of falling through the
+/// shape chain as "unrecognized". Nothing matching names the observed
+/// top-level keys: the first real response corrects the contract instead of a
+/// guess.
+fn parse_custom_answer(v: &Value) -> Result<String, String> {
+    if v["choices"][0]["finish_reason"].as_str() == Some("length")
+        || v["stop_reason"].as_str() == Some("max_tokens")
+    {
+        return Err(TRUNCATED_ERR.to_string());
+    }
+    if let Some(s) = v
+        .get("output")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(s.to_string());
+    }
+    for parse in [
+        parse_openai_answer,
+        parse_anthropic_answer,
+        parse_gemini_answer,
+    ] {
+        if let Ok(text) = parse(v) {
+            return Ok(text);
+        }
+    }
+    Err(match v.as_object() {
+        Some(o) => {
+            let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            format!(
+                "no recognizable answer text in the response (got keys: {})",
+                keys.join(", ")
+            )
+        }
+        None => "response was not a JSON object with recognizable answer text".to_string(),
+    })
 }
 
 /// Read the text out of the last entry of a Gemini Interactions `steps`/`outputs`
@@ -277,8 +400,10 @@ pub(crate) async fn do_completion<R: Runtime>(
 
     // Body construction is isolated in `build_completion_body`; this function
     // owns only transport + boundary logging.
-    let body: Value = build_completion_body(provider, turns);
-    let auth = provider.api_format.auth(&provider.api_key);
+    let body: Value = build_completion_body(provider, turns)?;
+    let auth = provider
+        .api_format
+        .auth(&provider.api_key, &provider.auth_header);
 
     // One group id per call so the renderer resolves the in-flight "busy" dot
     // (request sent) when the terminal stage lands. The label identifies which
@@ -585,7 +710,15 @@ mod tests {
             model: "m".to_string(),
             api_format: format,
             thinking: None,
+            auth_header: String::new(),
+            body_template: String::new(),
         }
+    }
+
+    fn custom_provider_with(template: &str) -> Provider {
+        let mut p = provider_with(ApiFormat::Custom);
+        p.body_template = template.to_string();
+        p
     }
 
     fn provider_with_thinking(format: ApiFormat, thinking: ThinkingEffort) -> Provider {
@@ -617,7 +750,7 @@ mod tests {
                 image: None,
             },
         ];
-        let body = build_completion_body(&provider_with(ApiFormat::OpenAi), &turns);
+        let body = build_completion_body(&provider_with(ApiFormat::OpenAi), &turns).unwrap();
         let messages = body.get("messages").and_then(Value::as_array).unwrap();
         assert_eq!(messages.len(), 3);
         // Turn 1: user with a parts array (text + image_url).
@@ -654,7 +787,7 @@ mod tests {
                 image: None,
             },
         ];
-        let body = build_completion_body(&provider_with(ApiFormat::Gemini), &turns);
+        let body = build_completion_body(&provider_with(ApiFormat::Gemini), &turns).unwrap();
         let input = body.get("input").and_then(Value::as_array).unwrap();
         // text, image, text — image is its own step.
         assert_eq!(input.len(), 3);
@@ -665,26 +798,28 @@ mod tests {
 
     #[test]
     fn openai_body_adds_reasoning_effort_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::OpenAi), &[]);
+        let off = build_completion_body(&provider_with(ApiFormat::OpenAi), &[]).unwrap();
         assert!(off.get("reasoning_effort").is_none());
 
         let on = build_completion_body(
             &provider_with_thinking(ApiFormat::OpenAi, ThinkingEffort::High),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(on["reasoning_effort"], "high");
     }
 
     #[test]
     fn anthropic_body_adds_thinking_budget_below_max_tokens_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::Anthropic), &[]);
+        let off = build_completion_body(&provider_with(ApiFormat::Anthropic), &[]).unwrap();
         assert_eq!(off["max_tokens"], 4096);
         assert!(off.get("thinking").is_none());
 
         let on = build_completion_body(
             &provider_with_thinking(ApiFormat::Anthropic, ThinkingEffort::Medium),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(on["thinking"]["type"], "enabled");
         let max_tokens = on["max_tokens"].as_u64().unwrap();
         assert_eq!(max_tokens, 32000);
@@ -694,13 +829,14 @@ mod tests {
 
     #[test]
     fn gemini_body_adds_thinking_level_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::Gemini), &[]);
+        let off = build_completion_body(&provider_with(ApiFormat::Gemini), &[]).unwrap();
         assert!(off["generation_config"].get("thinking_level").is_none());
 
         let on = build_completion_body(
             &provider_with_thinking(ApiFormat::Gemini, ThinkingEffort::Low),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(on["generation_config"]["thinking_level"], "low");
     }
 
@@ -767,5 +903,180 @@ mod tests {
             parse_completion_content(ApiFormat::Anthropic, &complete).unwrap(),
             "the answer"
         );
+    }
+
+    #[test]
+    fn custom_endpoints_post_to_the_base_verbatim() {
+        let (completions, models) = ApiFormat::Custom.endpoints("https://api.test/platform/svc");
+        assert_eq!(completions, "https://api.test/platform/svc");
+        assert_eq!(models, "");
+    }
+
+    #[test]
+    fn custom_auth_defaults_to_bearer_and_switches_on_a_typed_header() {
+        assert_eq!(
+            ApiFormat::Custom.auth("k", ""),
+            vec![("Authorization".to_string(), "Bearer k".to_string())]
+        );
+        assert_eq!(
+            ApiFormat::Custom.auth("k", "x-api-key"),
+            vec![("x-api-key".to_string(), "k".to_string())]
+        );
+        // Whitespace around the typed header name doesn't change the wire.
+        assert_eq!(
+            ApiFormat::Custom.auth("k", " x-api-key "),
+            vec![("x-api-key".to_string(), "k".to_string())]
+        );
+    }
+
+    #[test]
+    fn custom_body_substitutes_turns_into_the_message_template() {
+        let turns = vec![
+            Turn {
+                role: TurnRole::User,
+                text: "analyse this".to_string(),
+                image: None,
+            },
+            Turn {
+                role: TurnRole::Assistant,
+                text: "a description".to_string(),
+                image: None,
+            },
+            Turn {
+                role: TurnRole::User,
+                text: "catalogue it".to_string(),
+                image: None,
+            },
+        ];
+        // The reference template: flattened turns land in `input`.
+        let body =
+            build_completion_body(&custom_provider_with(r#"{"input": "{{input}}"}"#), &turns)
+                .unwrap();
+        assert_eq!(
+            body,
+            json!({ "input": "analyse this\n\na description\n\ncatalogue it" })
+        );
+
+        // A dialect template keeps its other fields and substitutes in place.
+        let body = build_completion_body(
+            &custom_provider_with(
+                r#"{"messages": [{ "role": "user", "content": "{{input}}" }], "temperature": 0.2}"#,
+            ),
+            &turns,
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            "analyse this\n\na description\n\ncatalogue it"
+        );
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn custom_body_substitutes_every_token_occurrence_including_nested() {
+        let body = build_completion_body(
+            &custom_provider_with(r#"{"a": {"b": "x {{input}} y"}, "arr": ["{{input}}", 1]}"#),
+            &[Turn {
+                role: TurnRole::User,
+                text: "prompt".to_string(),
+                image: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(body["a"]["b"], "x prompt y");
+        assert_eq!(body["arr"][0], "prompt");
+        assert_eq!(body["arr"][1], 1);
+    }
+
+    #[test]
+    fn custom_body_errors_name_the_exact_template_defect() {
+        let empty = build_completion_body(&custom_provider_with("  "), &[]).unwrap_err();
+        assert!(empty.contains("no message format"), "{empty}");
+
+        let invalid = build_completion_body(&custom_provider_with("{not json"), &[]).unwrap_err();
+        assert!(invalid.contains("valid JSON"), "{invalid}");
+
+        let no_token =
+            build_completion_body(&custom_provider_with(r#"{"q": "hello"}"#), &[]).unwrap_err();
+        assert!(no_token.contains("{{input}}"), "{no_token}");
+    }
+
+    #[test]
+    fn custom_body_rejects_image_turns_instead_of_dropping_the_image() {
+        let img = ImageData {
+            bytes: vec![1],
+            mime: "image/png".to_string(),
+        };
+        let turns = vec![Turn {
+            role: TurnRole::User,
+            text: "describe".to_string(),
+            image: Some(img),
+        }];
+        let err = build_completion_body(&provider_with(ApiFormat::Custom), &turns).unwrap_err();
+        assert!(err.contains("image"), "{err}");
+    }
+
+    #[test]
+    fn custom_parse_reads_the_output_field() {
+        let v = json!({ "output": "<extraction field=\"Material\">bronze</extraction>" });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Custom, &v).unwrap(),
+            "<extraction field=\"Material\">bronze</extraction>"
+        );
+    }
+
+    #[test]
+    fn custom_parse_error_names_observed_top_level_keys() {
+        // The response shape is not live-validated; the error must show what
+        // actually came back so the real contract is visible in the row error.
+        let v = json!({ "result": 1, "text": "x" });
+        let err = parse_completion_content(ApiFormat::Custom, &v).unwrap_err();
+        assert!(err.contains("result, text"), "{err}");
+    }
+
+    #[test]
+    fn custom_parse_auto_detects_the_template_s_response_dialect() {
+        // A gateway addressed through the OpenAI baseline answers openai-shaped.
+        let openai = json!({
+            "choices": [{ "message": { "content": "openai answer" } }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Custom, &openai).unwrap(),
+            "openai answer"
+        );
+        // Anthropic baseline: typed content blocks.
+        let anthropic = json!({
+            "content": [{ "type": "text", "text": "anthropic answer" }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Custom, &anthropic).unwrap(),
+            "anthropic answer"
+        );
+        // Gemini baseline: steps entries.
+        let gemini = json!({
+            "steps": [{ "content": [{ "type": "text", "text": "gemini answer" }] }]
+        });
+        assert_eq!(
+            parse_completion_content(ApiFormat::Custom, &gemini).unwrap(),
+            "gemini answer"
+        );
+    }
+
+    #[test]
+    fn custom_parse_surfaces_truncation_over_shape_fallthrough() {
+        // A max-tokens stop must not fall through the dialect chain into the
+        // generic "unrecognized" error.
+        let openai = json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "partial" } }]
+        });
+        let err = parse_completion_content(ApiFormat::Custom, &openai).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+
+        let anthropic = json!({
+            "stop_reason": "max_tokens",
+            "content": [{ "type": "text", "text": "partial" }]
+        });
+        let err = parse_completion_content(ApiFormat::Custom, &anthropic).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
     }
 }

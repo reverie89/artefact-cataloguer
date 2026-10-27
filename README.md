@@ -84,6 +84,7 @@ AI providers are configured **inside the app** under
    - `openai` (the default; any OpenAI-compatible `/chat/completions` endpoint)
    - `anthropic` (the native Anthropic API — `x-api-key` auth, `/v1/messages`)
    - `gemini` (the Google Gemini API — Interactions API: `/v1beta/interactions` + `/v1beta/models`)
+   - `custom` (the base URL is the full request URL, sent as-is — `Authorization: Bearer` or a user-typed auth header carrying the API key, and a user-typed JSON message body loaded from the Reference/OpenAI/Anthropic/Gemini baselines with `{{input}}` marking the prompt text; the reply is auto-detected in whichever dialect the body speaks; no model listing or model field, and no connection test)
 
    This drives both the auth scheme and the endpoint paths.
 4. Mark one provider as **active** to route catalogue-field requests through it.
@@ -193,7 +194,7 @@ src-tauri/src/
 
 - **XLSX parsing & export** uses ExcelJS in the frontend for both reading cell data (real column validation against configured required columns) and writing the exported workbook; image extraction is separate (see below).
 - **Image extraction** unpacks the `.xlsx` zip (`fflate`), maps `xl/drawings` anchors → `xl/media` files → data rows, then hands bytes to Rust to write beside the binary and serve via the asset protocol.
-- **AI calls** run in Rust (`reqwest`, `rustls-tls`) against the configured provider's API (`openai`, `anthropic`, or `gemini`).
+- **AI calls** run in Rust (`reqwest`, `rustls-tls`) against the configured provider's API (`openai`, `anthropic`, `gemini`, or `custom`).
 
 ---
 
@@ -239,7 +240,7 @@ flowchart LR
     subgraph EXT["External systems"]
         direction TB
         KEYCHAIN["OS keychain<br/>chat::* · embedding::*"]
-        VISION["Chat / Vision provider<br/>openai · anthropic · gemini"]
+        VISION["Chat / Vision provider<br/>openai · anthropic · gemini · custom"]
         EMBV["Embedding provider (multimodal)<br/>openai · gemini"]
     end
 

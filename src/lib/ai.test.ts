@@ -5,6 +5,7 @@ import {
   embeddingModelOptions,
   findUnsyncedVocabField,
   findVocabFieldWithoutEmbedding,
+  providerEndpoints,
   recordForAI,
   selectedModelLacksImageInput,
 } from "./ai";
@@ -241,5 +242,19 @@ describe("downgradeKeylessConnOk", () => {
     const emb = { id: "e", name: "", baseUrl: "https://example.test/v1", apiKey: "", model: "m", imageInputModels: null, connStatus: "ok" } as const;
     const out = downgradeKeylessConnOk([emb]);
     expect(out[0].connStatus).toBe("err");
+  });
+});
+
+describe("providerEndpoints", () => {
+  it("uses chat/completions by default and per-family versioned paths otherwise", () => {
+    expect(providerEndpoints({ baseUrl: "https://api.test/v1", apiFormat: undefined }).completions).toBe("https://api.test/v1/chat/completions");
+    expect(providerEndpoints({ baseUrl: "https://api.test", apiFormat: "anthropic" }).completions).toBe("https://api.test/v1/messages");
+    expect(providerEndpoints({ baseUrl: "https://api.test", apiFormat: "gemini" }).completions).toBe("https://api.test/v1beta/interactions");
+  });
+
+  it("posts to the custom family's base URL verbatim", () => {
+    expect(
+      providerEndpoints({ baseUrl: "https://api-public.ai.tech.gov.sg/platform/gpt-6-luna/", apiFormat: "custom" }).completions,
+    ).toBe("https://api-public.ai.tech.gov.sg/platform/gpt-6-luna");
   });
 });

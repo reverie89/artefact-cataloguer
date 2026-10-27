@@ -22,6 +22,10 @@ interface RustProvider {
   apiFormat: string;
   /** `null` = off: Rust sends no thinking fields. */
   thinking: ThinkingEffort | null;
+  /** Custom format only: header name carrying the API key; empty = Bearer. */
+  authHeader: string;
+  /** Custom format only: the JSON request body with an {{input}} token. */
+  bodyTemplate: string;
 }
 
 function toRustProvider(provider: Provider): RustProvider {
@@ -32,6 +36,8 @@ function toRustProvider(provider: Provider): RustProvider {
     model: provider.model,
     apiFormat: provider.apiFormat ?? "openai",
     thinking: provider.thinking ?? null,
+    authHeader: provider.authHeader ?? "",
+    bodyTemplate: provider.bodyTemplate ?? "",
   };
 }
 
@@ -201,20 +207,23 @@ export function findVocabFieldWithoutEmbedding(settings: Settings): { fieldName:
 }
 
 /**
- * Derive the live HTTP endpoints a provider's calls actually hit. Single source
- * of truth shared by the call path (catalogueArtefact/testConnection) and the UI
- * so the displayed endpoint can never drift from what Rust posts to. Endpoint
- * paths depend on the provider's API family.
+ * Derive the live completions URL a provider's calls actually hit. Single
+ * source of truth shared with the UI so the displayed endpoint can never
+ * drift from what Rust posts to (Rust's `ApiFormat::endpoints` is the call-path
+ * authority; this mirrors it). The custom family posts to the base URL
+ * verbatim — the user types the full request URL.
  */
-export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiFormat">): { completions: string; models: string } {
+export function providerEndpoints(provider: Pick<Provider, "baseUrl" | "apiFormat">): { completions: string } {
   const base = provider.baseUrl.replace(/\/$/, "");
   switch (provider.apiFormat ?? "openai") {
     case "anthropic":
-      return { completions: `${base}/v1/messages`, models: `${base}/v1/models` };
+      return { completions: `${base}/v1/messages` };
     case "gemini":
-      return { completions: `${base}/v1beta/interactions`, models: `${base}/v1beta/models` };
+      return { completions: `${base}/v1beta/interactions` };
+    case "custom":
+      return { completions: base };
     default:
-      return { completions: `${base}/chat/completions`, models: `${base}/models` };
+      return { completions: `${base}/chat/completions` };
   }
 }
 

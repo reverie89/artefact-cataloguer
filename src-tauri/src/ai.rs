@@ -1240,14 +1240,24 @@ pub fn build_artefact_analysis_prompt_preview(
 
 /// Ping the provider to validate the URL + key. Hits the format-appropriate
 /// `/models` endpoint (cheap GET) and returns the advertised model ids so the
-/// UI can populate its model dropdown.
+/// UI can populate its model dropdown. Custom formats are refused up front:
+/// their gateways have no listing (the model is user-typed), and the UI never
+/// offers the test for them.
 #[tauri::command]
 pub async fn test_connection(provider: Provider) -> Result<ConnectionTest, String> {
+    if provider.api_format == ApiFormat::Custom {
+        return Err(
+            "custom providers have no model listing — the base URL is the full request URL"
+                .to_string(),
+        );
+    }
     let base = trim_trailing_slash(&provider.base_url);
     let (_completions, models_url) = provider.api_format.endpoints(&base);
 
     let client = http_client(Duration::from_secs(20))?;
-    let auth = provider.api_format.auth(&provider.api_key);
+    let auth = provider
+        .api_format
+        .auth(&provider.api_key, &provider.auth_header);
     let models = fetch_advertised_models(
         &client,
         &models_url,

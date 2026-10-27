@@ -2,8 +2,11 @@
 
 export type FieldType = "open" | "vocab";
 
-/** Which API family a provider speaks — drives auth scheme and endpoint paths. */
-export type ApiFormat = "openai" | "anthropic" | "gemini";
+/** Which API family a provider speaks — drives auth scheme and endpoint paths.
+ *  "custom" posts to the base URL verbatim (the user types the full request
+ *  URL; no path is appended) with `x-api-key` auth and a single flat `input`
+ *  text field — no model listing and no model field. */
+export type ApiFormat = "openai" | "anthropic" | "gemini" | "custom";
 
 /** How hard a thinking-capable model should reason before answering. Each API
  *  family maps this onto its native effort knob; see `build_completion_body`. */
@@ -134,6 +137,12 @@ export interface Provider {
    *  providers saved before this field existed default to "untested" on load.
    *  The "testing" state is inherently transient and never persisted. */
   connStatus?: "ok" | "err" | "untested";
+  /** Custom format only: header name carrying the API key. Empty/absent =
+   *  `Authorization: Bearer <key>`. */
+  authHeader?: string;
+  /** Custom format only: the user-typed JSON request body; `{{input}}` is
+   *  replaced with the prompt text. Other formats build their bodies natively. */
+  bodyTemplate?: string;
 }
 
 /** Which API family an embedding provider speaks. Anthropic has no

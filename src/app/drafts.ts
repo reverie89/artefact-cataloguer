@@ -91,9 +91,10 @@ export function isTabDirty(state: AppState, tab: SettingsTab): boolean {
         settings.providers.map((p) => ({
           id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model,
           apiFormat: (p.apiFormat ?? "openai"), thinking: p.thinking ?? null,
+          authHeader: p.authHeader ?? "", bodyTemplate: p.bodyTemplate ?? "",
         })),
         "id",
-        ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking"],
+        ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking", "authHeader", "bodyTemplate"],
       ) || d.activeProvider !== settings.activeProvider);
       const ed = state.embProviderDraft;
       const embDirty = !!ed && (differById(

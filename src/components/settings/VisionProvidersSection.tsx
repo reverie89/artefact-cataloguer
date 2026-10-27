@@ -3,11 +3,12 @@ import { Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
+import { CUSTOM_MESSAGE_TEMPLATES } from "../../app/defaults";
 import type { SaveState } from "./SaveActions.types";
 import type { ApiFormat, Provider, ThinkingEffort } from "../../app/types";
 import { providerEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
-import { Field, FieldSelect, FieldSelectOption, Segmented } from "./FormControls";
+import { Field, FieldSelect, FieldSelectOption, FieldTextarea, Segmented } from "./FormControls";
 import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
 import { UnsavedBadge } from "./UnsavedBadge";
 import { SortableList } from "./SortableList";
@@ -33,6 +34,14 @@ const THINKING_OPTIONS: { value: "off" | ThinkingEffort; label: string }[] = [
   { value: "high", label: "High" },
 ];
 
+/** The custom format's Auth Header Segmented options. "Bearer" maps to "" (the
+ *  standard `Authorization: Bearer` header); "Custom" reveals a header-name
+ *  input seeded with the reference `x-api-key`. */
+const AUTH_HEADER_OPTIONS: { value: "bearer" | "custom"; label: string }[] = [
+  { value: "bearer", label: "Bearer" },
+  { value: "custom", label: "Custom" },
+];
+
 /** True when a single draft entry differs from its persisted provider — drives
  *  the per-row "unsaved" badge. Per-row twin of isTabDirty in drafts.ts. Only
  *  user-authored fields are compared: `modelOptions`/`connStatus` are
@@ -50,8 +59,10 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
       modelOptions: p.modelOptions ?? [],
       connStatus: p.connStatus ?? "untested",
       thinking: p.thinking ?? null,
+      authHeader: p.authHeader ?? "",
+      bodyTemplate: p.bodyTemplate ?? "",
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking", "authHeader", "bodyTemplate"],
   );
 }
 
@@ -166,6 +177,11 @@ interface RowProps {
 }
 
 function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirty, cardStatus, cardError, expanded, cardRef, actions }: RowProps) {
+  // Custom gateways have no model concept and no connection test: the base
+  // URL is the full request URL, the Status column shows nothing, and the
+  // Test Connection button + Thinking control (no effort parameter in the
+  // contract) are hidden.
+  const isCustom = entry.apiFormat === "custom";
   // The model dropdown is only meaningful after a successful connection, which
   // is what populates `modelOptions`. Before that, show a muted hint so the user
   // understands the dependency.
@@ -203,8 +219,12 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
         <>
           {/* Model */}
           <span className="text-muted-foreground truncate text-sm">{entry.model || "—"}</span>
-          {/* Status */}
-          <StatusBadge status={testStatus} error={testError} />
+          {/* Status: custom providers have no connection test to report. */}
+          {isCustom ? (
+            <span className="text-muted-foreground text-sm">—</span>
+          ) : (
+            <StatusBadge status={testStatus} error={testError} />
+          )}
           {/* Active: kept interactive via stopPropagation so the row doesn't toggle.
               "Set Active" persists immediately to disk (no per-card Save needed). */}
           <div onClick={(e) => e.stopPropagation()}>
@@ -221,12 +241,18 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
         <div className="bg-muted/30 flex flex-col gap-2.5 border-t px-3.5 pt-2.5 pb-3.5 animate-in fade-in slide-in-from-top-1 duration-100">
           <Field
             label="Base URL"
-            desc="The API root URL for this provider, without a trailing path."
+            desc={isCustom
+              ? "The full request URL for this provider, sent as-is (trailing slash trimmed) — any gateway path works."
+              : "The API root URL for this provider, without a trailing path."}
             hint={entry.baseUrl.trim() ? (
               <>POST <code className="text-foreground">{providerEndpoints(entry).completions}</code></>
             ) : undefined}
           >
-            <Input value={entry.baseUrl} onChange={(e) => actions.setProvF(id, "baseUrl", e)} placeholder="https://api.openai.com/v1" />
+            <Input
+              value={entry.baseUrl}
+              onChange={(e) => actions.setProvF(id, "baseUrl", e)}
+              placeholder={isCustom ? "https://gateway.example" : "https://api.openai.com/v1"}
+            />
           </Field>
 
           <FieldSelect
@@ -238,7 +264,32 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
             <FieldSelectOption value="openai">OpenAI</FieldSelectOption>
             <FieldSelectOption value="anthropic">Anthropic</FieldSelectOption>
             <FieldSelectOption value="gemini">Gemini</FieldSelectOption>
+            <FieldSelectOption value="custom">Custom</FieldSelectOption>
           </FieldSelect>
+
+          {isCustom && (
+            <Field
+              label="Auth Header"
+              desc={entry.authHeader
+                ? `Sent as "${entry.authHeader}: <API key>".`
+                : 'Sent as "Authorization: Bearer <API key>".'}
+            >
+              <Segmented
+                options={AUTH_HEADER_OPTIONS}
+                value={entry.authHeader ? "custom" : "bearer"}
+                onChange={(v) => actions.setProvAuthHeader(id, v === "custom" ? (entry.authHeader || "x-api-key") : "")}
+              />
+              {entry.authHeader ? (
+                <Input
+                  value={entry.authHeader}
+                  onChange={(e) => actions.setProvAuthHeader(id, e.target.value)}
+                  placeholder="x-api-key"
+                  aria-label="Auth header name"
+                  className="mt-1.5"
+                />
+              ) : null}
+            </Field>
+          )}
 
           <Field label="API Key" desc="Sent with each request to authenticate — stored locally, never shared.">
             <div className="flex gap-1.5">
@@ -255,41 +306,72 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
             </div>
           </Field>
 
-          <div className="flex items-center justify-start gap-2.5">
-            <Button onClick={() => void actions.testConn(id)} variant="secondary" size="sm">
-              {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
-              <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
-            </Button>
-            <ConnectionStatus status={testStatus} error={testError} />
-          </div>
+          {isCustom && (
+            <>
+              <FieldSelect
+                label="Load template"
+                value=""
+                onChange={(v) => actions.setProvBodyTemplate(id, v)}
+                ariaLabel="Load template"
+                placeholder="Load a template…"
+                desc="Replaces the body below with a working baseline to modify."
+              >
+                {CUSTOM_MESSAGE_TEMPLATES.map((t) => (
+                  <FieldSelectOption key={t.label} value={t.body}>{t.label}</FieldSelectOption>
+                ))}
+              </FieldSelect>
+              <FieldTextarea
+                label="Message (JSON)"
+                value={entry.bodyTemplate}
+                onChange={(e) => actions.setProvBodyTemplate(id, e.target.value)}
+                placeholder={'{"input": "{{input}}"}'}
+                rows={3}
+                desc="The JSON body sent to the gateway — {{input}} becomes the prompt text."
+              />
+            </>
+          )}
 
-          <FieldSelect
-            label="Model"
-            value={entry.model}
-            onChange={(v) => actions.setProvModel(id, v)}
-            disabled={!modelsReady}
-            ariaLabel="Model"
-            desc="The model used for cataloguing requests, populated by Test Connection."
-            placeholder={modelsReady ? (entry.model ? undefined : "Select a model…") : "Available after Test Connection"}
-          >
-            {modelOptions.map((m) => (
-              <FieldSelectOption key={m} value={m}>{m}</FieldSelectOption>
-            ))}
-          </FieldSelect>
+          {!isCustom && (
+            <div className="flex items-center justify-start gap-2.5">
+              <Button onClick={() => void actions.testConn(id)} variant="secondary" size="sm">
+                {testStatus === "testing" ? <Loader2 className="size-3 animate-spin" /> : <Wifi className="size-3" />}
+                <span>{testStatus === "testing" ? "Testing…" : "Test Connection"}</span>
+              </Button>
+              <ConnectionStatus status={testStatus} error={testError} />
+            </div>
+          )}
 
-          <Field
-            label="Thinking"
-            desc="Ask reasoning-capable models to think before answering. Off sends nothing — the provider's default applies, and some models (e.g. GLM-5.3) always think."
-          >
-            <Segmented
-              options={THINKING_OPTIONS}
-              value={entry.thinking ?? "off"}
-              onChange={(v) => {
-                const picked = THINKING_OPTIONS.find((o) => o.value === v)?.value;
-                actions.setProvThinking(id, !picked || picked === "off" ? null : picked);
-              }}
-            />
-          </Field>
+          {!isCustom && (
+            <FieldSelect
+              label="Model"
+              value={entry.model}
+              onChange={(v) => actions.setProvModel(id, v)}
+              disabled={!modelsReady}
+              ariaLabel="Model"
+              desc="The model used for cataloguing requests, populated by Test Connection."
+              placeholder={modelsReady ? (entry.model ? undefined : "Select a model…") : "Available after Test Connection"}
+            >
+              {modelOptions.map((m) => (
+                <FieldSelectOption key={m} value={m}>{m}</FieldSelectOption>
+              ))}
+            </FieldSelect>
+          )}
+
+          {!isCustom && (
+            <Field
+              label="Thinking"
+              desc="Ask reasoning-capable models to think before answering. Off sends nothing — the provider's default applies, and some models (e.g. GLM-5.3) always think."
+            >
+              <Segmented
+                options={THINKING_OPTIONS}
+                value={entry.thinking ?? "off"}
+                onChange={(v) => {
+                  const picked = THINKING_OPTIONS.find((o) => o.value === v)?.value;
+                  actions.setProvThinking(id, !picked || picked === "off" ? null : picked);
+                }}
+              />
+            </Field>
+          )}
 
           {/* Per-row actions: Delete/Discard/Save target only this provider.
               Delete persists immediately (after its confirm); Discard/Save

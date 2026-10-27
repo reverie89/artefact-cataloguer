@@ -29,6 +29,10 @@ export type ProviderDraftEntry = {
    *  thinking fields); made concrete here so the Segmented control always has a
    *  value, mirroring how apiFormat/connStatus are defaulted. */
   thinking: ThinkingEffort | null;
+  /** Custom format only: header name carrying the API key; "" = Bearer. */
+  authHeader: string;
+  /** Custom format only: the JSON request body with an {{input}} token. */
+  bodyTemplate: string;
 };
 
 /** In-memory draft of the editable parts of the Cataloguing Fields tab. Unlike
@@ -903,6 +907,8 @@ export function providerDraftFromSettings(s: Settings): ProviderDraft {
       modelOptions: [...(p.modelOptions ?? [])],
       connStatus: p.connStatus ?? "untested",
       thinking: p.thinking ?? null,
+      authHeader: p.authHeader ?? "",
+      bodyTemplate: p.bodyTemplate ?? "",
     })),
   };
 }

@@ -339,10 +339,13 @@ pub(crate) async fn check_connection(
             embeddings_root(&base).map(|root| format!("{root}/models")),
         )
     };
-    let auth: Vec<(&'static str, String)> = if gemini {
-        vec![("x-goog-api-key", provider.api_key.clone())]
+    let auth: Vec<(String, String)> = if gemini {
+        vec![("x-goog-api-key".to_string(), provider.api_key.clone())]
     } else {
-        vec![("Authorization", format!("Bearer {}", provider.api_key))]
+        vec![(
+            "Authorization".to_string(),
+            format!("Bearer {}", provider.api_key),
+        )]
     };
     let mut models = Vec::new();
     let mut image_input: Option<Vec<String>> = None;

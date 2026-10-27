@@ -23,6 +23,19 @@ pub enum ApiFormat {
     /// (`/v1beta/interactions`, `/v1beta/models`).
     #[serde(rename = "gemini")]
     Gemini,
+    /// Custom gateways the user addresses by their full request URL — the
+    /// provider's base URL is POSTed to verbatim (no path appended). Auth is
+    /// `Authorization: Bearer <key>` or a user-typed header name carrying the
+    /// key (`auth_header`); the request body is the user-typed JSON message
+    /// template (`body_template`) with `{{input}}` replaced by the prompt
+    /// text. No model concept exists on the wire (no listing, no model
+    /// field), so `endpoints` carries no models URL and `Provider.model`
+    /// stays unused. The reply is auto-detected in whichever dialect the
+    /// template speaks (flat `output`, OpenAI, Anthropic, or Gemini shapes);
+    /// image input is not part of any template, so image turns are rejected
+    /// rather than silently dropped.
+    #[serde(rename = "custom")]
+    Custom,
 }
 
 /// How hard a thinking-capable model should reason before answering. Each API
@@ -41,19 +54,31 @@ pub enum ThinkingEffort {
 
 impl ApiFormat {
     /// Header(s) to attach for this key + format. OpenAI uses one; Anthropic
-    /// additionally pins the API version.
-    pub(crate) fn auth(&self, api_key: &str) -> Vec<(&'static str, String)> {
+    /// additionally pins the API version. Custom resolves its auth choice:
+    /// an empty `custom_header` sends Bearer, otherwise the named header
+    /// carries the key (e.g. `x-api-key`).
+    pub(crate) fn auth(&self, api_key: &str, custom_header: &str) -> Vec<(String, String)> {
         match self {
-            ApiFormat::OpenAi => vec![("Authorization", format!("Bearer {}", api_key))],
+            ApiFormat::OpenAi => vec![("Authorization".to_string(), format!("Bearer {}", api_key))],
             ApiFormat::Anthropic => vec![
-                ("x-api-key", api_key.to_string()),
-                ("anthropic-version", "2023-06-01".to_string()),
+                ("x-api-key".to_string(), api_key.to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
             ],
-            ApiFormat::Gemini => vec![("x-goog-api-key", api_key.to_string())],
+            ApiFormat::Gemini => vec![("x-goog-api-key".to_string(), api_key.to_string())],
+            ApiFormat::Custom => {
+                let header = custom_header.trim();
+                if header.is_empty() {
+                    vec![("Authorization".to_string(), format!("Bearer {}", api_key))]
+                } else {
+                    vec![(header.to_string(), api_key.to_string())]
+                }
+            }
         }
     }
 
     /// (completions URL, models URL) for this format against a trimmed base.
+    /// The models URL is empty for custom — those gateways have no listing,
+    /// and `test_connection` refuses them before ever reading it.
     pub(crate) fn endpoints(&self, base: &str) -> (String, String) {
         match self {
             ApiFormat::OpenAi => (
@@ -70,6 +95,7 @@ impl ApiFormat {
                 format!("{}/v1beta/interactions", base),
                 format!("{}/v1beta/models", base),
             ),
+            ApiFormat::Custom => (base.to_string(), String::new()),
         }
     }
 }
@@ -92,6 +118,15 @@ pub struct Provider {
     /// saved before this field existed) sends no thinking fields.
     #[serde(rename = "thinking", default)]
     pub thinking: Option<ThinkingEffort>,
+    /// Custom format only: header name carrying the API key. Empty (and every
+    /// other format) = `Authorization: Bearer <key>`.
+    #[serde(rename = "authHeader", default)]
+    pub auth_header: String,
+    /// Custom format only: the user-typed JSON request body; `{{input}}` is
+    /// replaced with the flattened prompt text (see `build_custom_body`).
+    /// Empty for other formats, which build their bodies natively.
+    #[serde(rename = "bodyTemplate", default)]
+    pub body_template: String,
 }
 
 /// One catalogue field the AI must populate. For open-ended fields, the model
