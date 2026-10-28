@@ -1,15 +1,15 @@
 //! Live, `#[ignore]`d end-to-end probe for the catalogue pipeline — run by
 //! hand, never in CI. It executes the real `catalogue_artefact` command on a
 //! mock app against the debug build's on-disk config: real chat/embedding
-//! providers, real OS keychain, real LanceDB tables. Output: every `ac-logs`
-//! stage event (prompt bodies with the production image redaction, raw model
-//! responses), then a digest — the judge's parsed components, the scored
-//! per-component candidate nets, and the final result.
+//! providers, the real `.env` secrets file, real LanceDB tables. Output:
+//! every `ac-logs` stage event (prompt bodies with the production image
+//! redaction, raw model responses), then a digest — the judge's parsed
+//! components, the scored per-component candidate nets, and the final result.
 //!
 //! The on-disk settings are never written: the partition judge's preconditions
 //! (`validationEnabled`, the Colour field's `maxComponents`) are flipped in the
-//! in-memory copy only. API keys are rehydrated from the keychain through the
-//! app's own `secrets` path and are never printed.
+//! in-memory copy only. API keys are rehydrated through the app's own
+//! `secrets` path and are never printed.
 //!
 //! Usage (the settings live beside the debug binary; the image path is yours):
 //!
@@ -29,16 +29,28 @@ use crate::settings::StateBundle;
 /// The debug build's live config — read read-only.
 const DEBUG_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/debug/settings.json");
 
+/// Point the app's secret store at the debug build's directory. The test
+/// binary runs from `target/debug/deps`, one level below the settings file
+/// the probe reads, so the default exe-dir path would miss its `.env`.
+fn install_debug_secret_store() {
+    let dir = std::path::Path::new(DEBUG_SETTINGS)
+        .parent()
+        .expect("DEBUG_SETTINGS has a parent dir");
+    crate::secrets::set_store_for_tests(Some(crate::secrets::store_for_dir(dir)));
+}
+
 /// The vocab field the probe turns multi-component so the partition judge
 /// fires. Headroom above the "at least 3 colours" expectation: the judge is
 /// quota-free and the post-validation cut keeps the best picks.
 const PROBE_MULTI_FIELD: &str = "Colour";
 const PROBE_MULTI_FIELD_CAP: u32 = 5;
 
-/// Load the debug settings read-only and rehydrate keys from the OS keychain.
-/// Prompt normalization is skipped: the live file carries no double-escaped
-/// prompt strings, so it would be a no-op.
+/// Load the debug settings read-only and rehydrate keys from the debug
+/// build's `.env` (OS keychain as migration fallback). Prompt normalization
+/// is skipped: the live file carries no double-escaped prompt strings, so it
+/// would be a no-op.
 fn load_debug_settings() -> StateBundle {
+    install_debug_secret_store();
     let raw = std::fs::read_to_string(DEBUG_SETTINGS)
         .unwrap_or_else(|e| panic!("read {DEBUG_SETTINGS}: {e}"));
     let mut bundle: StateBundle =
@@ -67,9 +79,9 @@ fn assert_key(entry: &serde_json::Value, entry_id: &str) {
         .unwrap_or(false);
     assert!(
         present,
-        "no OS-keychain key for {entry_id} — re-enter the key in the app's Providers tab, then rerun"
+        "no stored key for {entry_id} — re-enter the key in the app's Providers tab, then rerun"
     );
-    println!("[probe] keychain key for {entry_id}: present");
+    println!("[probe] key for {entry_id}: present");
 }
 
 /// Mirror `lib/ai.ts` `vocabSourceIdsForRetrieval` + `embeddingModelStale`:
@@ -167,12 +179,12 @@ fn drain(rx: &Receiver<serde_json::Value>) -> Vec<serde_json::Value> {
 /// Kernel-keyutils visibility report: walks every keyring this process can
 /// reach (session / user-session / user / persistent) and prints only the
 /// descriptions of `artefact-cataloguer` keys (never values), plus how many
-/// unrelated keys each ring holds. Diagnoses "no OS-keychain key" failures:
-/// the app's `linux-native` keyring backend stores keys in kernel memory —
-/// the owning session's ring plus a per-UID persistent ring — so a key
-/// entered in another login session (or on another machine) is invisible here.
+/// unrelated keys each ring holds. Diagnoses the legacy migration fallback:
+/// the app stores keys in the `.env` file now, so ring entries are pre-`.env`
+/// leftovers the fallback may still consult — a key entered in another login
+/// session (or on another machine) is invisible here.
 #[test]
-#[ignore = "diagnostic: reports visible keyutils keys; run with --ignored --nocapture"]
+#[ignore = "diagnostic: reports visible keyutils leftovers; run with --ignored --nocapture"]
 fn probe_keychain_visibility() {
     use linux_keyutils::{KeyRing, KeyRingIdentifier, LinkNode};
 
@@ -270,29 +282,40 @@ fn resolve_chat_provider(s: &serde_json::Value) -> serde_json::Value {
 /// One-shot installer for the live probe: reads `AC_PROBE_KEY` and stores it
 /// through the app's own secrets path for the resolved chat provider and the
 /// active embedding provider (both OpenRouter here, so one key covers both).
-/// Values are never printed. This is what un-blocks the probe after a keyring
-/// loss — settings carry no keys and the kernel keyutils rings don't migrate
-/// across machines.
+/// Values are never printed. This is what un-blocks the probe after a
+/// secrets loss — settings carry no keys and the `.env` file lives beside
+/// the debug binary.
 #[test]
-#[ignore = "one-shot: installs AC_PROBE_KEY into the OS keychain; run with --ignored --nocapture"]
+#[ignore = "one-shot: installs AC_PROBE_KEY into the debug build's .env; run with --ignored --nocapture"]
 fn probe_install_key() {
     let key = std::env::var("AC_PROBE_KEY").expect("set AC_PROBE_KEY");
     assert!(!key.is_empty(), "AC_PROBE_KEY empty");
     let bundle = load_debug_settings();
     let chat_json = resolve_chat_provider(&bundle.settings);
     let chat_id = chat_json["id"].as_str().expect("chat provider id");
+    let chat_name = chat_json["name"].as_str().unwrap_or_default();
     let emb_id = bundle.settings["activeEmbeddingProvider"]
         .as_str()
         .expect("activeEmbeddingProvider set");
-    crate::secrets::set_key(&crate::secrets::chat_entry_id(chat_id), &key)
-        .expect("keychain write (chat)");
-    crate::secrets::set_key(&crate::secrets::embedding_entry_id(emb_id), &key)
-        .expect("keychain write (embedding)");
+    let emb_name = entry_by_id(
+        bundle.settings["embeddingProviders"]
+            .as_array()
+            .expect("embeddingProviders array"),
+        emb_id,
+        "embedding provider",
+    )["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    crate::secrets::set_key_labeled(&crate::secrets::chat_entry_id(chat_id), &key, chat_name)
+        .expect("secret write (chat)");
+    crate::secrets::set_key_labeled(&crate::secrets::embedding_entry_id(emb_id), &key, &emb_name)
+        .expect("secret write (embedding)");
     println!("[probe] key installed for chat::{chat_id} and embedding::{emb_id}");
 }
 
 #[tokio::test]
-#[ignore = "live end-to-end probe: real providers + keychain; set AC_PROBE_IMAGE and run with --ignored --nocapture"]
+#[ignore = "live end-to-end probe: real providers + .env secrets; set AC_PROBE_IMAGE and run with --ignored --nocapture"]
 async fn live_pipeline_probe() {
     let bundle = load_debug_settings();
     let s = &bundle.settings;

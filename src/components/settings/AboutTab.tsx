@@ -47,7 +47,7 @@ export function AboutTab() {
           <CardContent className="flex flex-col gap-1.5 py-4">
             <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold"><Cpu className="size-3.5" /><span>AI Powered</span></div>
             <div className="text-muted-foreground text-[13px] leading-relaxed">
-              Connects to any OpenAI-compatible API. Requests are made from the app process on your machine; your API key is stored in the OS keychain (never in the settings file) and is never sent anywhere except your configured endpoint.
+              Connects to any OpenAI-compatible API. Requests are made from the app process on your machine; your API key is stored in a local .env file beside the settings file (never inside it) and is never sent anywhere except your configured endpoint.
             </div>
           </CardContent>
         </Card>
@@ -55,7 +55,7 @@ export function AboutTab() {
           <CardContent className="flex flex-col gap-1.5 py-4">
             <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold"><Shield className="size-3.5" /><span>Data Privacy</span></div>
             <div className="text-muted-foreground text-[13px] leading-relaxed">
-              All settings stay in a single file beside the app (keys excepted — those live in the OS keychain). Only the artefact data you actively submit is sent to your configured AI endpoint.
+              All settings stay in a single file beside the app (keys excepted — those live in the .env file beside it). Only the artefact data you actively submit is sent to your configured AI endpoint.
             </div>
           </CardContent>
         </Card>

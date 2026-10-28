@@ -31,6 +31,10 @@ src-tauri/gen
 # TypeScript
 *.tsbuildinfo
 
-# App-local runtime files: the app writes its settings.json next to the
-# running binary, so launching a dev build from the repo root lands it here.
+# App-local runtime files: the app writes its settings.json and secrets .env
+# next to the running binary, so launching a dev build from the repo root
+# lands them here. The .tmp is the atomic-write staging file, which could
+# survive a crash mid-save.
 /settings.json
+/.env
+/.env.tmp

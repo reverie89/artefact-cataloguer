@@ -55,7 +55,7 @@ explicitly targets them.
 | Spreadsheets| **exceljs + fflate** (frontend) · **calamine** (Rust) | Import/export stay in the museum's .xlsx layout                               |
 | Validation  | **zod**                                         | Untrusted JSON validated at runtime boundaries                                      |
 | Vector store| **LanceDB**                                     | Local `vocab_db`; embeddings for vocab matching                                     |
-| Secrets     | **keyring 3**                                   | OS keychain per platform (Linux = kernel keyutils)                                  |
+| Secrets     | **.env file**                                   | Beside settings.json; keyring 3 kept only to migrate pre-.env keys                  |
 | HTTP        | **reqwest** (rustls)                            | Rust-side only; provider egress is the app's only outbound path                     |
 | Tests       | **vitest + testing-library** / **cargo test**   | Colocated `*.test.ts(x)` beside their modules                                       |
 
@@ -194,10 +194,10 @@ primitives**, with the **indigo** base color and **no customization**.
 - Keep `src-tauri/capabilities/` permissions, filesystem scope, CSP, and
   secret handling as narrow as practical. Keep CSP enabled and restrictive
   unless a task proves a specific exception is needed.
-- Secrets live in the OS keychain, never in settings files or code. Never
-  commit API keys, tokens, personal data, local settings, or generated temp
-  images. Do not log raw API keys, authorization headers, image bytes, or full
-  user files.
+- Secrets live in the `.env` file beside settings.json — never in
+  settings.json, never in code, never committed. Never commit API keys,
+  tokens, personal data, local settings, or generated temp images. Do not log
+  raw API keys, authorization headers, image bytes, or full user files.
 
 ## Fix suggestions must be validated, not guessed
 

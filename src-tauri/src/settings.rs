@@ -4,6 +4,7 @@
 //! dark-mode flag, and the zoom level — is stored together in this one file
 //! under the keys the reference app used (`ac_settings`, `ac_darkMode`,
 //! `ac_zoom`). No `tauri-plugin-store`, no OS app-data dir, no localStorage.
+//! Provider API keys live in a sibling `.env` file — see `secrets`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,9 +66,9 @@ pub fn load_state() -> StateBundle {
         Ok(text) => match serde_json::from_str::<StateBundle>(&text) {
             Ok(mut b) => {
                 normalize_prompt_settings(&mut b.settings);
-                // Reattach API keys from the OS keychain (and migrate any
-                // plaintext keys still in the file on first load after the
-                // keychain rollout). Keys are never persisted in settings.json.
+                // Reattach API keys from the .env file beside the binary
+                // (migrating from the OS keychain or leftover plaintext on
+                // first load). Keys are never persisted in settings.json.
                 crate::secrets::rehydrate(&mut b.settings);
                 b
             }
