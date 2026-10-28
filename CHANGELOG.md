@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Dependencies: vitest restored to 4.1.12 via `npm audit fix`, clearing two moderate `@vitest/mocker` advisories. The moderate `uuid` advisory under exceljs is deliberately accepted — exceljs calls only no-argument `uuidv4()`, never the vulnerable v3/v5/v6-with-`buf` path, and the only npm-suggested fix is a breaking downgrade to exceljs 3.
+
+## [1.4.1] - 2026-10-29
+
+### Added
+
+- Custom provider format: address a gateway by its full request URL instead of a listed model — auth is Bearer or any user-typed header, and the body is a JSON or multipart message template seeded from Reference/OpenAI/Anthropic/Gemini baselines; {{input}} marks the prompt, {{image}}/{{mime}} carry the artefact image, and replies are auto-detected in whichever dialect the template speaks.
+
+### Changed
+
+- Dependencies: npm packages refreshed within their semver ranges — notably lucide-react 1.63, radix-ui 1.8, React 19.3.1 and the Tauri 2.12.4 API/CLI — plus transitive audit fixes (undici).
+- Provider API keys live in a .env file beside settings.json rather than the OS keychain, whose Linux backend is session-scoped and loses keys across reboots; legacy keychain entries migrate automatically on first read.
+
+### Fixed
+
+- Vocab results no longer record unpicked alternates or stale AI picks as answers: a re-run replaces only selections the pipeline seeded (hand-made picks stay), and a field whose validation matched nothing records nothing instead of every alternate showing as selected.
+
 ## [1.4.0] - 2026-10-11
 
 ### Added
@@ -124,3 +145,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.2.1]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.2.1
 [1.3.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.3.0
 [1.4.0]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.4.0
+[1.4.1]: https://github.com/reverie89/artefact-cataloguer/releases/tag/v1.4.1
