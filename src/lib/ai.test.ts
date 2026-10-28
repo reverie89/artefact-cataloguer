@@ -254,7 +254,7 @@ describe("providerEndpoints", () => {
 
   it("posts to the custom family's base URL verbatim", () => {
     expect(
-      providerEndpoints({ baseUrl: "https://api-public.ai.tech.gov.sg/platform/gpt-6-luna/", apiFormat: "custom" }).completions,
-    ).toBe("https://api-public.ai.tech.gov.sg/platform/gpt-6-luna");
+      providerEndpoints({ baseUrl: "https://vision.example.com/platform/gpt-6-luna/", apiFormat: "custom" }).completions,
+    ).toBe("https://vision.example.com/platform/gpt-6-luna");
   });
 });

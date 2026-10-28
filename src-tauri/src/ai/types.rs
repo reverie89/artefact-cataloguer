@@ -26,16 +26,54 @@ pub enum ApiFormat {
     /// Custom gateways the user addresses by their full request URL — the
     /// provider's base URL is POSTed to verbatim (no path appended). Auth is
     /// `Authorization: Bearer <key>` or a user-typed header name carrying the
-    /// key (`auth_header`); the request body is the user-typed JSON message
-    /// template (`body_template`) with `{{input}}` replaced by the prompt
-    /// text. No model concept exists on the wire (no listing, no model
-    /// field), so `endpoints` carries no models URL and `Provider.model`
-    /// stays unused. The reply is auto-detected in whichever dialect the
-    /// template speaks (flat `output`, OpenAI, Anthropic, or Gemini shapes);
-    /// image input is not part of any template, so image turns are rejected
-    /// rather than silently dropped.
+    /// key (`auth_header`). The body is user-authored (`body_kind`): a JSON
+    /// message template (`body_template`) whose tokens carry the prompt
+    /// (`{{input}}`) and, when the call has one, the image
+    /// (`{{image}}`/`{{mime}}`), or a `multipart/form-data` form
+    /// (`form_fields`, text + file rows). No model concept exists on the wire
+    /// (no listing, no model field), so `endpoints` carries no models URL and
+    /// `Provider.model` stays unused. The reply is auto-detected in whichever
+    /// dialect the template speaks (flat `output`, OpenAI, Anthropic, or
+    /// Gemini shapes); whatever the body mode, the image must have a
+    /// destination — a body that cannot carry it fails loudly rather than
+    /// sending a prompt without its image.
     #[serde(rename = "custom")]
     Custom,
+}
+
+/// Custom format only: what the request body is. `Json` (the default, and
+/// every provider saved before this field existed) POSTs the JSON message
+/// template; `Multipart` POSTs a `multipart/form-data` form.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CustomBodyKind {
+    #[serde(rename = "json")]
+    #[default]
+    Json,
+    #[serde(rename = "multipart")]
+    Multipart,
+}
+
+/// How one custom-multipart form row is sent: as a text field (its value may
+/// carry the tokens) or as a binary file part carrying the artefact image
+/// (`value` unused).
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FormFieldType {
+    #[serde(rename = "text")]
+    #[default]
+    Text,
+    #[serde(rename = "file")]
+    File,
+}
+
+/// One custom-multipart form-data row, mirroring the frontend `formFields`
+/// entries.
+#[derive(Deserialize, Clone)]
+pub struct FormField {
+    pub key: String,
+    #[serde(rename = "type", default)]
+    pub field_type: FormFieldType,
+    #[serde(default)]
+    pub value: String,
 }
 
 /// How hard a thinking-capable model should reason before answering. Each API
@@ -122,11 +160,20 @@ pub struct Provider {
     /// other format) = `Authorization: Bearer <key>`.
     #[serde(rename = "authHeader", default)]
     pub auth_header: String,
-    /// Custom format only: the user-typed JSON request body; `{{input}}` is
-    /// replaced with the flattened prompt text (see `build_custom_body`).
-    /// Empty for other formats, which build their bodies natively.
+    /// Custom format only: the user-typed JSON request body; the tokens
+    /// `{{input}}`/`{{image}}`/`{{mime}}` are replaced (see
+    /// `build_custom_body`). Empty for other formats, which build their
+    /// bodies natively.
     #[serde(rename = "bodyTemplate", default)]
     pub body_template: String,
+    /// Custom format only: whether the body is the JSON message template
+    /// (`Json`, the default and the pre-field behavior) or a multipart form
+    /// (`Multipart`).
+    #[serde(rename = "bodyKind", default)]
+    pub body_kind: CustomBodyKind,
+    /// Custom multipart only: the form-data rows (see `FormField`).
+    #[serde(rename = "formFields", default)]
+    pub form_fields: Vec<FormField>,
 }
 
 /// One catalogue field the AI must populate. For open-ended fields, the model

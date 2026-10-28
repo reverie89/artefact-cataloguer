@@ -27,7 +27,7 @@ afterEach(cleanup);
 
 function provider(overrides: Partial<Provider>): Provider {
   return {
-    id: "p1", name: "SG GovTech", baseUrl: "https://api-public.ai.tech.gov.sg/platform/gpt-6-luna", apiKey: "k",
+    id: "p1", name: "Vision Gateway", baseUrl: "https://vision.example.com/platform/gpt-6-luna", apiKey: "k",
     model: "", apiFormat: "custom", connStatus: "untested",
     ...overrides,
   };
@@ -66,5 +66,35 @@ describe("VisionProvidersSection custom API format", () => {
     expect(screen.getByText("Thinking")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("https://gateway.example")).not.toBeInTheDocument();
     expect(screen.queryByText("Load template")).not.toBeInTheDocument();
+  });
+
+  it("offers the body-mode choice on every custom card", () => {
+    renderWith(provider({}));
+
+    expect(screen.getByText("Body")).toBeInTheDocument();
+    expect(screen.getByText("Form (multipart)")).toBeInTheDocument();
+  });
+
+  it("shows the form-field editor in multipart mode instead of the JSON template", () => {
+    renderWith(provider({
+      bodyKind: "multipart",
+      formFields: [
+        { key: "image01", type: "file", value: "" },
+        { key: "query", type: "text", value: "{{input}}" },
+      ],
+    }));
+
+    expect(screen.getByText("Form fields")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("image01")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("query")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("{{input}}")).toBeInTheDocument();
+    // File rows carry the image implicitly — shown, not editable.
+    expect(screen.getByText("the artefact image")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Add field/i })).toBeInTheDocument();
+    // The token legend is stated on the editor so the tokens are discoverable.
+    expect(screen.getByText(/{{input}} = the prompt text/)).toBeInTheDocument();
+    // The JSON template surfaces are hidden (their state is preserved, not shown).
+    expect(screen.queryByText("Load template")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('{"input": "{{input}}"}')).not.toBeInTheDocument();
   });
 });

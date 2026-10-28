@@ -1,7 +1,7 @@
 // Default settings, catalogue fields, and vocab lists. There is no demo data
 // here — cataloguing requires a real uploaded spreadsheet and a live provider.
 
-import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, Settings, VocabSource } from "./types";
+import type { ArtefactField, CatalogueField, EmbeddingProvider, Provider, ProviderFormField, Settings, VocabSource } from "./types";
 
 export const _DEF_AF: ArtefactField[] = [
   { id: "af1", name: "Image", description: "Image", prompt: "", includeForAI: true, includeInExport: true, useColumnLetter: false, column: "" },
@@ -141,27 +141,47 @@ export const SOURCE_LABEL_W = { default: 130, min: 90, max: 400 } as const;
 /** Width (px) of the image pane beside an expanded row's Source Record. */
 export const IMAGE_PANE_W = { default: 210, min: 140, max: 480 } as const;
 
-// Custom-API-format providers (see VisionProvidersSection): the user types the
-// JSON request body, so these baselines give a working starting point per
-// dialect. `{{input}}` is replaced with the prompt text at request time
-// (Rust's build_custom_body); the reference body is the default seed.
+// Custom-API-format providers (see VisionProvidersSection): the user authors
+// the request body, so these baselines give a working starting point per
+// dialect. Each baseline speaks its dialect natively AND carries the artefact
+// image: at request time (Rust's build_custom_body / build_custom_multipart)
+// `{{input}}` becomes the prompt text and `{{image}}`/`{{mime}}` the image
+// base64/mime; the reference body is the default seed.
 
-/** Baseline JSON message templates a custom provider's Message field can load. */
+/** Baseline JSON message templates a custom provider's Message field can load.
+ *  Each speaks its dialect natively AND carries the artefact image: at request
+ *  time `{{input}}` becomes the prompt text, `{{image}}` the image base64, and
+ *  `{{mime}}` its mime type (Rust's build_custom_body). The seeded
+ *  `"model": "CHANGEME"` is a placeholder to swap for the gateway's model id —
+ *  custom cards have no model field of their own. */
 export const CUSTOM_MESSAGE_TEMPLATES: { label: string; body: string }[] = [
-  { label: "Reference (flat input)", body: '{"input": "{{input}}"}' },
+  { label: "Reference (flat input)", body: '{"model": "CHANGEME", "input": "{{input}}", "image": "{{image}}", "mimeType": "{{mime}}"}' },
   {
     label: "OpenAI chat",
-    body: '{\n  "messages": [{ "role": "user", "content": "{{input}}" }],\n  "temperature": 0.2\n}',
+    body: '{\n  "model": "CHANGEME",\n  "messages": [{ "role": "user", "content": [\n    { "type": "text", "text": "{{input}}" },\n    { "type": "image_url", "image_url": { "url": "data:{{mime}};base64,{{image}}" } }\n  ]}],\n  "temperature": 0.2\n}',
   },
   {
     label: "Anthropic messages",
-    body: '{\n  "max_tokens": 4096,\n  "messages": [{ "role": "user", "content": "{{input}}" }]\n}',
+    body: '{\n  "model": "CHANGEME",\n  "max_tokens": 4096,\n  "messages": [{ "role": "user", "content": [\n    { "type": "image", "source": { "type": "base64", "media_type": "{{mime}}", "data": "{{image}}" } },\n    { "type": "text", "text": "{{input}}" }\n  ]}]\n}',
   },
   {
     label: "Gemini generateContent",
-    body: '{\n  "contents": [{ "parts": [{ "text": "{{input}}" }] }],\n  "generationConfig": { "temperature": 0.2 }\n}',
+    body: '{\n  "model": "CHANGEME",\n  "contents": [{ "parts": [\n    { "text": "{{input}}" },\n    { "inline_data": { "mime_type": "{{mime}}", "data": "{{image}}" } }\n  ]}],\n  "generationConfig": { "temperature": 0.2 }\n}',
   },
 ];
 
 /** Seed body when a provider switches to the custom API format. */
 export const CUSTOM_MESSAGE_DEFAULT = CUSTOM_MESSAGE_TEMPLATES[0].body;
+
+/** Seed rows when a custom provider switches to the multipart body: the
+ *  reference form — one file field for the artefact image, one text field
+ *  carrying the prompt. */
+export const CUSTOM_FORM_FIELDS_DEFAULT: ProviderFormField[] = [
+  { key: "image01", type: "file", value: "" },
+  { key: "query", type: "text", value: "{{input}}" },
+];
+
+/** The token legend shown under both custom-body editors — one constant so
+ *  the two surfaces state the same words. */
+export const CUSTOM_TOKENS_HINT =
+  "{{input}} = the prompt text · {{image}} = the image as base64 · {{mime}} = the image mime type";

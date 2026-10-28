@@ -47,9 +47,11 @@ pub(crate) fn log_headers(auth: &[(String, String)], api_key: &str) -> Vec<(Stri
 
 /// Produce a copy of a request body safe to emit to the Logs Viewer drawer.
 ///
-/// Replaces inlined image payloads (`data:` URLs and raw base64 `data` fields)
-/// with compact size markers. All other fields — including prompt text — are
-/// passed through verbatim.
+/// Replaces inlined image payloads with compact size markers: `data:` URLs,
+/// and any sufficiently long base64 run under any key — custom-format
+/// templates inline the image via `{{image}}` under user-chosen keys, so
+/// over-redacting a log line is cheaper than emitting image bytes. All other
+/// fields — including prompt text — are passed through verbatim.
 pub(crate) fn redact_body(body: &Value) -> Value {
     let mut v = body.clone();
     redact_body_in_place(&mut v);
@@ -60,13 +62,9 @@ pub(crate) fn redact_body(body: &Value) -> Value {
 fn redact_body_in_place(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            // Inline image payloads. The three shapes produced in this module:
-            //   OpenAI  → image_url.url = "data:<mime>;base64,<bytes>"
-            //   Anthropic → source.data = "<base64>"
+            // The data-URL shape: "url": "data:<mime>;base64,<bytes>" —
+            // collapsed with byte-precision before the generic base64 rule.
             redact_string_field(map, "url", |s| s.starts_with("data:"), redact_data_url);
-            redact_string_field(map, "data", is_likely_base64, |s| {
-                format!("<redacted base64, {} bytes>", s.len())
-            });
             for (_, child) in map.iter_mut() {
                 redact_body_in_place(child);
             }
@@ -75,6 +73,9 @@ fn redact_body_in_place(v: &mut Value) {
             for item in items {
                 redact_body_in_place(item);
             }
+        }
+        Value::String(s) if is_likely_base64(s) => {
+            *s = format!("<redacted base64, {} bytes>", s.len());
         }
         _ => {}
     }
@@ -226,10 +227,13 @@ mod tests {
 
     #[test]
     fn redact_body_strips_openai_image_data_url() {
+        // Realistic prompt text: contains spaces, so it is never mistaken for
+        // base64 by the generic any-key rule.
+        let prompt = format!("{} catalogue this artefact", "x".repeat(200));
         let body = json!({
             "model": "gpt-4o",
             "messages": [{ "role": "user", "content": [
-                { "type": "text", "text": "x".repeat(200) },
+                { "type": "text", "text": prompt },
                 { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
             ]}]
         });
@@ -243,7 +247,7 @@ mod tests {
         let text = redacted["messages"][0]["content"][0]["text"]
             .as_str()
             .unwrap();
-        assert_eq!(text, &"x".repeat(200));
+        assert_eq!(text, prompt);
     }
 
     #[test]
@@ -255,6 +259,22 @@ mod tests {
         });
         let redacted = redact_body(&body);
         assert!(redacted["messages"][0]["content"][0]["source"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("<redacted base64"));
+    }
+
+    #[test]
+    fn redact_body_strips_base64_under_any_key() {
+        // Custom-format templates inline the image via {{image}} under
+        // user-chosen keys, so the generic rule cannot rely on key names.
+        let body = json!({ "image": "AQID".repeat(40), "meta": { "blob": "Zm9v".repeat(30) } });
+        let redacted = redact_body(&body);
+        assert!(redacted["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("<redacted base64"));
+        assert!(redacted["meta"]["blob"]
             .as_str()
             .unwrap()
             .starts_with("<redacted base64"));

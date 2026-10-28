@@ -84,7 +84,7 @@ AI providers are configured **inside the app** under
    - `openai` (the default; any OpenAI-compatible `/chat/completions` endpoint)
    - `anthropic` (the native Anthropic API — `x-api-key` auth, `/v1/messages`)
    - `gemini` (the Google Gemini API — Interactions API: `/v1beta/interactions` + `/v1beta/models`)
-   - `custom` (the base URL is the full request URL, sent as-is — `Authorization: Bearer` or a user-typed auth header carrying the API key, and a user-typed JSON message body loaded from the Reference/OpenAI/Anthropic/Gemini baselines with `{{input}}` marking the prompt text; the reply is auto-detected in whichever dialect the body speaks; no model listing or model field, and no connection test)
+   - `custom` (the base URL is the full request URL, sent as-is — `Authorization: Bearer` or a user-typed auth header carrying the API key, and a user-authored body: a JSON message template loaded from the Reference/OpenAI/Anthropic/Gemini baselines, each carrying the image natively for its dialect (`{{input}}` = prompt text, `{{image}}` = image base64, `{{mime}}` = image mime type) or a `multipart/form-data` form of text/file rows (file rows carry the artefact image); the reply is auto-detected in whichever dialect the body speaks; no model listing or model field, and no connection test)
 
    This drives both the auth scheme and the endpoint paths.
 4. Mark one provider as **active** to route catalogue-field requests through it.

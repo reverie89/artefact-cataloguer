@@ -3,11 +3,12 @@ import { Eye, EyeOff, Loader2, Plus, Wifi } from "lucide-react";
 import type { AppActions } from "../../app/actions";
 import { providerDraftFromSettings, type AppState, type ProviderDraft } from "../../app/state";
 import { fieldsDiffer } from "../../app/drafts";
-import { CUSTOM_MESSAGE_TEMPLATES } from "../../app/defaults";
+import { CUSTOM_MESSAGE_TEMPLATES, CUSTOM_TOKENS_HINT } from "../../app/defaults";
 import type { SaveState } from "./SaveActions.types";
-import type { ApiFormat, Provider, ThinkingEffort } from "../../app/types";
+import type { ApiFormat, CustomBodyKind, Provider, ThinkingEffort } from "../../app/types";
 import { providerEndpoints } from "../../lib/ai";
 import { CardActions } from "./CardActions";
+import { CustomFormFieldsEditor } from "./CustomFormFieldsEditor";
 import { Field, FieldSelect, FieldSelectOption, FieldTextarea, Segmented } from "./FormControls";
 import { ConnectionStatus, StatusBadge, type TestStatus } from "./ProviderStatus";
 import { UnsavedBadge } from "./UnsavedBadge";
@@ -42,6 +43,13 @@ const AUTH_HEADER_OPTIONS: { value: "bearer" | "custom"; label: string }[] = [
   { value: "custom", label: "Custom" },
 ];
 
+/** The custom format's Body Segmented options: the JSON message template or
+ *  the multipart form. */
+const BODY_KIND_OPTIONS: { value: CustomBodyKind; label: string }[] = [
+  { value: "json", label: "JSON" },
+  { value: "multipart", label: "Form (multipart)" },
+];
+
 /** True when a single draft entry differs from its persisted provider — drives
  *  the per-row "unsaved" badge. Per-row twin of isTabDirty in drafts.ts. Only
  *  user-authored fields are compared: `modelOptions`/`connStatus` are
@@ -61,8 +69,10 @@ function entryDiffers(e: ProviderDraft["providers"][number], p: Provider): boole
       thinking: p.thinking ?? null,
       authHeader: p.authHeader ?? "",
       bodyTemplate: p.bodyTemplate ?? "",
+      bodyKind: p.bodyKind ?? "json",
+      formFields: p.formFields ?? [],
     },
-    ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking", "authHeader", "bodyTemplate"],
+    ["name", "baseUrl", "apiKey", "model", "apiFormat", "thinking", "authHeader", "bodyTemplate", "bodyKind", "formFields"],
   );
 }
 
@@ -307,6 +317,21 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
           </Field>
 
           {isCustom && (
+            <Field
+              label="Body"
+              desc={entry.bodyKind === "multipart"
+                ? "Sent as multipart/form-data — authored as the form fields below."
+                : "Sent as a JSON request body — authored as the message format below."}
+            >
+              <Segmented
+                options={BODY_KIND_OPTIONS}
+                value={entry.bodyKind}
+                onChange={(v) => actions.setProvBodyKind(id, v as CustomBodyKind)}
+              />
+            </Field>
+          )}
+
+          {isCustom && entry.bodyKind !== "multipart" && (
             <>
               <FieldSelect
                 label="Load template"
@@ -326,9 +351,16 @@ function ProviderRow({ entry, testStatus, testError, showProvKey, isActive, dirt
                 onChange={(e) => actions.setProvBodyTemplate(id, e.target.value)}
                 placeholder={'{"input": "{{input}}"}'}
                 rows={3}
-                desc="The JSON body sent to the gateway — {{input}} becomes the prompt text."
+                desc={`The JSON body sent to the gateway. ${CUSTOM_TOKENS_HINT}`}
               />
             </>
+          )}
+
+          {isCustom && entry.bodyKind === "multipart" && (
+            <CustomFormFieldsEditor
+              fields={entry.formFields}
+              onChange={(fields) => actions.setProvFormFields(id, fields)}
+            />
           )}
 
           {!isCustom && (

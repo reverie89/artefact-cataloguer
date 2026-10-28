@@ -5,7 +5,7 @@
 import { _DEF, _DEF_AF, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
 import type { SaveState } from "../components/settings/SaveActions.types";
 import type { VocabTermEntry } from "../lib/vocab";
-import type { AiResults, AiSuggestion, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, FieldSelection, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
+import type { AiResults, AiSuggestion, ApiFormat, ArtefactField, ArtefactRow, CatalogueField, CustomBodyKind, EmbeddingApiFormat, FieldSelection, ProviderFormField, Screen, Settings, SettingsTab, ThinkingEffort, VocabSource } from "./types";
 
 /** One editable provider row in the unified providers draft. Mirrors a
  *  persisted Provider, plus the model list discovered by a successful Test
@@ -31,8 +31,13 @@ export type ProviderDraftEntry = {
   thinking: ThinkingEffort | null;
   /** Custom format only: header name carrying the API key; "" = Bearer. */
   authHeader: string;
-  /** Custom format only: the JSON request body with an {{input}} token. */
+  /** Custom format only: the JSON request body with the {{input}} token. */
   bodyTemplate: string;
+  /** Custom format only: what the request body is; "json" (the template) or
+   *  "multipart" (the formFields form). Made concrete like apiFormat. */
+  bodyKind: CustomBodyKind;
+  /** Custom multipart only: the form-data rows; [] when none authored. */
+  formFields: ProviderFormField[];
 };
 
 /** In-memory draft of the editable parts of the Cataloguing Fields tab. Unlike
@@ -909,6 +914,8 @@ export function providerDraftFromSettings(s: Settings): ProviderDraft {
       thinking: p.thinking ?? null,
       authHeader: p.authHeader ?? "",
       bodyTemplate: p.bodyTemplate ?? "",
+      bodyKind: p.bodyKind ?? "json",
+      formFields: (p.formFields ?? []).map((f) => ({ ...f })),
     })),
   };
 }

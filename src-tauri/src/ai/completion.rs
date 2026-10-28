@@ -19,14 +19,14 @@ use super::logging::{
     log_headers, log_stage, next_call_group, redact_body, PipelineStageEvent, VerbosePayload,
 };
 use super::transport::{http_client, trim_trailing_slash, TIMEOUT_SECS};
-use super::types::{ApiFormat, Provider, ThinkingEffort};
+use super::types::{ApiFormat, CustomBodyKind, FormField, FormFieldType, Provider, ThinkingEffort};
 
 /// Inlined image attached to a single multimodal prompt: raw bytes + mime type.
 /// When `Some`, `do_completion` embeds the image as a content block alongside
 /// the text instruction (OpenAI `image_url` / Anthropic `image`). `Clone`
 /// because a `Turn` may carry an image and the cataloguing pipeline clones
 /// turns into the threaded conversation.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ImageData {
     pub(crate) bytes: Vec<u8>,
     pub(crate) mime: String,
@@ -62,6 +62,28 @@ impl TurnRole {
     }
 }
 
+/// The request body `build_completion_body` materializes: every native format
+/// (and custom-JSON) produces a JSON value; custom-multipart produces its form
+/// description. `do_completion` turns either into the outgoing request.
+#[derive(Debug)]
+pub(crate) enum CompletionBody {
+    Json(Value),
+    Multipart {
+        /// The image every file part carries.
+        image: ImageData,
+        /// Rows in authored order — list order is field order on the wire.
+        parts: Vec<MultipartPart>,
+    },
+}
+
+/// One custom-multipart form row (see `FormField`): a text field with its
+/// tokens already substituted, or a file part carrying the artefact image.
+#[derive(Debug)]
+pub(crate) enum MultipartPart {
+    Text { key: String, value: String },
+    File { key: String },
+}
+
 /// Build the chat-completions request body for one conversation (possibly
 /// multi-turn). Pure: no transport, no logging. The body differs by API family;
 /// each provider encodes the turns as its native multi-turn shape (OpenAI /
@@ -69,8 +91,9 @@ impl TurnRole {
 /// An image attached to a turn is inlined as a content block on that turn only
 /// — later text-only turns still see it via the conversation history. The
 /// custom family flattens the conversation into its single `input` string and
-/// rejects image turns (see the variant doc in `types.rs`).
-fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<Value, String> {
+/// shapes the body from the user-authored template/form (see the variant doc
+/// in `types.rs`).
+fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<CompletionBody, String> {
     match provider.api_format {
         ApiFormat::OpenAi => {
             let messages: Vec<Value> = turns
@@ -98,7 +121,7 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<Value, S
             if let Some(effort) = provider.thinking {
                 body["reasoning_effort"] = json!(effort);
             }
-            Ok(body)
+            Ok(CompletionBody::Json(body))
         }
         // Anthropic requires `max_tokens`.
         ApiFormat::Anthropic => {
@@ -139,7 +162,7 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<Value, S
                 body["max_tokens"] = json!(32000);
                 body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget_tokens });
             }
-            Ok(body)
+            Ok(CompletionBody::Json(body))
         }
         // Gemini Interactions API: the whole request is one `input` array of
         // steps (multi-turn), text preceding any image per Gemini's guidance.
@@ -162,41 +185,94 @@ fn build_completion_body(provider: &Provider, turns: &[Turn]) -> Result<Value, S
             if let Some(effort) = provider.thinking {
                 body["generation_config"]["thinking_level"] = json!(effort);
             }
-            Ok(body)
+            Ok(CompletionBody::Json(body))
         }
-        // Custom gateways POST the user-typed JSON message template: the
-        // turns' texts are joined in order and substituted for `{{input}}`.
-        // Image input is not part of any template, and artefact analysis
-        // always carries the image, so this fails loudly rather than sending
-        // a prompt without its image.
+        // Custom gateways POST the user-authored body (`body_kind`): the JSON
+        // message template, or a multipart form whose text rows take the
+        // tokens and file rows carry the image. Either way the image must
+        // have a destination — it fails loudly rather than being silently
+        // dropped. Only the first image turn's image is sent: custom bodies
+        // are single-image shapes.
         ApiFormat::Custom => {
-            if turns.iter().any(|t| t.image.is_some()) {
-                return Err(
-                    "the custom API format sends text only and cannot carry the artefact image — use an image-capable API format for analysis"
-                        .to_string(),
-                );
-            }
             let input = turns
                 .iter()
                 .map(|t| t.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            build_custom_body(&provider.body_template, &input)
+            let image = turns.iter().find_map(|t| t.image.as_ref());
+            match provider.body_kind {
+                CustomBodyKind::Json => build_custom_body(&provider.body_template, &input, image)
+                    .map(CompletionBody::Json),
+                CustomBodyKind::Multipart => {
+                    build_custom_multipart(&provider.form_fields, &input, image)
+                }
+            }
         }
     }
 }
 
-/// The request-body token a custom provider's message template must carry —
+/// The token a custom body's template or text form rows must carry —
 /// replaced with the flattened prompt text.
 const CUSTOM_INPUT_TOKEN: &str = "{{input}}";
+/// Replaced with the artefact image's raw base64. Empty when the call carries
+/// no image — but a body referencing the token then fails the build instead.
+const CUSTOM_IMAGE_TOKEN: &str = "{{image}}";
+/// Replaced with the artefact image's mime type (empty when there is none).
+const CUSTOM_MIME_TOKEN: &str = "{{mime}}";
+
+/// Which custom tokens a substitution pass saw. `{{input}}` and `{{image}}`
+/// drive the build-time validation; `{{mime}}` is free to come and go.
+#[derive(Default)]
+struct TokenHits {
+    input: bool,
+    image: bool,
+}
+
+/// Replace every token occurrence in one string value, recording what was
+/// seen. Shared by the JSON template walker and the multipart text rows so
+/// both body modes accept exactly the same token set.
+fn replace_tokens(
+    s: &str,
+    input: &str,
+    image_b64: Option<&str>,
+    mime: &str,
+    hits: &mut TokenHits,
+) -> String {
+    if s.contains(CUSTOM_INPUT_TOKEN) {
+        hits.input = true;
+    }
+    if s.contains(CUSTOM_IMAGE_TOKEN) {
+        hits.image = true;
+    }
+    s.replace(CUSTOM_INPUT_TOKEN, input)
+        .replace(CUSTOM_IMAGE_TOKEN, image_b64.unwrap_or(""))
+        .replace(CUSTOM_MIME_TOKEN, mime)
+}
+
+/// Base64 + mime pair for token substitution; `None`/empty when the call
+/// carries no image.
+fn image_tokens(image: Option<&ImageData>) -> (Option<String>, String) {
+    match image {
+        Some(img) => (
+            Some(base64::engine::general_purpose::STANDARD.encode(&img.bytes)),
+            img.mime.clone(),
+        ),
+        None => (None, String::new()),
+    }
+}
 
 /// Materialize a custom provider's user-typed JSON message template into the
-/// request body. The template must parse as JSON and carry `{{input}}` — the
-/// substitution happens on the parsed `Value`, so arbitrary prompt text
-/// (quotes, newlines) is re-escaped safely by serde on the way out. Errors
-/// name the exact defect: empty template, invalid JSON, or a missing token
-/// (the prompt would never reach the gateway).
-fn build_custom_body(template: &str, input: &str) -> Result<Value, String> {
+/// request body. The template must parse as JSON and carry `{{input}}`; when
+/// the call carries the artefact image it must also carry `{{image}}` — the
+/// image never silently drops. The substitution happens on the parsed
+/// `Value`, so arbitrary prompt text (quotes, newlines) is re-escaped safely
+/// by serde on the way out. Errors name the exact defect: empty template,
+/// invalid JSON, a missing token, or an image mismatch.
+fn build_custom_body(
+    template: &str,
+    input: &str,
+    image: Option<&ImageData>,
+) -> Result<Value, String> {
     if template.trim().is_empty() {
         return Err(
             "custom provider has no message format — set it on the provider card".to_string(),
@@ -204,37 +280,138 @@ fn build_custom_body(template: &str, input: &str) -> Result<Value, String> {
     }
     let mut body: Value = serde_json::from_str(template)
         .map_err(|e| format!("message format is not valid JSON: {e}"))?;
-    let mut found = false;
-    substitute_custom_input(&mut body, input, &mut found);
-    if !found {
+    let (image_b64, mime) = image_tokens(image);
+    let mut hits = TokenHits::default();
+    substitute_custom_tokens(&mut body, input, image_b64.as_deref(), &mime, &mut hits);
+    if !hits.input {
         return Err(format!(
             "message format must include {CUSTOM_INPUT_TOKEN} — the prompt text has nowhere to go"
+        ));
+    }
+    if !hits.image && image.is_some() {
+        return Err(
+            "the message format cannot carry the artefact image — add {{image}} (raw base64) or switch the body to the multipart form"
+                .to_string(),
+        );
+    }
+    if hits.image && image.is_none() {
+        return Err(format!(
+            "the message format references {CUSTOM_IMAGE_TOKEN} but this call carries no image"
         ));
     }
     Ok(body)
 }
 
-/// Walk `v`, replacing every `{CUSTOM_INPUT_TOKEN}` occurrence inside string
-/// values with `input`; sets `found` when any substitution happened.
-fn substitute_custom_input(v: &mut Value, input: &str, found: &mut bool) {
+/// Walk `v`, replacing every token occurrence inside string values.
+fn substitute_custom_tokens(
+    v: &mut Value,
+    input: &str,
+    image_b64: Option<&str>,
+    mime: &str,
+    hits: &mut TokenHits,
+) {
     match v {
         Value::String(s) => {
-            if s.contains(CUSTOM_INPUT_TOKEN) {
-                *s = s.replace(CUSTOM_INPUT_TOKEN, input);
-                *found = true;
-            }
+            *s = replace_tokens(s, input, image_b64, mime, hits);
         }
         Value::Array(items) => {
             for item in items {
-                substitute_custom_input(item, input, found);
+                substitute_custom_tokens(item, input, image_b64, mime, hits);
             }
         }
         Value::Object(map) => {
             for value in map.values_mut() {
-                substitute_custom_input(value, input, found);
+                substitute_custom_tokens(value, input, image_b64, mime, hits);
             }
         }
         _ => {}
+    }
+}
+
+/// Materialize a custom provider's multipart form: text rows carry the
+/// tokens, file rows all carry the artefact image as binary parts. Validation
+/// mirrors the JSON template's rules — the prompt must land in a text row
+/// (`{{input}}`) and the image must leave through a file row, loudly.
+fn build_custom_multipart(
+    fields: &[FormField],
+    input: &str,
+    image: Option<&ImageData>,
+) -> Result<CompletionBody, String> {
+    if fields.is_empty() {
+        return Err(
+            "custom provider has no form fields — add them on the provider card".to_string(),
+        );
+    }
+    let (image_b64, mime) = image_tokens(image);
+    let mut parts: Vec<MultipartPart> = Vec::new();
+    let mut hits = TokenHits::default();
+    let mut file_rows = 0usize;
+    for field in fields {
+        let key = field.key.trim();
+        if key.is_empty() {
+            return Err("a form field has no name — set the key on every row".to_string());
+        }
+        match field.field_type {
+            FormFieldType::File => {
+                file_rows += 1;
+                parts.push(MultipartPart::File {
+                    key: key.to_string(),
+                });
+            }
+            FormFieldType::Text => {
+                let value =
+                    replace_tokens(&field.value, input, image_b64.as_deref(), &mime, &mut hits);
+                parts.push(MultipartPart::Text {
+                    key: key.to_string(),
+                    value,
+                });
+            }
+        }
+    }
+    if !hits.input {
+        return Err(format!(
+            "the form needs {CUSTOM_INPUT_TOKEN} in a text field — the prompt text has nowhere to go"
+        ));
+    }
+    if file_rows == 0 {
+        return Err(
+            "the form needs a file field — the artefact image has nowhere to go".to_string(),
+        );
+    }
+    let image = image.ok_or_else(|| {
+        "the multipart form sends the artefact image as a file field but this call carries none"
+            .to_string()
+    })?;
+    Ok(CompletionBody::Multipart {
+        image: image.clone(),
+        parts,
+    })
+}
+
+/// One-line description of a multipart form for the boundary log: field
+/// names and sizes only — the image bytes never reach the log.
+fn multipart_log_body(image: &ImageData, parts: &[MultipartPart]) -> String {
+    let fields = parts
+        .iter()
+        .map(|p| match p {
+            MultipartPart::Text { key, value } => format!("{key}=<text {} chars>", value.len()),
+            MultipartPart::File { key } => {
+                format!("{key}=<file {} {}B>", image.mime, image.bytes.len())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<multipart: {fields}>")
+}
+
+/// File-name extension for the multipart file part, from the image mime.
+fn mime_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "bin",
     }
 }
 
@@ -400,7 +577,7 @@ pub(crate) async fn do_completion<R: Runtime>(
 
     // Body construction is isolated in `build_completion_body`; this function
     // owns only transport + boundary logging.
-    let body: Value = build_completion_body(provider, turns)?;
+    let body: CompletionBody = build_completion_body(provider, turns)?;
     let auth = provider
         .api_format
         .auth(&provider.api_key, &provider.auth_header);
@@ -427,7 +604,12 @@ pub(crate) async fn do_completion<R: Runtime>(
                 method: Some("POST".to_string()),
                 url: Some(url.clone()),
                 headers: Some(log_headers(&auth, &provider.api_key)),
-                body: Some(redact_body(&body)),
+                body: Some(match &body {
+                    CompletionBody::Json(v) => redact_body(v),
+                    CompletionBody::Multipart { image, parts } => {
+                        Value::String(multipart_log_body(image, parts))
+                    }
+                }),
                 status: None,
                 job_id: None,
                 description: None,
@@ -438,7 +620,26 @@ pub(crate) async fn do_completion<R: Runtime>(
 
     let client = http_client(Duration::from_secs(TIMEOUT_SECS))?;
 
-    let mut req = client.post(&url).json(&body);
+    let mut req = client.post(&url);
+    match &body {
+        CompletionBody::Json(v) => req = req.json(v),
+        CompletionBody::Multipart { image, parts } => {
+            let mut form = reqwest::multipart::Form::new();
+            for part in parts {
+                form = match part {
+                    MultipartPart::Text { key, value } => form.text(key.clone(), value.clone()),
+                    MultipartPart::File { key } => form.part(
+                        key.clone(),
+                        reqwest::multipart::Part::bytes(image.bytes.clone())
+                            .file_name(format!("image.{}", mime_ext(&image.mime)))
+                            .mime_str(&image.mime)
+                            .map_err(|e| format!("invalid image mime type {}: {e}", image.mime))?,
+                    ),
+                };
+            }
+            req = req.multipart(form);
+        }
+    }
     for (name, value) in auth {
         req = req.header(name, value);
     }
@@ -712,6 +913,8 @@ mod tests {
             thinking: None,
             auth_header: String::new(),
             body_template: String::new(),
+            body_kind: CustomBodyKind::default(),
+            form_fields: Vec::new(),
         }
     }
 
@@ -719,6 +922,32 @@ mod tests {
         let mut p = provider_with(ApiFormat::Custom);
         p.body_template = template.to_string();
         p
+    }
+
+    fn multipart_provider_with(fields: Value) -> Provider {
+        let mut p = provider_with(ApiFormat::Custom);
+        p.body_kind = CustomBodyKind::Multipart;
+        p.form_fields = serde_json::from_value(fields).unwrap();
+        p
+    }
+
+    /// Unwrap the JSON variant of a built body (native formats + custom-JSON).
+    fn json_body(body: CompletionBody) -> Value {
+        match body {
+            CompletionBody::Json(v) => v,
+            CompletionBody::Multipart { .. } => panic!("expected a JSON body"),
+        }
+    }
+
+    fn image_turn() -> Turn {
+        Turn {
+            role: TurnRole::User,
+            text: "describe".to_string(),
+            image: Some(ImageData {
+                bytes: vec![1, 2, 3],
+                mime: "image/jpeg".to_string(),
+            }),
+        }
     }
 
     fn provider_with_thinking(format: ApiFormat, thinking: ThinkingEffort) -> Provider {
@@ -750,7 +979,8 @@ mod tests {
                 image: None,
             },
         ];
-        let body = build_completion_body(&provider_with(ApiFormat::OpenAi), &turns).unwrap();
+        let body =
+            json_body(build_completion_body(&provider_with(ApiFormat::OpenAi), &turns).unwrap());
         let messages = body.get("messages").and_then(Value::as_array).unwrap();
         assert_eq!(messages.len(), 3);
         // Turn 1: user with a parts array (text + image_url).
@@ -787,7 +1017,8 @@ mod tests {
                 image: None,
             },
         ];
-        let body = build_completion_body(&provider_with(ApiFormat::Gemini), &turns).unwrap();
+        let body =
+            json_body(build_completion_body(&provider_with(ApiFormat::Gemini), &turns).unwrap());
         let input = body.get("input").and_then(Value::as_array).unwrap();
         // text, image, text — image is its own step.
         assert_eq!(input.len(), 3);
@@ -798,28 +1029,33 @@ mod tests {
 
     #[test]
     fn openai_body_adds_reasoning_effort_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::OpenAi), &[]).unwrap();
+        let off = json_body(build_completion_body(&provider_with(ApiFormat::OpenAi), &[]).unwrap());
         assert!(off.get("reasoning_effort").is_none());
 
-        let on = build_completion_body(
-            &provider_with_thinking(ApiFormat::OpenAi, ThinkingEffort::High),
-            &[],
-        )
-        .unwrap();
+        let on = json_body(
+            build_completion_body(
+                &provider_with_thinking(ApiFormat::OpenAi, ThinkingEffort::High),
+                &[],
+            )
+            .unwrap(),
+        );
         assert_eq!(on["reasoning_effort"], "high");
     }
 
     #[test]
     fn anthropic_body_adds_thinking_budget_below_max_tokens_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::Anthropic), &[]).unwrap();
+        let off =
+            json_body(build_completion_body(&provider_with(ApiFormat::Anthropic), &[]).unwrap());
         assert_eq!(off["max_tokens"], 4096);
         assert!(off.get("thinking").is_none());
 
-        let on = build_completion_body(
-            &provider_with_thinking(ApiFormat::Anthropic, ThinkingEffort::Medium),
-            &[],
-        )
-        .unwrap();
+        let on = json_body(
+            build_completion_body(
+                &provider_with_thinking(ApiFormat::Anthropic, ThinkingEffort::Medium),
+                &[],
+            )
+            .unwrap(),
+        );
         assert_eq!(on["thinking"]["type"], "enabled");
         let max_tokens = on["max_tokens"].as_u64().unwrap();
         assert_eq!(max_tokens, 32000);
@@ -829,14 +1065,16 @@ mod tests {
 
     #[test]
     fn gemini_body_adds_thinking_level_only_when_thinking() {
-        let off = build_completion_body(&provider_with(ApiFormat::Gemini), &[]).unwrap();
+        let off = json_body(build_completion_body(&provider_with(ApiFormat::Gemini), &[]).unwrap());
         assert!(off["generation_config"].get("thinking_level").is_none());
 
-        let on = build_completion_body(
-            &provider_with_thinking(ApiFormat::Gemini, ThinkingEffort::Low),
-            &[],
-        )
-        .unwrap();
+        let on = json_body(
+            build_completion_body(
+                &provider_with_thinking(ApiFormat::Gemini, ThinkingEffort::Low),
+                &[],
+            )
+            .unwrap(),
+        );
         assert_eq!(on["generation_config"]["thinking_level"], "low");
     }
 
@@ -949,22 +1187,25 @@ mod tests {
             },
         ];
         // The reference template: flattened turns land in `input`.
-        let body =
+        let body = json_body(
             build_completion_body(&custom_provider_with(r#"{"input": "{{input}}"}"#), &turns)
-                .unwrap();
+                .unwrap(),
+        );
         assert_eq!(
             body,
             json!({ "input": "analyse this\n\na description\n\ncatalogue it" })
         );
 
         // A dialect template keeps its other fields and substitutes in place.
-        let body = build_completion_body(
-            &custom_provider_with(
-                r#"{"messages": [{ "role": "user", "content": "{{input}}" }], "temperature": 0.2}"#,
-            ),
-            &turns,
-        )
-        .unwrap();
+        let body = json_body(
+            build_completion_body(
+                &custom_provider_with(
+                    r#"{"messages": [{ "role": "user", "content": "{{input}}" }], "temperature": 0.2}"#,
+                ),
+                &turns,
+            )
+            .unwrap(),
+        );
         assert_eq!(
             body["messages"][0]["content"],
             "analyse this\n\na description\n\ncatalogue it"
@@ -974,15 +1215,17 @@ mod tests {
 
     #[test]
     fn custom_body_substitutes_every_token_occurrence_including_nested() {
-        let body = build_completion_body(
-            &custom_provider_with(r#"{"a": {"b": "x {{input}} y"}, "arr": ["{{input}}", 1]}"#),
-            &[Turn {
-                role: TurnRole::User,
-                text: "prompt".to_string(),
-                image: None,
-            }],
-        )
-        .unwrap();
+        let body = json_body(
+            build_completion_body(
+                &custom_provider_with(r#"{"a": {"b": "x {{input}} y"}, "arr": ["{{input}}", 1]}"#),
+                &[Turn {
+                    role: TurnRole::User,
+                    text: "prompt".to_string(),
+                    image: None,
+                }],
+            )
+            .unwrap(),
+        );
         assert_eq!(body["a"]["b"], "x prompt y");
         assert_eq!(body["arr"][0], "prompt");
         assert_eq!(body["arr"][1], 1);
@@ -1002,18 +1245,180 @@ mod tests {
     }
 
     #[test]
-    fn custom_body_rejects_image_turns_instead_of_dropping_the_image() {
-        let img = ImageData {
-            bytes: vec![1],
-            mime: "image/png".to_string(),
+    fn custom_json_body_rejects_an_image_turn_without_the_image_token() {
+        // The image must never silently drop: a JSON template without
+        // `{{image}}` fails the build when the call carries one.
+        let err = build_completion_body(
+            &custom_provider_with(r#"{"input": "{{input}}"}"#),
+            &[image_turn()],
+        )
+        .unwrap_err();
+        assert!(err.contains("{{image}}"), "{err}");
+    }
+
+    #[test]
+    fn custom_json_body_substitutes_image_and_mime_tokens() {
+        let body = json_body(
+            build_completion_body(
+                &custom_provider_with(
+                    r#"{"q": "{{input}}", "img": "data:{{mime}};base64,{{image}}"}"#,
+                ),
+                &[image_turn()],
+            )
+            .unwrap(),
+        );
+        assert_eq!(body["q"], "describe");
+        // base64([1,2,3]) is AQID.
+        assert_eq!(body["img"], "data:image/jpeg;base64,AQID");
+    }
+
+    #[test]
+    fn custom_json_body_errors_when_the_template_references_an_image_without_one() {
+        let err = build_completion_body(
+            &custom_provider_with(r#"{"q": "{{input}}", "img": "{{image}}"}"#),
+            &[Turn {
+                role: TurnRole::User,
+                text: "describe".to_string(),
+                image: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("carries no image"), "{err}");
+    }
+
+    #[test]
+    fn custom_multipart_builds_parts_in_authored_order() {
+        // Text rows keep their list position; file rows all carry the image.
+        let body = build_completion_body(
+            &multipart_provider_with(json!([
+                { "key": "query", "type": "text", "value": "{{input}}" },
+                { "key": "image01", "type": "file" },
+                { "key": "language", "type": "text", "value": "en" }
+            ])),
+            &[image_turn()],
+        )
+        .unwrap();
+        let CompletionBody::Multipart { image, parts } = body else {
+            panic!("expected a multipart body");
         };
-        let turns = vec![Turn {
-            role: TurnRole::User,
-            text: "describe".to_string(),
-            image: Some(img),
-        }];
-        let err = build_completion_body(&provider_with(ApiFormat::Custom), &turns).unwrap_err();
-        assert!(err.contains("image"), "{err}");
+        assert_eq!(image.bytes, vec![1, 2, 3]);
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(
+            &parts[0],
+            MultipartPart::Text { key, value } if key == "query" && value == "describe"
+        ));
+        assert!(matches!(&parts[1], MultipartPart::File { key } if key == "image01"));
+        assert!(matches!(
+            &parts[2],
+            MultipartPart::Text { key, value } if key == "language" && value == "en"
+        ));
+        // The boundary log names fields and sizes only, never values/bytes.
+        let log = multipart_log_body(&image, &parts);
+        assert!(log.contains("image01=<file image/jpeg 3B>"), "{log}");
+        assert!(log.contains("query=<text 8 chars>"), "{log}");
+    }
+
+    #[test]
+    fn custom_multipart_substitutes_tokens_in_text_rows() {
+        let body = build_completion_body(
+            &multipart_provider_with(json!([
+                { "key": "image01", "type": "file" },
+                { "key": "q", "type": "text", "value": "{{input}} {{mime}} {{image}}" }
+            ])),
+            &[image_turn()],
+        )
+        .unwrap();
+        let CompletionBody::Multipart { parts, .. } = body else {
+            panic!("expected a multipart body");
+        };
+        let MultipartPart::Text { value, .. } = &parts[1] else {
+            panic!("expected a text part");
+        };
+        assert_eq!(value, "describe image/jpeg AQID");
+    }
+
+    #[test]
+    fn custom_multipart_errors_name_the_exact_defect() {
+        let image_turns = &[image_turn()];
+
+        let no_fields =
+            build_completion_body(&multipart_provider_with(json!([])), image_turns).unwrap_err();
+        assert!(no_fields.contains("no form fields"), "{no_fields}");
+
+        let no_input = build_completion_body(
+            &multipart_provider_with(json!([
+                { "key": "image01", "type": "file" },
+                { "key": "lang", "type": "text", "value": "en" }
+            ])),
+            image_turns,
+        )
+        .unwrap_err();
+        assert!(no_input.contains("{{input}}"), "{no_input}");
+
+        let no_file = build_completion_body(
+            &multipart_provider_with(json!([{ "key": "q", "type": "text", "value": "{{input}}" }])),
+            image_turns,
+        )
+        .unwrap_err();
+        assert!(no_file.contains("file field"), "{no_file}");
+
+        let empty_key = build_completion_body(
+            &multipart_provider_with(json!([
+                { "key": "  ", "type": "text", "value": "{{input}}" },
+                { "key": "image01", "type": "file" }
+            ])),
+            image_turns,
+        )
+        .unwrap_err();
+        assert!(empty_key.contains("no name"), "{empty_key}");
+
+        // Multipart mode is the image transport: an imageless call fails.
+        let imageless = build_completion_body(
+            &multipart_provider_with(json!([
+                { "key": "q", "type": "text", "value": "{{input}}" },
+                { "key": "image01", "type": "file" }
+            ])),
+            &[Turn {
+                role: TurnRole::User,
+                text: "describe".to_string(),
+                image: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(imageless.contains("carries none"), "{imageless}");
+    }
+
+    #[test]
+    fn provider_body_kind_and_form_fields_deserialize_with_defaults() {
+        // Providers persisted before the fields existed stay JSON-mode.
+        let p: Provider = serde_json::from_value(json!({
+            "name": "p", "baseUrl": "https://example.test", "apiKey": "k",
+            "model": "m", "apiFormat": "custom"
+        }))
+        .unwrap();
+        assert_eq!(p.body_kind, CustomBodyKind::Json);
+        assert!(p.form_fields.is_empty());
+
+        let p: Provider = serde_json::from_value(json!({
+            "name": "p", "baseUrl": "https://example.test", "apiKey": "k",
+            "model": "m", "apiFormat": "custom", "bodyKind": "multipart",
+            "formFields": [
+                { "key": "image01", "type": "file" },
+                { "key": "query", "type": "text", "value": "{{input}}" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.body_kind, CustomBodyKind::Multipart);
+        assert_eq!(p.form_fields.len(), 2);
+        // An omitted "type" defaults to text.
+        assert_eq!(p.form_fields[1].field_type, FormFieldType::Text);
+    }
+
+    #[test]
+    fn mime_ext_maps_the_image_mimes() {
+        assert_eq!(mime_ext("image/jpeg"), "jpg");
+        assert_eq!(mime_ext("image/png"), "png");
+        assert_eq!(mime_ext("image/tiff"), "bin");
     }
 
     #[test]

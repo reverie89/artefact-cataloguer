@@ -20,8 +20,8 @@ pub(crate) fn trim_trailing_slash(s: &str) -> String {
 }
 
 /// `User-Agent` string presented to API gateways. Some gateways (notably
-/// government / WAF-fronted ones like `*.tech.gov.sg`) reject the default
-/// `reqwest/*` UA with HTTP 403 even when the API key is valid. Posing as a
+/// government / WAF-fronted ones) reject the default `reqwest/*` UA with
+/// HTTP 403 even when the API key is valid. Posing as a
 /// legitimate Edge (Chromium) browser satisfies bot/UA filters that would
 /// otherwise block a non-browser client. Keep it in sync with a current stable
 /// Edge release; bump the Chrome/Edge versions periodically.

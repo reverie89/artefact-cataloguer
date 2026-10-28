@@ -76,6 +76,17 @@ const ProviderSchema = z.object({
   // providers saved before they existed).
   authHeader: z.string().optional(),
   bodyTemplate: z.string().optional(),
+  bodyKind: z.enum(["json", "multipart"]).optional(),
+  formFields: z
+    .array(
+      z.object({
+        key: z.string(),
+        // `.default("text")` so rows saved before the type existed load cleanly.
+        type: z.enum(["text", "file"]).default("text"),
+        value: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 
 const EmbeddingProviderSchema = z.object({

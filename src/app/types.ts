@@ -4,9 +4,21 @@ export type FieldType = "open" | "vocab";
 
 /** Which API family a provider speaks — drives auth scheme and endpoint paths.
  *  "custom" posts to the base URL verbatim (the user types the full request
- *  URL; no path is appended) with `x-api-key` auth and a single flat `input`
- *  text field — no model listing and no model field. */
+ *  URL; no path is appended) with Bearer or a typed auth header and a
+ *  user-authored body — no model listing and no model field. */
 export type ApiFormat = "openai" | "anthropic" | "gemini" | "custom";
+
+/** Custom format only: what the request body is — the JSON message template
+ *  or a `multipart/form-data` form. */
+export type CustomBodyKind = "json" | "multipart";
+
+/** One custom-multipart form-data row: a text field whose value may carry the
+ *  tokens, or a file part that carries the artefact image (`value` unused). */
+export interface ProviderFormField {
+  key: string;
+  type: "text" | "file";
+  value?: string;
+}
 
 /** How hard a thinking-capable model should reason before answering. Each API
  *  family maps this onto its native effort knob; see `build_completion_body`. */
@@ -141,8 +153,14 @@ export interface Provider {
    *  `Authorization: Bearer <key>`. */
   authHeader?: string;
   /** Custom format only: the user-typed JSON request body; `{{input}}` is
-   *  replaced with the prompt text. Other formats build their bodies natively. */
+   *  replaced with the prompt text, `{{image}}`/`{{mime}}` carry the artefact
+   *  image. Other formats build their bodies natively. */
   bodyTemplate?: string;
+  /** Custom format only: what the request body is. Absent/"json" = the JSON
+   *  message template; "multipart" = the `formFields` form. */
+  bodyKind?: CustomBodyKind;
+  /** Custom multipart only: the form-data rows, sent in list order. */
+  formFields?: ProviderFormField[];
 }
 
 /** Which API family an embedding provider speaks. Anthropic has no

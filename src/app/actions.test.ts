@@ -5,7 +5,7 @@ import { useCallback, useLayoutEffect, useReducer, useRef } from "react";
 import { composeExportTable, computeColumnWidths, csvSafeCell, dragClamp, parsePreFlightError, useActions, type AppActions } from "./actions";
 import { _DEF } from "./defaults";
 import { initialState, reducer, type Action, type AppState } from "./state";
-import type { AiResults, ArtefactRow, FieldSelection, Settings, VocabEmbeddingStatus } from "./types";
+import type { AiResults, ArtefactRow, FieldSelection, Provider, Settings, VocabEmbeddingStatus } from "./types";
 import { CANCEL_ERROR, catalogueArtefact, cancelCatalogue } from "../lib/ai";
 
 // The queue tests below drive useActions (the catalogue drainer) with the AI
@@ -297,6 +297,77 @@ function useHarness(seed: { rows: ArtefactRow[]; settings: Settings }): Harness 
   );
   return { state, actions, dispatched };
 }
+
+describe("custom provider body kinds (useActions)", () => {
+  afterEach(cleanup);
+
+  const customSettings = (overrides: Partial<Provider> = {}): Settings => ({
+    ..._DEF(),
+    providers: [{
+      id: "p1", name: "Gateway", baseUrl: "https://api.test/x", apiKey: "k", model: "",
+      apiFormat: "custom", connStatus: "untested",
+      ...overrides,
+    }],
+  });
+
+  it("switching to the multipart body seeds the reference form rows", () => {
+    const h = renderHook(() => useHarness({ rows: [], settings: customSettings() }));
+    act(() => h.result.current.actions.setProvBodyKind("p1", "multipart"));
+    const entry = h.result.current.state.providerDraft?.providers[0];
+    expect(entry?.bodyKind).toBe("multipart");
+    expect(entry?.formFields).toEqual([
+      { key: "image01", type: "file", value: "" },
+      { key: "query", type: "text", value: "{{input}}" },
+    ]);
+  });
+
+  it("saving a multipart card persists the body kind and form rows", async () => {
+    const h = renderHook(() => useHarness({ rows: [], settings: customSettings() }));
+    act(() => h.result.current.actions.setProvBodyKind("p1", "multipart"));
+    await act(async () => { await h.result.current.actions.saveProvCard("p1"); });
+    const saved = h.result.current.state.settings.providers[0];
+    expect(saved.bodyKind).toBe("multipart");
+    expect(saved.formFields).toEqual([
+      { key: "image01", type: "file", value: "" },
+      { key: "query", type: "text", value: "{{input}}" },
+    ]);
+  });
+
+  it("saving a card back in JSON mode leaves no multipart keys behind", async () => {
+    const h = renderHook(() => useHarness({ rows: [], settings: customSettings() }));
+    act(() => h.result.current.actions.setProvBodyKind("p1", "multipart"));
+    act(() => h.result.current.actions.setProvBodyKind("p1", "json"));
+    await act(async () => { await h.result.current.actions.saveProvCard("p1"); });
+    const saved = h.result.current.state.settings.providers[0];
+    expect(saved.bodyKind).toBeUndefined();
+    expect(saved.formFields).toBeUndefined();
+  });
+
+  it("blocked saves name the exact form defect", async () => {
+    const h = renderHook(() => useHarness({ rows: [], settings: customSettings() }));
+    act(() => h.result.current.actions.setProvBodyKind("p1", "multipart"));
+
+    act(() => h.result.current.actions.setProvFormFields("p1", [
+      { key: "  ", type: "text", value: "{{input}}" },
+      { key: "image01", type: "file", value: "" },
+    ]));
+    await act(async () => { await h.result.current.actions.saveProvCard("p1"); });
+    expect(h.result.current.state.provCardError["p1"]).toBe("Every form field needs a name");
+
+    act(() => h.result.current.actions.setProvFormFields("p1", [
+      { key: "lang", type: "text", value: "en" },
+      { key: "image01", type: "file", value: "" },
+    ]));
+    await act(async () => { await h.result.current.actions.saveProvCard("p1"); });
+    expect(h.result.current.state.provCardError["p1"]).toBe("A text form field must include {{input}}");
+
+    act(() => h.result.current.actions.setProvFormFields("p1", [
+      { key: "query", type: "text", value: "{{input}}" },
+    ]));
+    await act(async () => { await h.result.current.actions.saveProvCard("p1"); });
+    expect(h.result.current.state.provCardError["p1"]).toBe("Needs a file form field for the image");
+  });
+});
 
 describe("queue sequencing (useActions)", () => {
   afterEach(cleanup);

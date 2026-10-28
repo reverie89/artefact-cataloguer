@@ -10,8 +10,8 @@ import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
 import { useDropZone } from "../hooks/useDropZone";
 import type { Action, AppState, ArtefactDraft, EditableArtefactFieldKey, EditableCatalogueFieldKey, EmbeddingProviderDraft, FieldDraft, ProviderDraft, ProviderDraftEntry, VocabDraft } from "./state";
 import { artefactDraftFromSettings, embeddingProviderDraftFromSettings, providerDraftFromSettings, vocabDraftFromSettings } from "./state";
-import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, CUSTOM_MESSAGE_DEFAULT, fmt, gid, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
-import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, Provider, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
+import { _DEF_AF, _DEF_ARTEFACT_ANALYSIS_SYSTEM_PROMPT_INSTRUCTION, CUSTOM_FORM_FIELDS_DEFAULT, CUSTOM_MESSAGE_DEFAULT, fmt, gid, IMAGE_PANE_W, SOURCE_LABEL_W } from "./defaults";
+import type { ApiFormat, AiResults, ArtefactField, ArtefactRow, CatalogueField, CustomBodyKind, EmbeddingApiFormat, EmbeddingProvider, FieldSelection, Provider, ProviderFormField, Settings, SettingsTab, ThinkingEffort, VocabEmbeddingStatus } from "./types";
 import { isTabDirty } from "./drafts";
 import { isImageRoleName, parseArtefactFile, recordValueFor } from "../lib/spreadsheet";
 import { extractImagesFromXlsx } from "../lib/images";
@@ -236,6 +236,11 @@ export interface AppActions {
   setProvAuthHeader(id: string, header: string): void;
   /** Set this provider's custom JSON message template; persists on its card Save. */
   setProvBodyTemplate(id: string, body: string): void;
+  /** Set this provider's custom body mode (JSON template vs multipart form);
+   *  switching to multipart seeds the reference form rows. Persists on Save. */
+  setProvBodyKind(id: string, kind: CustomBodyKind): void;
+  /** Replace this provider's multipart form rows; persists on its card Save. */
+  setProvFormFields(id: string, fields: ProviderFormField[]): void;
   toggleProvKey(): void;
   testConn(id: string): Promise<void>;
   deleteProv(id: string): Promise<void>;
@@ -1660,7 +1665,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchProvDraft((d) => ({
       ...d,
       // Append an empty standard entry; the user fills it in, then Test → pick model.
-      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "" }],
+      providers: [...d.providers, { id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "", bodyKind: "json", formFields: [] }],
     }));
     dispatch({ type: "TOGGLE_PROV", id });
   }, [patchProvDraft, dispatch]);
@@ -1730,6 +1735,30 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, bodyTemplate: body })));
   }, [patchProvDraft, mapDraftEntry, dispatch]);
 
+  // Body mode (custom only): the JSON message template or the multipart form.
+  // Switching to multipart seeds the reference form rows so the card opens
+  // with a working form to modify, mirroring the template seeding above.
+  const setProvBodyKind = useCallback((id: string, kind: CustomBodyKind) => {
+    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
+    patchProvDraft(mapDraftEntry(id, (entry) => ({
+      ...entry,
+      bodyKind: kind,
+      formFields: kind === "multipart" && entry.formFields.length === 0
+        ? CUSTOM_FORM_FIELDS_DEFAULT.map((f) => ({ ...f }))
+        : entry.formFields,
+    })));
+    dispatch({ type: "CLEAR_PROV_STATUS", id });
+  }, [patchProvDraft, mapDraftEntry, dispatch]);
+
+  // The whole multipart form-row list; row add/edit/remove is computed by the
+  // editor and dispatched as one array.
+  const setProvFormFields = useCallback((id: string, fields: ProviderFormField[]) => {
+    dispatch({ type: "SET_PROV_CARD_STATUS", id, status: null });
+    dispatch({ type: "SET_PROV_CARD_ERROR", id, error: null });
+    patchProvDraft(mapDraftEntry(id, (entry) => ({ ...entry, formFields: fields })));
+  }, [patchProvDraft, mapDraftEntry, dispatch]);
+
   const toggleProvKey = useCallback(() => dispatch({ type: "SET_SHOW_PROV_KEY", show: !state.showProvKey }), [state.showProvKey, dispatch]);
 
   const testConn = useCallback(async (id: string) => {
@@ -1780,11 +1809,18 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     if (!entry.name.trim()) validationError = "Needs a name";
     else if (!entry.baseUrl.trim()) validationError = "Needs a base URL";
     else if (!entry.apiKey.trim()) validationError = "Needs an API key";
-    // The custom format POSTs the user-typed body: it must exist, parse as
-    // JSON, and carry the prompt token — the three ways a saved card could
-    // otherwise fail opaquely on the first catalogue run.
+    // The custom format POSTs the user-authored body. JSON mode: it must
+    // exist, parse as JSON, and carry the prompt token. Multipart mode: every
+    // row must be named, a text row must carry the prompt token, and a file
+    // row must carry the image — the ways a saved card could otherwise fail
+    // opaquely on the first catalogue run.
     else if (entry.apiFormat === "custom") {
-      if (!entry.bodyTemplate.trim()) validationError = "Needs a message format";
+      if (entry.bodyKind === "multipart") {
+        if (!entry.formFields.length) validationError = "Needs form fields";
+        else if (entry.formFields.some((f) => !f.key.trim())) validationError = "Every form field needs a name";
+        else if (!entry.formFields.some((f) => f.type === "text" && f.value?.includes("{{input}}"))) validationError = "A text form field must include {{input}}";
+        else if (!entry.formFields.some((f) => f.type === "file")) validationError = "Needs a file form field for the image";
+      } else if (!entry.bodyTemplate.trim()) validationError = "Needs a message format";
       else {
         try {
           JSON.parse(entry.bodyTemplate);
@@ -1810,6 +1846,10 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       model: entry.model, apiFormat: entry.apiFormat, modelOptions: entry.modelOptions,
       connStatus: entry.connStatus, thinking: entry.thinking ?? undefined,
       authHeader: entry.authHeader || undefined, bodyTemplate: entry.bodyTemplate || undefined,
+      // Multipart-only keys persist only in multipart mode so a switch back
+      // to JSON leaves no stale form behind.
+      bodyKind: entry.bodyKind === "multipart" ? "multipart" : undefined,
+      formFields: entry.bodyKind === "multipart" && entry.formFields.length ? entry.formFields.map((f) => ({ ...f })) : undefined,
     };
     try {
       await patchNow((s) => ({
@@ -1841,7 +1881,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
       dispatch({
         type: "PATCH_PROVIDER_DRAFT",
         patch: mapDraftEntry(id, () => ({
-          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "",
+          id, name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", modelOptions: [], connStatus: "untested", thinking: null, authHeader: "", bodyTemplate: "", bodyKind: "json", formFields: [],
         })),
       });
       return;
@@ -1860,6 +1900,8 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
           thinking: saved.thinking ?? null,
           authHeader: saved.authHeader ?? "",
           bodyTemplate: saved.bodyTemplate ?? "",
+          bodyKind: saved.bodyKind ?? "json",
+          formFields: (saved.formFields ?? []).map((f) => ({ ...f })),
         } : e)),
       }),
     });
@@ -2355,7 +2397,7 @@ export function useActions(state: AppState, dispatch: Dispatch, persist: Persist
     toggleRow, setFilter, setSearch, toggleSearchColAf, toggleSearchColCat, setSearchColsAf, setSearchColsCat, dismissExportWarning, exportResults, onTriggerClick, setFieldSearch, toggleFieldValue, clearField, setOpenFieldValue,
     toggleSF, reorderFields, removeField, updateField, addVocabSrc, removeVocabSrc, saveFieldCard, discardFieldCard, startAddField, toggleProv,
     startAddVocabSource, addFilesToSource, removeFileFromSource, downloadVocabFile, toggleSourceFieldAI, setVocabIngestionField, setVocabLabelField, setVocabBadgeField, syncVocabSource, syncAllVocab, cancelVocabSync, flushVocabSource, flushAllVocab, removeVocabSource, toggleVocab, updateVocabName, reorderVocab, saveVocabCard, discardVocabCard, ensureVocabTermsLoaded, setVocabNetCount, setVocabShortlistCount, setValidationEnabled,
-    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, setProvAuthHeader, setProvBodyTemplate, toggleProvKey, testConn, reorderProv, deleteProv, setActiveProv, saveProvCard, discardProvCard,
+    startAddProv, setProvF, setProvModel, setProvApiFormat, setProvThinking, setProvAuthHeader, setProvBodyTemplate, setProvBodyKind, setProvFormFields, toggleProvKey, testConn, reorderProv, deleteProv, setActiveProv, saveProvCard, discardProvCard,
     toggleEmbProv, startAddEmbProv, setEmbProvF, setEmbProvModel, setEmbProvApiFormat, toggleEmbProvKey, testEmbConn, reorderEmbProv, deleteEmbProv, setActiveEmbProv, saveEmbProvCard, discardEmbProvCard,
     toggleAF, reorderAF, updateAF, removeAF, startAddAF, saveArtefactCard, discardArtefactCard, updateArtefactAnalysisSystemPromptInstruction, saveArtefactAnalysisSystemPromptInstruction, discardArtefactAnalysisSystemPromptInstruction, setPromptEditing, overridePrompt,
     exportSettings, importSettings,
