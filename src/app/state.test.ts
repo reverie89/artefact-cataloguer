@@ -341,6 +341,7 @@ describe("reducer row removal", () => {
       values: ["iron chain", "mirror"],
       listName: "",
       similarity: null,
+      auto: true,
     });
   });
 
@@ -358,7 +359,7 @@ describe("reducer row removal", () => {
       status: "done",
       ai: { Material: [{ value: "clay", similarity: 0.8 }] },
     });
-    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8 });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8, auto: true });
   });
 
   it("SET_ROW_STATUS records only the picked suggestion on a 1-component field — alternates are dropdown choices", () => {
@@ -381,7 +382,7 @@ describe("reducer row removal", () => {
         ],
       },
     });
-    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "wood (plant material)", values: ["wood (plant material)"], listName: "AI", similarity: 0.61 });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "wood (plant material)", values: ["wood (plant material)"], listName: "AI", similarity: 0.61, auto: true });
     // The alternates stay available as swap choices in the dropdown.
     expect(next.aiResults.u1.Material).toHaveLength(3);
   });
@@ -412,6 +413,102 @@ describe("reducer row removal", () => {
       values: ["wood (plant material)", "rattan"],
       listName: "",
       similarity: null,
+      auto: true,
+    });
+  });
+
+  it("SET_ROW_STATUS replaces an auto-seeded selection with the fresh picks on a re-run", () => {
+    // Regression: lowering a field's maxComponents and retrying kept showing
+    // the earlier run's answers, because the seeding guard skipped any field
+    // that already had a selection.
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+      fieldSelections: {
+        u1_m1: { source: "multi", value: "iron | oak | clay", values: ["iron", "oak", "clay"], listName: "", similarity: null, auto: true },
+      },
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: { Material: [{ value: "clay", similarity: 0.8 }] },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "ai", value: "clay", values: ["clay"], listName: "AI", similarity: 0.8, auto: true });
+  });
+
+  it("SET_ROW_STATUS keeps a user-made selection on a re-run", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+      fieldSelections: {
+        u1_m1: { source: "vocab", value: "clay", values: ["clay"], listName: "AAT", similarity: 0.7 },
+      },
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: { Material: [{ value: "oak", similarity: 0.9 }] },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({ source: "vocab", value: "clay", values: ["clay"], listName: "AAT", similarity: 0.7 });
+  });
+
+  it("SET_ROW_STATUS records nothing when validation matched nothing — explicitly unpicked alternates never auto-record", () => {
+    // Regression: an all-unpicked payload (validation matched nothing) was
+    // misread as a legacy no-flag payload, recording every alternate as the
+    // answer — "3 selected" at any maxComponents setting.
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: {
+        Material: [
+          { value: "leaf-shaped", similarity: 0.46, picked: false },
+          { value: "bell-shaped", similarity: 0.45, picked: false },
+          { value: "L-shaped", similarity: 0.43, picked: false },
+        ],
+      },
+    });
+    expect(next.fieldSelections.u1_m1).toBeUndefined();
+    // The alternates stay available as swap choices in the dropdown.
+    expect(next.aiResults.u1.Material).toHaveLength(3);
+  });
+
+  it("SET_ROW_STATUS keeps the legacy record-everything behavior for payloads carrying no picked flags", () => {
+    const material: CatalogueField = { id: "m1", name: "Material", type: "vocab", layout: "row", prompt: "", vocabSources: [], maxComponents: 1 };
+    const settings: Settings = { ...initialState.settings, fields: [material] };
+    const populated: typeof initialState = {
+      ...initialState,
+      settings,
+      results: [{ uid: "u1", fileId: "f1", sourceName: "a.xlsx", status: "processing" as const, record: {} }],
+    };
+    const next = reducer(populated, {
+      type: "SET_ROW_STATUS",
+      uid: "u1",
+      status: "done",
+      ai: { Material: [{ value: "clay", similarity: 0.8 }, { value: "oak", similarity: 0.7 }] },
+    });
+    expect(next.fieldSelections.u1_m1).toEqual({
+      source: "multi",
+      value: "clay | oak",
+      values: ["clay", "oak"],
+      listName: "",
+      similarity: null,
+      auto: true,
     });
   });
 });

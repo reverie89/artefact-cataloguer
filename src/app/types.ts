@@ -280,6 +280,11 @@ export interface FieldSelection {
   values: string[];
   listName: string;
   similarity: number | null;
+  /** Set only on selections seeded from AI results — a re-run replaces these
+   *  with the fresh picks. Selections without the flag are user-owned and
+   *  never overwritten by a re-run (`source` can't mark user-made picks:
+   *  re-picking an AI term is source "ai" too). */
+  auto?: boolean;
 }
 
 export type Screen = "main" | "settings";

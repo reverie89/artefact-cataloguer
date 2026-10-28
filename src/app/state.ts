@@ -524,18 +524,24 @@ export function reducer(state: AppState, action: Action): AppState {
         for (const field of state.settings.fields) {
           if (field.type !== "vocab") continue;
           const key = `${action.uid}_${field.id}`;
-          if (fieldSelections[key]) continue;
+          // A re-run refreshes auto-seeded selections with the fresh picks; a
+          // selection the user made or touched (no `auto` flag) is never
+          // overwritten.
+          if (fieldSelections[key] && !fieldSelections[key].auto) continue;
           const sugs = action.ai[field.name];
           if (!sugs || sugs.length === 0) continue;
           // Only the picked suggestions are recorded — `picked: false`
           // alternates are swap choices offered in the field's dropdown,
-          // never auto-selected. Legacy payloads without the flag behave
-          // exactly as before (every suggestion counts as picked).
-          const rec = sugs.filter((s) => s.picked !== false);
-          const base = rec.length > 0 ? rec : sugs;
+          // never auto-selected. Only a payload with no flags at all (a
+          // pre-`picked` backend) counts every suggestion; an explicit
+          // all-unpicked payload (validation matched nothing) records
+          // nothing — the field stays unanswered for a manual pick.
+          const hasFlags = sugs.some((s) => s.picked !== undefined);
+          const base = hasFlags ? sugs.filter((s) => s.picked !== false) : sugs;
+          if (base.length === 0) continue;
           additions[key] = base.length === 1
-            ? { source: "ai", value: base[0].value, values: [base[0].value], listName: "AI", similarity: base[0].similarity ?? null }
-            : multiSelection(base.map((s) => s.value));
+            ? { source: "ai", value: base[0].value, values: [base[0].value], listName: "AI", similarity: base[0].similarity ?? null, auto: true }
+            : { ...multiSelection(base.map((s) => s.value)), auto: true };
         }
         if (Object.keys(additions).length > 0) {
           fieldSelections = { ...fieldSelections, ...additions };
